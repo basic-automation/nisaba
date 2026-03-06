@@ -1,0 +1,50 @@
+[general]
+sync_schedule = "0 */5 * * * *"    # Every 5 minutes
+log_level = "info"
+max_retries = 3
+
+[database]
+path = "./nisaba.db"
+
+[ebay]
+enabled = true
+client_id = ""
+client_secret = ""
+redirect_uri = "https://localhost:8443/ebay/callback"
+environment = "sandbox"   # or "production"
+
+[squarespace]
+enabled = true
+api_key = ""
+
+[xmrbazaar]
+enabled = true
+username = ""
+password = ""
+base_url = "https://xmrbazaar.com"
+monero_address = ""
+
+[xmrbazaar.endpoints]
+login = { method = "POST", path = "/login/" }
+my_listings = { method = "GET", path = "/my-listings/" }
+edit_listing = { method = "POST", path = "/edit-listing/{id}/" }
+
+[amazon]
+enabled = false
+client_id = ""                            # LWA Client ID from Seller Central Developer Console
+client_secret = ""                        # LWA Client Secret
+refresh_token = ""                        # Obtained after OAuth authorization
+seller_id = ""                            # Your Amazon Seller ID
+region = "NA"                             # "NA", "EU", or "FE"
+marketplace_ids = ["ATVPDKIKX0DER"]       # US marketplace; add more as needed
+
+# Products are NOT configured here — they're managed via the TUI's
+# Products tab (import wizard + mapping editor) and stored in the database.
+# This keeps config.toml focused on platform credentials and sync settings.
+
+[alerts]
+default_low_stock_threshold = 5    # Alert when quantity <= this (overridable per product in TUI)
+
+[company]
+enabled = false                    # Enable P2P company sync via Tor
+sync_interval_secs = 120           # P2P sync interval (seconds)

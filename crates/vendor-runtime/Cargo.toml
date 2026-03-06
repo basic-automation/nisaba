@@ -1,0 +1,15 @@
+[package]
+name = "nisaba-vendor-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+deno_core = { workspace = true }
+deno_ast = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+deno_error = "0.7"

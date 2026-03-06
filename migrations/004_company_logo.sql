@@ -1,0 +1,5 @@
+-- Migration 004: Company logo support
+-- Adds logo (base64 data URL) and logo_updated_at to company table (company DBs)
+-- Adds logo column to company_registry table (app DB)
+-- Actual ALTER TABLE statements are executed in Rust migration code
+-- since SQLite doesn't support IF NOT EXISTS for ALTER TABLE.

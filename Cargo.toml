@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/platform-ebay",
+    "crates/platform-squarespace",
+    "crates/platform-xmrbazaar",
+    "crates/platform-amazon",
+    "crates/p2p",
+    "crates/vendor-runtime",
+    "crates/tauri-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+nisaba-core = { path = "crates/core" }
+nisaba-ebay = { path = "crates/platform-ebay" }
+nisaba-squarespace = { path = "crates/platform-squarespace" }
+nisaba-xmrbazaar = { path = "crates/platform-xmrbazaar" }
+nisaba-amazon = { path = "crates/platform-amazon" }
+nisaba-p2p = { path = "crates/p2p" }
+nisaba-vendor-runtime = { path = "crates/vendor-runtime" }
+
+deno_core = "0.389"
+deno_ast = { version = "0.53", features = ["transpiling"] }
+
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", features = ["cookies", "json", "multipart", "form", "rustls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.0"
+figment = { version = "0.10", features = ["toml", "env"] }
+turso = "0.5.0"
+oauth2 = "5"
+scraper = "0.25"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+quick-xml = { version = "0.39", features = ["serialize"] }
+axum = "0.8"
+onyums = "0.2.5"
+artiqwest = "0.3.0"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+keyring = { version = "3", features = ["sync-secret-service", "windows-native", "apple-native"] }
+base64 = "0.22"

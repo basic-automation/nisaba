@@ -1,0 +1,17 @@
+[package]
+name = "nisaba-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nisaba-core = { workspace = true }
+nisaba-ebay = { workspace = true }
+nisaba-squarespace = { workspace = true }
+nisaba-xmrbazaar = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+tokio-cron-scheduler = "0.13"
+clap = { version = "4", features = ["derive"] }

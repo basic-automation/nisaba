@@ -1,0 +1,21 @@
+[package]
+name = "nisaba-p2p"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nisaba-core = { workspace = true }
+
+axum = { workspace = true }
+onyums = { workspace = true }
+artiqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+http = "1"
+turso = { workspace = true }
