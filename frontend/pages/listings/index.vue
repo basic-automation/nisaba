@@ -525,7 +525,7 @@ function formatPrice(price: number | null): string {
 
     <!-- Status line -->
     <div class="flex items-center gap-3 text-[11px] text-muted/30 mb-6 shrink-0">
-      <template v-if="platformFetched[activePlatform] && !platformError[activePlatform]">
+      <template v-if="platformFetched[activePlatform] && groupedListings.length > 0">
         <span>{{ groupedListings.length }} product lines ({{ filteredPlatformListings.length }} listings)</span>
         <span v-if="importSearch">matching "{{ importSearch }}"</span>
         <span>&middot;</span>
@@ -535,19 +535,25 @@ function formatPrice(price: number | null): string {
 
     <!-- Content area (scrollable) -->
     <div class="flex-1 overflow-auto min-h-0 -mr-6 pr-6">
-      <!-- Loading -->
-      <div v-if="platformLoading[activePlatform]" class="py-16 text-sm text-muted/40">
+      <!-- Loading (only show full-screen loader when we have NO cached listings) -->
+      <div v-if="platformLoading[activePlatform] && !groupedListings.length" class="py-16 text-sm text-muted/40">
         Loading {{ platforms.find(p => p.key === activePlatform)?.label }} listings...
       </div>
 
-      <!-- Error -->
-      <div v-else-if="platformError[activePlatform]" class="py-8">
-        <p class="text-sm text-red-400/80">{{ platformError[activePlatform] }}</p>
-        <button class="text-xs text-accent mt-2 hover:text-accent/80" @click="fetchPlatformListings(activePlatform)">Retry</button>
+      <!-- Background-refresh indicator (shown when refreshing with cached listings visible) -->
+      <div v-if="platformLoading[activePlatform] && groupedListings.length > 0" class="mb-3 text-[11px] text-muted/30 animate-pulse">
+        Refreshing listings...
+      </div>
+
+      <!-- Error banner (non-blocking — shown above cached listings if available) -->
+      <div v-if="platformError[activePlatform]" class="mb-4 flex items-center gap-3 px-3 py-2 rounded-md bg-red-500/5 border border-red-400/15">
+        <p class="text-sm text-red-400/80 flex-1">{{ platformError[activePlatform] }}</p>
+        <button class="text-xs text-accent hover:text-accent/80 shrink-0" @click="fetchPlatformListings(activePlatform)">Retry</button>
+        <button class="text-xs text-muted/40 hover:text-muted shrink-0" @click="platformError[activePlatform] = ''">Dismiss</button>
       </div>
 
       <!-- Grouped listing cards -->
-      <div v-else-if="groupedListings.length > 0" class="listing-grid">
+      <div v-if="groupedListings.length > 0" class="listing-grid">
         <template v-for="group in groupedListings" :key="group.key">
           <!-- Standalone item (no group_key, single variant) -->
           <GroundGlass
@@ -765,13 +771,15 @@ function formatPrice(price: number | null): string {
         </template>
       </div>
 
-      <!-- Empty states -->
-      <div v-else-if="importSearch && (platformListings[activePlatform]?.length ?? 0) > 0" class="py-16 text-sm text-muted/40">
-        No listings match "{{ importSearch }}".
-      </div>
-      <div v-else-if="platformFetched[activePlatform]" class="py-16 text-sm text-muted/40">
-        No listings found on {{ platforms.find(p => p.key === activePlatform)?.label }}.
-      </div>
+      <!-- Empty states (only when not loading and no listings to show) -->
+      <template v-if="!platformLoading[activePlatform] && groupedListings.length === 0">
+        <div v-if="importSearch && (platformListings[activePlatform]?.length ?? 0) > 0" class="py-16 text-sm text-muted/40">
+          No listings match "{{ importSearch }}".
+        </div>
+        <div v-else-if="platformFetched[activePlatform] && !platformError[activePlatform]" class="py-16 text-sm text-muted/40">
+          No listings found on {{ platforms.find(p => p.key === activePlatform)?.label }}.
+        </div>
+      </template>
     </div>
 
     <!-- Link to Product Dialog -->
