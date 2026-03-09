@@ -161,7 +161,7 @@ const manualSku = ref('')
 const browseSearch = ref('')
 const mappingVariantId = ref<string | null>(null)
 
-onMounted(async () => {
+async function initProductPage() {
   if (!companiesInitialized.value) return
   product.value = await getProduct(productId)
   productLoading.value = false
@@ -177,18 +177,45 @@ onMounted(async () => {
   if (mappings.value.length > 0) {
     fetchComparison()
   }
-})
+}
+
+onMounted(initProductPage)
+watch(companiesInitialized, initProductPage)
 
 function getVendorStockForVariant(variantId: string): number | null {
+  // Direct match first
   const vl = vendorListings.value.find(v => v.variant_id === variantId)
-  return vl?.quantity ?? null
+  if (vl?.quantity != null) return vl.quantity
+  // Fallback: look for attribute-equivalent variants (bridges vendor/platform duplicates)
+  const target = variants.value.find(v => v.id === variantId)
+  if (!target || Object.keys(target.attributes).length === 0) return null
+  const tAttrs = new Map(
+    Object.entries(target.attributes).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+  )
+  for (const v of variants.value) {
+    if (v.id === variantId) continue
+    const vAttrs = new Map(
+      Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
+    )
+    if (vAttrs.size !== tAttrs.size) continue
+    let match = true
+    for (const [key, val] of tAttrs) {
+      if (vAttrs.get(key) !== val) { match = false; break }
+    }
+    if (match) {
+      const eq = vendorListings.value.find(vl => vl.variant_id === v.id)
+      if (eq?.quantity != null) return eq.quantity
+    }
+  }
+  return null
 }
 
 async function loadVendorListings() {
   try {
     vendorListings.value = await invoke<VendorListingForProduct[]>('get_vendor_listings_for_product', { productId })
+    console.log('[product] vendor listings loaded:', vendorListings.value.length, 'for product', productId)
   } catch (e) {
-    console.warn('[product] get_vendor_listings_for_product failed:', e)
+    console.error('[product] get_vendor_listings_for_product FAILED:', e)
   }
 }
 
@@ -413,12 +440,29 @@ async function fetchPlatformListings() {
   }
 }
 
-async function resolveVariantForMapping(sku?: string): Promise<string> {
+async function resolveVariantForMapping(sku?: string, attrs?: Record<string, string>): Promise<string> {
   // Use explicitly selected variant
   if (mappingVariantId.value) return mappingVariantId.value
   // Try to match by SKU
   if (sku) {
     const match = variants.value.find(v => v.sku.toLowerCase() === sku.toLowerCase())
+    if (match) return match.id
+  }
+  // Try to match by variant attributes (e.g., Color + Size)
+  if (attrs && Object.keys(attrs).length > 0) {
+    const normalized = new Map(
+      Object.entries(attrs).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+    )
+    const match = variants.value.find(v => {
+      const vAttrs = new Map(
+        Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
+      )
+      if (vAttrs.size === 0) return false
+      for (const [key, val] of normalized) {
+        if (vAttrs.get(key) !== val) return false
+      }
+      return true
+    })
     if (match) return match.id
   }
   // Single variant — use it
@@ -427,11 +471,11 @@ async function resolveVariantForMapping(sku?: string): Promise<string> {
 }
 
 async function linkListing(listing: PlatformListing) {
-  const variantId = await resolveVariantForMapping(listing.sku ?? undefined)
+  const variantId = await resolveVariantForMapping(listing.sku ?? undefined, listing.variant_attributes ?? undefined)
   await createMapping(productId, addMappingPlatform.value, listing.platform_item_id, variantId, listing.sku ?? undefined)
   await loadMappings()
   showAddMapping.value = false
-  await fetchComparison()
+  await Promise.all([fetchComparison(), loadVendorListings()])
 }
 
 async function linkManual() {
@@ -440,23 +484,54 @@ async function linkManual() {
   await createMapping(productId, addMappingPlatform.value, manualItemId.value.trim(), variantId, manualSku.value.trim() || undefined)
   await loadMappings()
   showAddMapping.value = false
-  await fetchComparison()
+  await Promise.all([fetchComparison(), loadVendorListings()])
 }
 
 // refreshAndCache is now just fetchComparison — caching is built in
 const refreshAndCache = fetchComparison
 
+// Collect all variant IDs that share the same attributes as the selected variant.
+// This bridges vendor-imported variants (which hold vendor_data) with platform-created
+// duplicates (which hold platform_mappings) so both listings appear side-by-side.
+const equivalentVariantIds = computed<Set<string>>(() => {
+  if (!selectedVariantId.value) return new Set()
+  const selected = variants.value.find(v => v.id === selectedVariantId.value)
+  if (!selected || Object.keys(selected.attributes).length === 0) {
+    return new Set([selectedVariantId.value])
+  }
+  const selAttrs = new Map(
+    Object.entries(selected.attributes).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+  )
+  const ids = new Set<string>()
+  for (const v of variants.value) {
+    if (v.id === selectedVariantId.value) { ids.add(v.id); continue }
+    const vAttrs = new Map(
+      Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
+    )
+    if (vAttrs.size !== selAttrs.size) continue
+    let match = true
+    for (const [key, val] of selAttrs) {
+      if (vAttrs.get(key) !== val) { match = false; break }
+    }
+    if (match) ids.add(v.id)
+  }
+  return ids
+})
+
 // Variant-scoped listing filters
 const filteredVendorListings = computed(() => {
   if (!selectedVariantId.value) return vendorListings.value
-  return vendorListings.value.filter(vl => vl.variant_id === selectedVariantId.value)
+  const eqIds = equivalentVariantIds.value
+  // Show vendor listings that match any equivalent variant OR have no variant_id (product-level)
+  return vendorListings.value.filter(vl => !vl.variant_id || eqIds.has(vl.variant_id))
 })
 
 const filteredComparisonListings = computed(() => {
   if (!selectedVariantId.value) return comparisonListings.value
+  const eqIds = equivalentVariantIds.value
   const matchingItemIds = new Set(
     mappings.value
-      .filter(m => m.variant_id === selectedVariantId.value)
+      .filter(m => m.variant_id != null && eqIds.has(m.variant_id))
       .map(m => `${m.platform}:${m.platform_item_id}`)
   )
   return comparisonListings.value.filter(l =>
@@ -467,17 +542,39 @@ const filteredComparisonListings = computed(() => {
 // Per-platform price summary: range when no variant selected, exact when one is
 const priceSummary = computed(() => {
   const listings = filteredComparisonListings.value.filter(l => l.price)
-  if (listings.length === 0) return []
 
-  const byPlatform = new Map<Platform, { min: number; max: number; currency: string }>()
+  const byPlatform = new Map<string, { label: string; platform?: Platform; min: number; max: number; currency: string }>()
+
+  // Vendor prices
+  for (const vl of filteredVendorListings.value) {
+    if (vl.price == null) continue
+    const key = `vendor:${vl.plugin_name}`
+    const existing = byPlatform.get(key)
+    if (existing) {
+      existing.min = Math.min(existing.min, vl.price)
+      existing.max = Math.max(existing.max, vl.price)
+    } else {
+      byPlatform.set(key, {
+        label: vl.plugin_name,
+        min: vl.price,
+        max: vl.price,
+        currency: vl.currency ?? 'USD',
+      })
+    }
+  }
+
+  // Platform prices
   for (const l of listings) {
     if (!l.price) continue
-    const existing = byPlatform.get(l.platform)
+    const key = `platform:${l.platform}`
+    const existing = byPlatform.get(key)
     if (existing) {
       existing.min = Math.min(existing.min, l.price.amount)
       existing.max = Math.max(existing.max, l.price.amount)
     } else {
-      byPlatform.set(l.platform, {
+      byPlatform.set(key, {
+        label: l.platform,
+        platform: l.platform,
         min: l.price.amount,
         max: l.price.amount,
         currency: l.price.currency,
@@ -485,7 +582,8 @@ const priceSummary = computed(() => {
     }
   }
 
-  return [...byPlatform.entries()].map(([platform, { min, max, currency }]) => ({
+  return [...byPlatform.values()].map(({ label, platform, min, max, currency }) => ({
+    label,
     platform,
     min,
     max,
@@ -493,6 +591,28 @@ const priceSummary = computed(() => {
     isRange: min !== max,
   }))
 })
+
+// Get variant attributes for a platform listing (from mapping → variant)
+function getListingAttributes(listing: FullListing): [string, string][] {
+  // Check if variant_id is set and look up the variant's attributes
+  if (listing.variant_id) {
+    const v = variants.value.find(vr => vr.id === listing.variant_id)
+    if (v && Object.keys(v.attributes).length > 0) {
+      return Object.entries(v.attributes)
+    }
+  }
+  // Also check equivalent variants via mappings
+  const mapping = mappings.value.find(
+    m => m.platform === listing.platform && m.platform_item_id === listing.platform_item_id,
+  )
+  if (mapping?.variant_id) {
+    const v = variants.value.find(vr => vr.id === mapping.variant_id)
+    if (v && Object.keys(v.attributes).length > 0) {
+      return Object.entries(v.attributes)
+    }
+  }
+  return []
+}
 
 function formatTimeAgo(isoTimestamp: string): string {
   const now = Date.now()
@@ -631,15 +751,16 @@ function formatTimeAgo(isoTimestamp: string): string {
               <p v-else class="text-xs text-muted/40 py-2">No variants yet.</p>
             </div>
 
-            <!-- Per-platform prices (range when no variant selected, exact when one is) -->
+            <!-- Per-source prices (vendor + platform; range when no variant selected, exact when one is) -->
             <div class="space-y-3 mb-10">
               <template v-if="priceSummary.length > 0">
                 <div
                   v-for="ps in priceSummary"
-                  :key="ps.platform"
+                  :key="ps.label"
                   class="flex items-center gap-3"
                 >
-                  <PlatformBadge :platform="ps.platform" />
+                  <PlatformBadge v-if="ps.platform" :platform="ps.platform" />
+                  <VendorBadge v-else :name="ps.label" />
                   <span v-if="ps.isRange" class="text-2xl font-semibold text-foreground tabular-nums">
                     {{ ps.min.toFixed(2) }} – {{ ps.max.toFixed(2) }}
                   </span>
@@ -807,7 +928,7 @@ function formatTimeAgo(isoTimestamp: string): string {
             :class="{ 'comparison-card--divider': idx > 0 }"
           >
             <div class="card-header">
-              <span class="text-[11px] font-medium text-accent/80">{{ vl.plugin_name }}</span>
+              <VendorBadge :name="vl.plugin_name" />
               <span class="text-[10px] text-muted/40 font-mono">{{ vl.vendor_item_id }}</span>
               <span class="text-[10px] text-muted/30 ml-auto">{{ formatTimeAgo(vl.fetched_at) }}</span>
             </div>
@@ -818,10 +939,17 @@ function formatTimeAgo(isoTimestamp: string): string {
                 <p class="text-sm text-foreground">{{ vl.title }}</p>
               </div>
 
+              <div v-if="vl.extras?.description">
+                <p class="label-sm mb-1">Description</p>
+                <div class="desc-box">
+                  <p class="whitespace-pre-wrap">{{ vl.extras.description }}</p>
+                </div>
+              </div>
+
               <div class="grid grid-cols-2 gap-3 text-xs">
-                <div v-if="vl.quantity != null">
+                <div>
                   <p class="label-sm mb-1">Quantity</p>
-                  <p class="text-foreground font-medium">{{ vl.quantity }}</p>
+                  <p class="text-foreground font-medium">{{ vl.quantity ?? 0 }}</p>
                 </div>
                 <div v-if="vl.price != null">
                   <p class="label-sm mb-1">Price</p>
@@ -834,8 +962,10 @@ function formatTimeAgo(isoTimestamp: string): string {
               </div>
 
               <div v-if="vl.image_url">
-                <p class="label-sm mb-1.5">Image</p>
-                <img :src="resolveThumb(vl.image_url) ?? vl.image_url" :alt="vl.title" class="w-10 h-10 object-cover" loading="lazy">
+                <p class="label-sm mb-1.5">Photos (1)</p>
+                <div class="flex gap-1 flex-wrap">
+                  <img :src="resolveThumb(vl.image_url) ?? vl.image_url" :alt="vl.title" class="w-10 h-10 object-cover" loading="lazy">
+                </div>
               </div>
 
               <div v-if="Object.keys(vl.variant_attributes).length > 0">
@@ -848,10 +978,9 @@ function formatTimeAgo(isoTimestamp: string): string {
                   >{{ key }}: {{ val }}</span>
                 </div>
               </div>
-
-              <div v-if="vl.url">
-                <a :href="vl.url" target="_blank" rel="noopener" class="text-[11px] text-accent/60 hover:text-accent transition-colors">View source</a>
-              </div>
+            </div>
+            <div v-if="vl.url" class="px-5 pb-5 pt-2">
+              <a :href="vl.url" target="_blank" rel="noopener" class="block w-full text-center text-[11px] text-accent/60 hover:text-accent transition-colors py-1.5 border border-accent/20 rounded">View source</a>
             </div>
           </div>
 
@@ -913,6 +1042,17 @@ function formatTimeAgo(isoTimestamp: string): string {
                   <span v-if="listing.photos.length > 6" class="w-10 h-10 flex items-center justify-center text-[10px] text-muted bg-background/60">
                     +{{ listing.photos.length - 6 }}
                   </span>
+                </div>
+              </div>
+
+              <div v-if="getListingAttributes(listing).length > 0">
+                <p class="label-sm mb-1">Attributes</p>
+                <div class="flex gap-2 flex-wrap">
+                  <span
+                    v-for="[key, val] in getListingAttributes(listing)"
+                    :key="key"
+                    class="text-[10px] text-muted/60"
+                  >{{ key }}: {{ val }}</span>
                 </div>
               </div>
             </div>

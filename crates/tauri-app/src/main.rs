@@ -115,7 +115,14 @@ fn main() {
                 let mut companies = HashMap::new();
 
                 for entry in &registry {
-                    match init_company_context(&entry.id, &entry.name, &entry.role, &entry.db_path, &config, handle.clone()).await {
+                    // Share app_db only when the company uses the exact same file.
+                    // Otherwise open the company's own database.
+                    let shared = if entry.db_path == config.database.path {
+                        Some(&app_db)
+                    } else {
+                        None
+                    };
+                    match init_company_context(&entry.id, &entry.name, &entry.role, &entry.db_path, &config, handle.clone(), shared).await {
                         Ok(ctx) => {
                             info!(company = %entry.name, id = %entry.id, "Company initialized");
                             companies.insert(entry.id.clone(), ctx);
@@ -142,7 +149,7 @@ fn main() {
                         let _ = app_db.register_company(&id, &name, &role, &secret_hash, &db_path).await;
                         let _ = app_db.set_app_setting("active_company_id", &id).await;
 
-                        match init_company_context(&id, &name, &role, &db_path, &config, handle.clone()).await {
+                        match init_company_context(&id, &name, &role, &db_path, &config, handle.clone(), Some(&app_db)).await {
                             Ok(ctx) => {
                                 companies.insert(id.clone(), ctx);
                             }
@@ -295,6 +302,11 @@ fn main() {
 }
 
 /// Initialize a single company's runtime context.
+///
+/// When `shared_db` is provided, the existing DB instance is reused directly
+/// to avoid opening the same turso file twice (which causes MVCC checkpoint
+/// corruption). Callers must only pass `Some` when the company uses the same
+/// database file as the app database.
 async fn init_company_context(
     id: &str,
     name: &str,
@@ -302,16 +314,22 @@ async fn init_company_context(
     db_path: &str,
     config: &AppConfig,
     handle: tauri::AppHandle,
+    shared_db: Option<&Arc<Db>>,
 ) -> Result<CompanyContext, String> {
-    // Open company DB
-    let db = Arc::new(
-        Db::open(db_path)
+    let db = if let Some(existing) = shared_db {
+        existing.clone()
+    } else {
+        let new_db = Arc::new(
+            Db::open(db_path)
+                .await
+                .map_err(|e| format!("Failed to open company DB: {e}"))?,
+        );
+        new_db
+            .migrate()
             .await
-            .map_err(|e| format!("Failed to open company DB: {e}"))?,
-    );
-    db.migrate()
-        .await
-        .map_err(|e| format!("Failed to migrate company DB: {e}"))?;
+            .map_err(|e| format!("Failed to migrate company DB: {e}"))?;
+        new_db
+    };
 
     // Load secret from keyring and decrypt company config
     let company_config = match crypto::load_secret_from_keyring(id) {

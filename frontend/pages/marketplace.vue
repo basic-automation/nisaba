@@ -40,7 +40,7 @@ const tabItems = computed(() => {
 
 // Role check
 const isAdmin = ref(false)
-onMounted(async () => {
+async function initMarketplace() {
   if (!companiesInitialized.value) return
   await fetchPlugins()
   try {
@@ -48,7 +48,10 @@ onMounted(async () => {
     const company = await invoke<any>('get_company')
     isAdmin.value = company?.role === 'admin'
   } catch { /* ignore */ }
-})
+}
+
+onMounted(initMarketplace)
+watch(companiesInitialized, initMarketplace)
 
 // Available = approved but not installed
 const availablePlugins = computed(() =>

@@ -69,7 +69,7 @@ async fn compute_platform_sales(
     product_id: &str,
     window: TimeWindow,
 ) -> Result<Vec<(Platform, i64)>, SyncError> {
-    let conn = db.connect()?;
+    let conn = db.connect().await?;
 
     let (sql, use_interval) = match window.sql_interval() {
         Some(_interval) => (

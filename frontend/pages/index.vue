@@ -11,7 +11,7 @@ const capabilitiesLoaded = ref(false)
 
 startListening()
 
-onMounted(async () => {
+async function loadDashboardData() {
   if (!companiesInitialized.value) return
   await Promise.all([
     fetchProducts(),
@@ -19,7 +19,10 @@ onMounted(async () => {
     fetchCapabilities(),
   ])
   capabilitiesLoaded.value = true
-})
+}
+
+onMounted(loadDashboardData)
+watch(companiesInitialized, loadDashboardData)
 
 const mappingCounts = ref<Record<string, number>>({})
 

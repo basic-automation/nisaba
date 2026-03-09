@@ -788,7 +788,7 @@ function stripHtml(html: string): string {
 
 const { companiesInitialized } = useCompanyContext()
 
-onMounted(async () => {
+async function initPublish() {
   if (!companiesInitialized.value) return
   try {
     const [prod, maps, vd, variantData] = await Promise.all([
@@ -900,7 +900,10 @@ onMounted(async () => {
     loading.value = false
     initialLoadComplete.value = true
   }
-})
+}
+
+onMounted(initPublish)
+watch(companiesInitialized, initPublish)
 
 // When user changes variant, auto-prefill from best available source
 watch(selectedVariant, (variant) => {

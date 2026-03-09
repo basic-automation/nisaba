@@ -44,7 +44,7 @@ const platformFetched = ref<Record<Platform, boolean>>({} as any)
 const { companiesInitialized } = useCompanyContext()
 const { ensureCached } = useImageCache()
 
-onMounted(async () => {
+async function initProducts() {
   if (!companiesInitialized.value) return
   await fetchProducts()
   // All of these are independent — run in parallel instead of sequentially.
@@ -77,7 +77,10 @@ onMounted(async () => {
     await Promise.all([fetchCachedPrices(), loadCachedPhotos(), loadCacheFreshness()])
     cacheAllProductImages()
   }
-})
+}
+
+onMounted(initProducts)
+watch(companiesInitialized, initProducts)
 
 /** Collect all known image URLs and ensure they're cached locally. */
 function cacheAllProductImages() {

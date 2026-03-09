@@ -25,7 +25,7 @@ fn to_params(p: impl turso::params::IntoParams) -> Params {
 /// - `Error` containing "conflict" — MVCC write-write conflict detected at commit
 fn is_retryable(e: &TursoError) -> bool {
     matches!(e, TursoError::Busy(_) | TursoError::BusySnapshot(_))
-        || matches!(e, TursoError::Error(msg) if msg.contains("conflict"))
+        || matches!(e, TursoError::Error(msg) if msg.contains("conflict") || msg.contains("database is locked"))
 }
 
 pub struct Db {
@@ -52,58 +52,57 @@ impl Db {
             Err(join_err) => {
                 if join_err.is_panic() {
                     tracing::warn!(
-                        "turso panicked opening {path} (likely incompatible schema), \
-                         deleting and recreating"
+                        "turso panicked opening {path} — cleaning journal files and retrying"
                     );
+                    // Delete stale journal files that may cause the panic,
+                    // but NEVER delete the main database file (contains user data).
+                    for suffix in &["-log", "-wal", "-shm"] {
+                        let journal = format!("{path}{suffix}");
+                        if std::path::Path::new(&journal).exists() {
+                            let _ = std::fs::remove_file(&journal);
+                            tracing::info!("Deleted journal file {journal}");
+                        }
+                    }
+                    Builder::new_local(path).build().await?
                 } else {
                     return Err(SyncError::DatabaseError(format!(
                         "Database open task cancelled: {join_err}"
                     )));
                 }
-
-                // Delete the incompatible database file and recreate
-                if std::path::Path::new(path).exists() {
-                    std::fs::remove_file(path).map_err(|e| {
-                        SyncError::DatabaseError(format!(
-                            "Failed to delete incompatible database at {path}: {e}"
-                        ))
-                    })?;
-                    tracing::info!("Deleted incompatible database at {path}");
-                }
-
-                Builder::new_local(path).build().await?
             }
         };
 
         let me = Self { db };
-        me.apply_pragmas().await?;
+        me.apply_db_pragmas().await?;
         Ok(me)
     }
 
-    /// Set pragmas that improve concurrency and resilience under load.
+    /// Set database-level pragmas (only needs to run once per database file).
     ///
-    /// - `journal_mode = mvcc`: Turso's MVCC mode allows multiple concurrent writers
-    ///   with optimistic conflict detection at commit time (replaces WAL's single-writer lock)
-    /// - `busy_timeout = 5000`: wait up to 5 seconds for locks instead of failing immediately
-    /// - `synchronous = NORMAL`: safe with MVCC/WAL, reduces fsync overhead
-    async fn apply_pragmas(&self) -> Result<(), SyncError> {
+    /// - `journal_mode = wal`: WAL mode allows concurrent reads during writes
+    ///   and handles DDL safely (turso's MVCC mode crashes during DDL checkpoints)
+    async fn apply_db_pragmas(&self) -> Result<(), SyncError> {
         let conn = self.db.connect()?;
-        conn.pragma_update("journal_mode", "'mvcc'").await
-            .map_err(|e| SyncError::DatabaseError(format!("Failed to set journal_mode=mvcc: {e}")))?;
-        conn.execute("PRAGMA busy_timeout = 5000", ()).await?;
-        conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
-        debug!("Applied database pragmas (journal_mode=mvcc, busy_timeout=5000, synchronous=NORMAL)");
+        conn.pragma_update("journal_mode", "'wal'").await
+            .map_err(|e| SyncError::DatabaseError(format!("Failed to set journal_mode=wal: {e}")))?;
+        debug!("Applied database pragmas (journal_mode=wal, busy_timeout=5000, synchronous=NORMAL)");
         Ok(())
     }
 
-    /// Get a connection from the pool.
-    pub fn connect(&self) -> Result<Connection, SyncError> {
-        Ok(self.db.connect()?)
+    /// Get a connection with per-connection pragmas applied.
+    ///
+    /// Every connection gets `busy_timeout` and `synchronous` set because these
+    /// are per-connection pragmas in SQLite that don't persist across connections.
+    pub async fn connect(&self) -> Result<Connection, SyncError> {
+        let conn = self.db.connect()?;
+        conn.execute("PRAGMA busy_timeout = 5000", ()).await?;
+        conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
+        Ok(conn)
     }
 
     /// Execute a single write statement under a MVCC concurrent transaction.
     ///
-    /// Uses `BEGIN CONCURRENT` so multiple callers can write simultaneously
+    /// Uses `BEGIN IMMEDIATE` so multiple callers can write simultaneously
     /// without blocking each other. Retries automatically on busy/conflict errors
     /// (up to 5 attempts with yield between retries).
     pub async fn execute_write(
@@ -116,10 +115,16 @@ impl Db {
             .into_params()
             .map_err(|e| SyncError::DatabaseError(format!("Param conversion: {e}")))?;
 
-        let conn = self.connect()?;
-        for _attempt in 0..5u32 {
-            conn.execute("BEGIN CONCURRENT", ()).await
-                .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+        let conn = self.connect().await?;
+        for attempt in 0..5u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => {}
+                Err(ref e) if is_retryable(e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    continue;
+                }
+                Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
+            }
 
             let result = conn.execute(sql, params.clone()).await
                 .and(conn.execute("COMMIT", ()).await);
@@ -128,7 +133,7 @@ impl Db {
                 Ok(n) => return Ok(n),
                 Err(ref e) if is_retryable(e) => {
                     let _ = conn.execute("ROLLBACK", ()).await;
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
                 }
                 Err(e) => {
                     let _ = conn.execute("ROLLBACK", ()).await;
@@ -141,13 +146,19 @@ impl Db {
 
     /// Execute multiple write statements atomically under a MVCC concurrent transaction.
     ///
-    /// All statements share a single `BEGIN CONCURRENT ... COMMIT` so they
-    /// either all succeed or all roll back. Retries on busy/conflict errors.
+    /// All statements share a single `BEGIN IMMEDIATE ... COMMIT` so they
+    /// either all succeed or all roll back. Retries on busy errors.
     pub async fn execute_writes(&self, stmts: &[(&str, Params)]) -> Result<(), SyncError> {
-        let conn = self.connect()?;
-        for _attempt in 0..5u32 {
-            conn.execute("BEGIN CONCURRENT", ()).await
-                .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+        let conn = self.connect().await?;
+        for attempt in 0..5u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => {}
+                Err(ref e) if is_retryable(e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    continue;
+                }
+                Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
+            }
 
             let mut ok = true;
             let mut last_err = None;
@@ -167,7 +178,7 @@ impl Db {
                     Ok(_) => return Ok(()),
                     Err(ref e) if is_retryable(e) => {
                         let _ = conn.execute("ROLLBACK", ()).await;
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
                         continue;
                     }
                     Err(e) => {
@@ -180,7 +191,7 @@ impl Db {
             let _ = conn.execute("ROLLBACK", ()).await;
             if let Some(ref e) = last_err {
                 if is_retryable(e) {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
                     continue;
                 }
                 return Err(SyncError::DatabaseError(e.to_string()));
@@ -191,7 +202,7 @@ impl Db {
 
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
     pub async fn migrate(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         let mut rows = conn.query("PRAGMA user_version", ()).await?;
         let version: i64 = if let Some(row) = rows.next().await? {
@@ -626,7 +637,7 @@ impl Db {
     // ── Products ──────────────────────────────────────────────
 
     pub async fn list_products(&self) -> Result<Vec<Product>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, canonical_sku, name, quantity, low_stock_threshold, is_tracked, created_at, updated_at, has_variants
@@ -643,7 +654,7 @@ impl Db {
     }
 
     pub async fn get_product(&self, id: &str) -> Result<Option<Product>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, canonical_sku, name, quantity, low_stock_threshold, is_tracked, created_at, updated_at, has_variants
@@ -721,7 +732,7 @@ impl Db {
     // ── Product Variants ───────────────────────────────────────
 
     pub async fn list_variants(&self, product_id: &str) -> Result<Vec<ProductVariant>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at
@@ -738,7 +749,7 @@ impl Db {
     }
 
     pub async fn get_variant(&self, id: &str) -> Result<Option<ProductVariant>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at
@@ -827,7 +838,7 @@ impl Db {
     }
 
     pub async fn recalc_product_quantity(&self, product_id: &str) -> Result<i64, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         // Step 1: Fetch each variant's on_hand_quantity and vendor stock contribution.
         // Done as a SELECT + per-row UPDATE because Turso/libSQL does not support
@@ -884,7 +895,7 @@ impl Db {
     /// Recalculate quantities for all products that have variants sourced from the given plugin.
     /// Call after toggling include_vendor_stock or after a vendor sync.
     pub async fn recalc_products_for_plugin(&self, plugin_id: &str) -> Result<usize, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT DISTINCT product_id FROM product_variants WHERE source_plugin_id = ?1",
@@ -907,7 +918,7 @@ impl Db {
     /// Called once at startup to ensure persisted product_vendor_data is applied before
     /// the sync engine begins polling platforms.
     pub async fn recalc_all_vendor_sourced_products(&self) -> Result<usize, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT DISTINCT product_id FROM product_variants WHERE source_plugin_id IS NOT NULL",
@@ -941,7 +952,7 @@ impl Db {
     }
 
     pub async fn list_all_variants(&self) -> Result<Vec<ProductVariant>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at
@@ -958,7 +969,7 @@ impl Db {
     }
 
     pub async fn get_all_variant_skus(&self) -> Result<Vec<(String, String, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, sku FROM product_variants ORDER BY product_id",
@@ -983,7 +994,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Vec<PlatformMapping>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
@@ -1000,7 +1011,7 @@ impl Db {
     }
 
     pub async fn list_all_active_mappings(&self) -> Result<Vec<PlatformMapping>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
@@ -1021,7 +1032,7 @@ impl Db {
         platform: &str,
         platform_item_id: &str,
     ) -> Result<Option<PlatformMapping>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
@@ -1070,7 +1081,7 @@ impl Db {
         product_id: &str,
         platform: &str,
     ) -> Result<Option<PlatformSnapshot>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, last_known_quantity, last_polled_at, last_pushed_at, version_tag
@@ -1145,7 +1156,7 @@ impl Db {
     }
 
     pub async fn list_recent_sync_events(&self, limit: i64) -> Result<Vec<SyncEvent>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, source_platform, target_platform, old_quantity, new_quantity, event_type, sync_cycle_id, error_message, created_at
@@ -1184,7 +1195,7 @@ impl Db {
     // ── Auth Tokens ───────────────────────────────────────────
 
     pub async fn get_auth_token(&self, platform: &str) -> Result<Option<AuthToken>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT platform, access_token, refresh_token, expires_at, cookies, updated_at
@@ -1248,7 +1259,7 @@ impl Db {
         product_id: &str,
         interval: Option<&str>,
     ) -> Result<Vec<InventoryHistoryEntry>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         let (sql, use_param) = match interval {
             Some(_interval) => (
@@ -1312,7 +1323,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Vec<ListingDescription>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT platform, platform_item_id, description_html, description_text, fetched_at
@@ -1373,7 +1384,7 @@ impl Db {
         product_id: &str,
         platform: Option<&str>,
     ) -> Result<Vec<(Platform, ListingPhoto)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         let (sql, use_platform) = match platform {
             Some(_) => (
@@ -1420,7 +1431,7 @@ impl Db {
     pub async fn get_all_product_first_photos(
         &self,
     ) -> Result<Vec<(String, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT lp.product_id, lp.url
@@ -1490,7 +1501,7 @@ impl Db {
         product_id: &str,
         interval: Option<&str>,
     ) -> Result<Vec<PricingSnapshot>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         let (sql, use_interval) = match interval {
             Some(_) => (
@@ -1535,7 +1546,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Vec<PricingSnapshot>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT ps.id, ps.product_id, ps.platform, ps.amount, ps.currency, ps.recorded_at
@@ -1569,7 +1580,7 @@ impl Db {
 
     /// Get the latest price per platform for ALL products (bulk query for product cards).
     pub async fn get_all_latest_prices(&self) -> Result<Vec<PricingSnapshot>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT ps.id, ps.product_id, ps.platform, ps.amount, ps.currency, ps.recorded_at
@@ -1624,7 +1635,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Vec<String>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT listing_json FROM cached_listings WHERE product_id = ?1",
@@ -1647,7 +1658,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Option<String>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT MAX(ts) FROM (
@@ -1672,7 +1683,7 @@ impl Db {
     pub async fn get_all_cache_freshness(
         &self,
     ) -> Result<Vec<(String, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT product_id, MAX(ts) FROM (
@@ -1698,7 +1709,7 @@ impl Db {
     // ── XMR Processed Orders (sale deduplication) ───────────
 
     pub async fn is_xmr_order_processed(&self, order_id: &str) -> Result<bool, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT 1 FROM xmr_processed_orders WHERE order_id = ?1",
@@ -1759,7 +1770,7 @@ impl Db {
     // ── Export / Import ──────────────────────────────────────
 
     pub async fn list_all_mappings(&self) -> Result<Vec<PlatformMapping>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
@@ -1776,7 +1787,7 @@ impl Db {
     }
 
     pub async fn list_all_snapshots(&self) -> Result<Vec<PlatformSnapshot>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, last_known_quantity, last_polled_at, last_pushed_at, version_tag
@@ -1801,7 +1812,7 @@ impl Db {
     }
 
     pub async fn list_xmr_processed_orders(&self) -> Result<Vec<XmrProcessedOrder>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT order_id, product_id, listing_id, quantity, processed_at
@@ -1826,7 +1837,7 @@ impl Db {
     // ── P2P Company ────────────────────────────────────────────
 
     pub async fn get_company(&self) -> Result<Option<(String, String, String, Option<String>, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT id, name, secret, our_onion, role FROM company LIMIT 1", ())
             .await?;
@@ -1891,7 +1902,7 @@ impl Db {
     // ── P2P Peers ─────────────────────────────────────────────
 
     pub async fn list_peers(&self) -> Result<Vec<(String, String, String, bool, String, Option<String>)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT onion_address, name, role, is_authorized, added_at, last_seen_at
@@ -1915,7 +1926,7 @@ impl Db {
     }
 
     pub async fn get_peer(&self, onion_address: &str) -> Result<Option<(String, String, String, bool)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT onion_address, name, role, is_authorized FROM company_peers WHERE onion_address = ?1",
@@ -2003,7 +2014,7 @@ impl Db {
     // ── P2P Sync State ────────────────────────────────────────
 
     pub async fn get_sync_state(&self, peer_address: &str) -> Result<Option<(String, Option<String>, bool, Option<String>, i64)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT peer_address, last_synced_at, last_sync_success, last_error, sync_count
@@ -2044,7 +2055,7 @@ impl Db {
     // ── P2P Meta ──────────────────────────────────────────────
 
     pub async fn get_p2p_meta(&self, key: &str) -> Result<Option<String>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT value FROM p2p_meta WHERE key = ?1", params![key])
             .await?;
@@ -2068,7 +2079,7 @@ impl Db {
     // ── Syncable Mappings (includes soft-deleted for P2P) ────
 
     pub async fn list_all_mappings_for_sync(&self) -> Result<Vec<(i64, String, String, String, Option<String>, bool, Option<String>, String, Option<String>)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id
@@ -2100,7 +2111,7 @@ impl Db {
     /// Products with has_variants=0 and no variant rows get a "Default" variant
     /// created from their canonical_sku and quantity. Then has_variants is set to 1.
     async fn migrate_always_variants(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         // Find products that have no variant rows
         let mut rows = conn
@@ -2145,7 +2156,7 @@ impl Db {
     }
 
     async fn migrate_peers_to_v2(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // Check if the old company_peers table exists
         let mut rows = conn
             .query(
@@ -2204,7 +2215,7 @@ impl Db {
     }
 
     async fn add_company_peer_id_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // Check if company table exists
         let mut rows = conn
             .query(
@@ -2244,7 +2255,7 @@ impl Db {
     }
 
     async fn add_company_logo_columns(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // Try to add columns; ignore errors if table doesn't exist or column already exists
         let _ = conn.execute_batch("ALTER TABLE company ADD COLUMN logo TEXT").await;
         let _ = conn.execute_batch("ALTER TABLE company ADD COLUMN logo_updated_at TEXT").await;
@@ -2252,7 +2263,7 @@ impl Db {
     }
 
     async fn add_registry_logo_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // Try to add column; ignore errors if table doesn't exist or column already exists
         let _ = conn.execute_batch("ALTER TABLE company_registry ADD COLUMN logo TEXT").await;
         Ok(())
@@ -2261,7 +2272,7 @@ impl Db {
     // ── Company Registry (App DB) ─────────────────────────────
 
     pub async fn list_registered_companies(&self) -> Result<Vec<CompanyRegistryEntry>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, name, role, db_path, created_at, updated_at, logo FROM company_registry ORDER BY created_at",
@@ -2302,7 +2313,7 @@ impl Db {
     }
 
     pub async fn unregister_company(&self, id: &str) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "DELETE FROM company_registry WHERE id = ?1",
             params![id],
@@ -2328,7 +2339,7 @@ impl Db {
     // ── App Settings (App DB) ─────────────────────────────────
 
     pub async fn get_app_setting(&self, key: &str) -> Result<Option<String>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT value FROM app_settings WHERE key = ?1",
@@ -2355,7 +2366,7 @@ impl Db {
     // ── Company Config (Company DB) ───────────────────────────
 
     pub async fn get_company_config(&self) -> Result<Option<(String, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT config_json, updated_at FROM company_config WHERE id = 1",
@@ -2390,7 +2401,7 @@ impl Db {
     // ── Peers V2 (with stable peer_id) ────────────────────────
 
     pub async fn list_peers_v2(&self) -> Result<Vec<(String, String, String, String, bool, String, Option<String>)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT peer_id, onion_address, name, role, is_authorized, added_at, last_seen_at
@@ -2415,7 +2426,7 @@ impl Db {
     }
 
     pub async fn get_peer_v2(&self, peer_id: &str) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT peer_id, onion_address, name, role, is_authorized FROM company_peers_v2 WHERE peer_id = ?1",
@@ -2436,7 +2447,7 @@ impl Db {
     }
 
     pub async fn get_peer_by_onion(&self, onion_address: &str) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT peer_id, onion_address, name, role, is_authorized FROM company_peers_v2 WHERE onion_address = ?1",
@@ -2475,7 +2486,7 @@ impl Db {
 
     pub async fn remove_peer_v2(&self, peer_id: &str) -> Result<(), SyncError> {
         // Read the onion address for sync state cleanup
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT onion_address FROM company_peers_v2 WHERE peer_id = ?1", params![peer_id])
             .await?;
@@ -2550,7 +2561,7 @@ impl Db {
 
     /// Get the company's own peer_id
     pub async fn get_company_peer_id(&self) -> Result<Option<String>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT peer_id FROM company LIMIT 1", ())
             .await?;
@@ -2579,7 +2590,7 @@ impl Db {
     // ── Company Logo ──────────────────────────────────────────
 
     pub async fn get_company_logo(&self) -> Result<Option<(String, String)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT logo, logo_updated_at FROM company LIMIT 1", ())
             .await?;
@@ -2616,7 +2627,7 @@ impl Db {
     // ── Vendor Plugin Registry ────────────────────────────────
 
     pub async fn list_registry_plugins(&self) -> Result<Vec<VendorPluginRow>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
@@ -2635,7 +2646,7 @@ impl Db {
     }
 
     pub async fn get_registry_plugin(&self, id: &str) -> Result<Option<VendorPluginRow>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
@@ -2654,7 +2665,7 @@ impl Db {
     }
 
     pub async fn find_registry_plugin_by_name(&self, display_name: &str) -> Result<Option<VendorPluginRow>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
@@ -2673,7 +2684,7 @@ impl Db {
     }
 
     pub async fn upsert_registry_plugin(&self, plugin: &VendorPluginRow) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO vendor_plugin_registry
                 (id, plugin_file, display_name, description, code, files_json, version,
@@ -2748,7 +2759,7 @@ impl Db {
     // ── Vendor Plugin Installs (local only) ──────────────────
 
     pub async fn list_installed_plugins(&self) -> Result<Vec<VendorPluginInstall>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT plugin_id, installed, enabled, installed_at
@@ -2806,8 +2817,8 @@ impl Db {
         plugin_id: &str,
         listings: &[VendorListingCache],
     ) -> Result<(), SyncError> {
-        let conn = self.connect()?;
-        conn.execute("BEGIN CONCURRENT", ()).await?;
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
 
         conn.execute(
             "DELETE FROM vendor_listings_cache WHERE plugin_id = ?1",
@@ -2864,7 +2875,7 @@ impl Db {
         &self,
         plugin_id: &str,
     ) -> Result<Vec<VendorListingCache>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT plugin_id, vendor_item_id, title, price, currency, quantity, sku,
@@ -2903,7 +2914,7 @@ impl Db {
         &self,
         plugin_id: &str,
     ) -> Result<Option<(String, i64)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT MAX(fetched_at), COUNT(*) FROM vendor_listings_cache WHERE plugin_id = ?1",
@@ -2976,7 +2987,7 @@ impl Db {
         &self,
         product_id: &str,
     ) -> Result<Vec<(String, Option<String>, VendorListingCache)>, SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT COALESCE(vpr.display_name, 'Vendor'),
@@ -3077,7 +3088,7 @@ impl Db {
         }
 
         // Step 2: Fallback for legacy products — construct from variant data
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut vrows = conn
             .query(
                 "SELECT sku, name, quantity, image_url, attributes_json,
@@ -3126,18 +3137,9 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        // Check if this product has platform mappings — if it does, it's not vendor-only
-        let has_mappings = {
-            let mut mrows = conn
-                .query(
-                    "SELECT 1 FROM platform_mappings WHERE product_id = ?1 LIMIT 1",
-                    params![product_id.to_string()],
-                )
-                .await?;
-            mrows.next().await?.is_some()
-        };
-
-        if has_mappings && source_ids.is_empty() {
+        // If no variants have vendor source info, this product wasn't imported from a vendor.
+        // Don't try to construct fake vendor listings from manually-created variants.
+        if source_ids.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -3201,9 +3203,9 @@ impl Db {
     // ── Export / Import ──────────────────────────────────────
 
     pub async fn import_data(&self, data: &ExportData) -> Result<(), SyncError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
-        conn.execute("BEGIN CONCURRENT", ()).await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
 
         for product in &data.products {
             conn.execute(
@@ -3412,7 +3414,7 @@ mod tests {
         db.migrate().await.unwrap();
 
         // Verify the schema version
-        let conn = db.connect().unwrap();
+        let conn = db.connect().await.unwrap();
         let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);

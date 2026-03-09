@@ -362,7 +362,7 @@ useTauriEvent<VendorSyncBatchEvent>('vendor-sync-batch', (event) => {
   } catch { /* ignore parse errors */ }
 })
 
-onMounted(async () => {
+async function initVendors() {
   if (!companiesInitialized.value) return
   // Only fetch plugins if not already loaded (state persists across navigations)
   if (plugins.value.length === 0) {
@@ -372,7 +372,10 @@ onMounted(async () => {
   if (installedPlugins.value.length > 0 && !activePlugin.value) {
     activePlugin.value = installedPlugins.value[0].id
   }
-})
+}
+
+onMounted(initVendors)
+watch(companiesInitialized, initVendors)
 
 watch(activePlugin, (id) => {
   search.value = ''

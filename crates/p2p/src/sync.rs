@@ -147,7 +147,7 @@ pub async fn merge_remote_payload(
         match local_map.get(&remote_product.id) {
             Some(local) => {
                 if remote_product.updated_at > local.updated_at {
-                    let conn = db.connect()?;
+                    let conn = db.connect().await?;
                     conn.execute(
                         "UPDATE products SET canonical_sku = ?1, name = ?2, quantity = ?3,
                          low_stock_threshold = ?4, is_tracked = ?5, has_variants = ?6, updated_at = ?7
@@ -172,7 +172,7 @@ pub async fn merge_remote_payload(
                 }
             }
             None => {
-                let conn = db.connect()?;
+                let conn = db.connect().await?;
                 conn.execute(
                     "INSERT INTO products (id, canonical_sku, name, quantity, low_stock_threshold, is_tracked, has_variants, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -219,7 +219,7 @@ pub async fn merge_remote_payload(
         match local_mapping_map.get(&key) {
             Some((local_id, _local_deleted, local_updated)) => {
                 if remote_mapping.updated_at > *local_updated {
-                    let conn = db.connect()?;
+                    let conn = db.connect().await?;
                     conn.execute(
                         "UPDATE platform_mappings SET platform_item_id = ?1, platform_sku = ?2,
                          is_active = ?3, deleted_at = ?4, updated_at = ?5, variant_id = ?6
@@ -239,7 +239,7 @@ pub async fn merge_remote_payload(
                 }
             }
             None => {
-                let conn = db.connect()?;
+                let conn = db.connect().await?;
                 conn.execute(
                     "INSERT OR IGNORE INTO platform_mappings (product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

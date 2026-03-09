@@ -5,10 +5,13 @@ const { analytics, loading, fetchAllAnalytics } = useAnalytics()
 const { companiesInitialized } = useCompanyContext()
 const timeWindow = ref<TimeWindow>('Week')
 
-onMounted(async () => {
+async function initInventory() {
   if (!companiesInitialized.value) return
   await fetchAllAnalytics(timeWindow.value)
-})
+}
+
+onMounted(initInventory)
+watch(companiesInitialized, initInventory)
 
 async function changeWindow(window: TimeWindow) {
   timeWindow.value = window

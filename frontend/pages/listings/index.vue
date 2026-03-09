@@ -62,7 +62,7 @@ const linkSearch = ref('')
 const { notify } = useNotifications()
 const { companiesInitialized } = useCompanyContext()
 
-onMounted(async () => {
+async function initListings() {
   if (!companiesInitialized.value) return
   await fetchProducts()
   // loadMappings and fetchPlatformListings are independent — run in parallel
@@ -70,7 +70,10 @@ onMounted(async () => {
     loadMappings(),
     fetchPlatformListings(activePlatform.value),
   ])
-})
+}
+
+onMounted(initListings)
+watch(companiesInitialized, initListings)
 
 async function loadMappings() {
   const entries = await Promise.all(
@@ -367,11 +370,28 @@ async function handleLinkToProduct() {
     ? [linkTarget.value.listing]
     : linkTarget.value.group.variants
 
-  // Fetch existing product variants to match by SKU
+  // Fetch existing product variants to match by SKU or attributes
   const existingVariants = await listVariants(linkProductId.value)
   const variantBySku = new Map<string, ProductVariant>()
   for (const v of existingVariants) {
     variantBySku.set(v.sku.toLowerCase(), v)
+  }
+
+  function findByAttributes(attrs: Record<string, string> | undefined): ProductVariant | undefined {
+    if (!attrs || Object.keys(attrs).length === 0) return undefined
+    const normalized = new Map(
+      Object.entries(attrs).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+    )
+    return existingVariants.find(v => {
+      const vAttrs = new Map(
+        Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
+      )
+      if (vAttrs.size === 0) return false
+      for (const [key, val] of normalized) {
+        if (vAttrs.get(key) !== val) return false
+      }
+      return true
+    })
   }
 
   let linked = 0
@@ -380,7 +400,7 @@ async function handleLinkToProduct() {
 
   for (const item of items) {
     const itemSku = item.sku || item.platform_item_id
-    const existing = variantBySku.get(itemSku.toLowerCase())
+    const existing = variantBySku.get(itemSku.toLowerCase()) ?? findByAttributes(item.variant_attributes ?? undefined)
 
     if (existing) {
       // Match found — just create the mapping, no new variant needed
