@@ -290,9 +290,14 @@ async function fetchComparison() {
   comparisonLoading.value = true
   comparisonError.value = ''
   try {
-    comparisonListings.value = await diffListings(productId)
+    const live = await diffListings(productId)
+    // Merge live results with cached: live wins for any platform:item_id it returns,
+    // but cached entries survive when their live fetch failed (e.g. Squarespace 429).
+    const liveKeys = new Set(live.map(l => `${l.platform}:${l.platform_item_id}`))
+    const kept = comparisonListings.value.filter(c => !liveKeys.has(`${c.platform}:${c.platform_item_id}`))
+    comparisonListings.value = [...live, ...kept]
     // Cache listing details in DB so subsequent visits have data
-    const cachePromises = comparisonListings.value.map(listing =>
+    const cachePromises = live.map(listing =>
       invoke('cache_listing_detail', {
         productId,
         platform: listing.platform,
