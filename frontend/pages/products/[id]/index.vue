@@ -578,19 +578,20 @@ const priceSummary = computed(() => {
 
   const byPlatform = new Map<string, { label: string; platform?: Platform; min: number; max: number; currency: string }>()
 
-  // Vendor prices
+  // Vendor prices (fall back to dealer_price from extras if main price is null)
   for (const vl of filteredVendorListings.value) {
-    if (vl.price == null) continue
+    const price = vl.price ?? (vl.extras?.dealer_price ? Number(vl.extras.dealer_price) : null)
+    if (price == null || isNaN(price)) continue
     const key = `vendor:${vl.plugin_name}`
     const existing = byPlatform.get(key)
     if (existing) {
-      existing.min = Math.min(existing.min, vl.price)
-      existing.max = Math.max(existing.max, vl.price)
+      existing.min = Math.min(existing.min, price)
+      existing.max = Math.max(existing.max, price)
     } else {
       byPlatform.set(key, {
         label: vl.plugin_name,
-        min: vl.price,
-        max: vl.price,
+        min: price,
+        max: price,
         currency: vl.currency ?? 'USD',
       })
     }
@@ -984,13 +985,22 @@ function formatTimeAgo(isoTimestamp: string): string {
                   <p class="label-sm mb-1">Quantity</p>
                   <p class="text-foreground font-medium">{{ vl.quantity ?? 0 }}</p>
                 </div>
-                <div v-if="vl.price != null">
+                <div v-if="vl.price != null || vl.extras?.dealer_price">
                   <p class="label-sm mb-1">Price</p>
-                  <p class="text-foreground font-medium">{{ vl.price.toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
+                  <p v-if="vl.price != null" class="text-foreground font-medium">{{ vl.price.toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
+                  <p v-else class="text-foreground font-medium">{{ Number(vl.extras.dealer_price).toFixed(2) }} {{ vl.currency ?? 'USD' }} <span class="text-muted/40">(dealer)</span></p>
                 </div>
                 <div v-if="vl.sku" class="col-span-2">
                   <p class="label-sm mb-1">SKU</p>
                   <p class="text-foreground font-mono">{{ vl.sku }}</p>
+                </div>
+                <div v-if="vl.extras?.upc">
+                  <p class="label-sm mb-1">UPC</p>
+                  <p class="text-foreground font-mono">{{ vl.extras.upc }}</p>
+                </div>
+                <div v-if="vl.extras?.weight">
+                  <p class="label-sm mb-1">Weight</p>
+                  <p class="text-foreground">{{ vl.extras.weight }} lbs</p>
                 </div>
               </div>
 
