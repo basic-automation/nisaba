@@ -187,20 +187,28 @@ function getVendorStockForVariant(variantId: string): number | null {
   const vl = vendorListings.value.find(v => v.variant_id === variantId)
   if (vl?.quantity != null) return vl.quantity
   // Fallback: look for attribute-equivalent variants (bridges vendor/platform duplicates)
+  // Uses the selector keys so extra vendor specs (Material, etc.) don't break matching
   const target = variants.value.find(v => v.id === variantId)
   if (!target || Object.keys(target.attributes).length === 0) return null
-  const tAttrs = new Map(
-    Object.entries(target.attributes).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+  const selectorKeys = variantAttributeKeys.value.filter(k => variantSelections.value[k])
+  if (selectorKeys.length === 0) return null
+  const tVals = new Map(
+    selectorKeys
+      .map(k => {
+        const entry = Object.entries(target.attributes).find(([ak]) => ak.toLowerCase().trim() === k.toLowerCase().trim())
+        return entry ? [k.toLowerCase().trim(), entry[1].toLowerCase().trim()] as const : null
+      })
+      .filter((e): e is [string, string] => e !== null),
   )
+  if (tVals.size === 0) return null
   for (const v of variants.value) {
     if (v.id === variantId) continue
-    const vAttrs = new Map(
-      Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
-    )
-    if (vAttrs.size !== tAttrs.size) continue
     let match = true
-    for (const [key, val] of tAttrs) {
-      if (vAttrs.get(key) !== val) { match = false; break }
+    for (const [key, val] of tVals) {
+      const vVal = Object.entries(v.attributes).find(
+        ([k]) => k.toLowerCase().trim() === key,
+      )?.[1]?.toLowerCase().trim()
+      if (vVal !== val) { match = false; break }
     }
     if (match) {
       const eq = vendorListings.value.find(vl => vl.variant_id === v.id)
@@ -493,25 +501,33 @@ const refreshAndCache = fetchComparison
 // Collect all variant IDs that share the same attributes as the selected variant.
 // This bridges vendor-imported variants (which hold vendor_data) with platform-created
 // duplicates (which hold platform_mappings) so both listings appear side-by-side.
+//
+// Uses subset matching: variant A is equivalent to variant B if all of the
+// SELECTOR keys (the attributes the user actually picked) agree.  This handles
+// the common case where the vendor provides extra specs (e.g. Material, Weight)
+// beyond the Color/Size axes used by the storefront platform.
 const equivalentVariantIds = computed<Set<string>>(() => {
   if (!selectedVariantId.value) return new Set()
   const selected = variants.value.find(v => v.id === selectedVariantId.value)
   if (!selected || Object.keys(selected.attributes).length === 0) {
     return new Set([selectedVariantId.value])
   }
-  const selAttrs = new Map(
-    Object.entries(selected.attributes).map(([k, v]) => [k.toLowerCase().trim(), v.toLowerCase().trim()]),
+  // Use only the attribute keys that the selector exposes — these are the axes
+  // the user actually picked values for (e.g. Color + Size).  Extra keys that
+  // only some variants carry (e.g. Material from a vendor feed) are ignored.
+  const selectorKeys = variantAttributeKeys.value.filter(k => variantSelections.value[k])
+  const selVals = new Map(
+    selectorKeys.map(k => [k.toLowerCase().trim(), (variantSelections.value[k] ?? '').toLowerCase().trim()]),
   )
   const ids = new Set<string>()
   for (const v of variants.value) {
     if (v.id === selectedVariantId.value) { ids.add(v.id); continue }
-    const vAttrs = new Map(
-      Object.entries(v.attributes).map(([k, val]) => [k.toLowerCase().trim(), val.toLowerCase().trim()]),
-    )
-    if (vAttrs.size !== selAttrs.size) continue
     let match = true
-    for (const [key, val] of selAttrs) {
-      if (vAttrs.get(key) !== val) { match = false; break }
+    for (const [key, val] of selVals) {
+      const vVal = Object.entries(v.attributes).find(
+        ([k]) => k.toLowerCase().trim() === key,
+      )?.[1]?.toLowerCase().trim()
+      if (vVal !== val) { match = false; break }
     }
     if (match) ids.add(v.id)
   }
@@ -529,9 +545,21 @@ const filteredVendorListings = computed(() => {
 const filteredComparisonListings = computed(() => {
   if (!selectedVariantId.value) return comparisonListings.value
   const eqIds = equivalentVariantIds.value
+
+  // A mapping's variant is considered "bare" when it has no attributes — this
+  // happens when a platform listing was linked but the platform didn't provide
+  // variant_attributes (e.g. eBay), so attribute matching failed and a new
+  // attributeless variant was created.  Bare-variant mappings should show for
+  // ANY selected variant because they still belong to this product.
+  const bareVariantIds = new Set(
+    variants.value
+      .filter(v => Object.keys(v.attributes).length === 0)
+      .map(v => v.id),
+  )
+
   const matchingItemIds = new Set(
     mappings.value
-      .filter(m => m.variant_id != null && eqIds.has(m.variant_id))
+      .filter(m => m.variant_id != null && (eqIds.has(m.variant_id) || bareVariantIds.has(m.variant_id)))
       .map(m => `${m.platform}:${m.platform_item_id}`)
   )
   return comparisonListings.value.filter(l =>
