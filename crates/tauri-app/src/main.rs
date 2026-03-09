@@ -202,6 +202,7 @@ fn main() {
             commands::sync::get_recent_events,
             // Listings
             commands::listings::fetch_all_listings,
+            commands::listings::get_cached_platform_listings,
             commands::listings::fetch_unmapped_listings,
             commands::listings::diff_listings,
             commands::listings::migrate_listing,

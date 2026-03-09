@@ -68,9 +68,9 @@ pub async fn fetch_all_listings(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Record pricing snapshots for any listings that have prices and are mapped to products.
-    // This populates the DB cache so prices are available even when live fetches fail later.
+    // Record pricing snapshots and cache the full listing set for this platform.
     if let Ok(db) = state.active_db().await {
+        // Pricing snapshots for mapped listings
         if let Ok(mappings) = db.list_all_active_mappings().await {
             let mapped: std::collections::HashMap<(&str, &str), &str> = mappings
                 .iter()
@@ -84,7 +84,6 @@ pub async fn fetch_all_listings(
                             .record_pricing_snapshot(product_id, plat.as_str(), price, "USD")
                             .await;
                     }
-                    // Cache image URL for product grid thumbnails
                     if let Some(ref url) = listing.image_url {
                         let _ = db
                             .save_listing_photo(product_id, plat.as_str(), &listing.platform_item_id, url, 0)
@@ -93,9 +92,32 @@ pub async fn fetch_all_listings(
                 }
             }
         }
+
+        // Cache the full listing set so the Listings page loads instantly next time
+        if let Ok(json) = serde_json::to_string(&listings) {
+            let _ = db.save_cached_platform_listings(plat.as_str(), &json).await;
+        }
     }
 
     Ok(listings)
+}
+
+#[tauri::command]
+pub async fn get_cached_platform_listings(
+    state: State<'_, AppState>,
+    platform: String,
+) -> Result<Vec<PlatformListing>, String> {
+    let plat = Platform::from_str_loose(&platform)
+        .ok_or_else(|| format!("Unknown platform: {platform}"))?;
+    let db = state.active_db().await?;
+    match db.get_cached_platform_listings(plat.as_str()).await {
+        Ok(Some(json)) => {
+            serde_json::from_str::<Vec<PlatformListing>>(&json)
+                .map_err(|e| format!("Failed to parse cached listings: {e}"))
+        }
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]

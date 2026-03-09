@@ -10,7 +10,7 @@ use crate::types::{
     SyncEvent, VendorListingCache, VendorPluginInstall, VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 16;
+const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -617,6 +617,12 @@ impl Db {
                 .await?;
 
                 debug!("Applied migration 016: rebuild all remaining AUTOINCREMENT tables for MVCC compat");
+            }
+
+            if version < 17 {
+                conn.execute_batch(include_str!("../../../migrations/014_cached_platform_listings.sql"))
+                    .await?;
+                debug!("Applied migration 017: cached_platform_listings table");
             }
 
             // Set the new schema version
@@ -1648,6 +1654,44 @@ impl Db {
             out.push(row.get::<String>(0)?);
         }
         Ok(out)
+    }
+
+    // ── Cached Platform Listings (for Listings page) ──────────
+
+    /// Load cached platform listings JSON for a given platform.
+    pub async fn get_cached_platform_listings(
+        &self,
+        platform: &str,
+    ) -> Result<Option<String>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT listings_json FROM cached_platform_listings WHERE platform = ?1",
+                params![platform],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Ok(Some(row.get::<String>(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Save platform listings JSON for a given platform.
+    pub async fn save_cached_platform_listings(
+        &self,
+        platform: &str,
+        listings_json: &str,
+    ) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO cached_platform_listings (platform, listings_json, cached_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(platform) DO UPDATE SET listings_json = ?2, cached_at = datetime('now')",
+            params![platform, listings_json],
+        )
+        .await?;
+        Ok(())
     }
 
     // ── Cache Freshness ───────────────────────────────────────

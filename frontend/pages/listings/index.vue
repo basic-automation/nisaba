@@ -65,11 +65,13 @@ const { companiesInitialized } = useCompanyContext()
 async function initListings() {
   if (!companiesInitialized.value) return
   await fetchProducts()
-  // loadMappings and fetchPlatformListings are independent — run in parallel
+  // Load mappings and cached listings in parallel (instant, no API)
   await Promise.all([
     loadMappings(),
-    fetchPlatformListings(activePlatform.value),
+    loadCachedPlatformListings(activePlatform.value),
   ])
+  // Then refresh from live API in background (non-blocking)
+  fetchPlatformListings(activePlatform.value)
 }
 
 onMounted(initListings)
@@ -234,17 +236,25 @@ const linkableProducts = computed(() => {
   )
 })
 
+async function loadCachedPlatformListings(platform: Platform) {
+  try {
+    const cached = await invoke<PlatformListing[]>('get_cached_platform_listings', { platform })
+    if (cached.length > 0 && !platformFetched.value[platform]) {
+      platformListings.value[platform] = cached
+      platformFetched.value[platform] = true
+      const urls = cached.map(l => l.image_url).filter(Boolean)
+      if (urls.length > 0) ensureCached(urls)
+    }
+  } catch { /* no cache yet */ }
+}
+
 async function fetchPlatformListings(platform: Platform) {
   platformLoading.value[platform] = true
   platformError.value[platform] = ''
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    const listings = await invoke<PlatformListing[]>('fetch_all_listings', {
-      platform,
-    })
+    const listings = await invoke<PlatformListing[]>('fetch_all_listings', { platform })
     platformListings.value[platform] = listings
     platformFetched.value[platform] = true
-    // Cache listing images to local disk
     const urls = listings.map(l => l.image_url).filter(Boolean)
     if (urls.length > 0) ensureCached(urls)
   } catch (e: any) {
@@ -254,13 +264,15 @@ async function fetchPlatformListings(platform: Platform) {
   }
 }
 
-watch(activePlatform, (platform) => {
+watch(activePlatform, async (platform) => {
   importSearch.value = ''
   expandedGroups.value = new Set()
   collapsingGroups.value = new Set()
   if (!platformFetched.value[platform]) {
-    fetchPlatformListings(platform)
+    // Load cached first, then refresh live
+    await loadCachedPlatformListings(platform)
   }
+  fetchPlatformListings(platform)
 })
 
 async function importGroup(group: ListingGroup) {
