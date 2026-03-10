@@ -37,14 +37,18 @@ export interface ProductLineDetail {
   skus: RothcoSku[]
 }
 
+export interface RothcoSkuPrices {
+  price: number | null
+  case_price: number | null
+  map_price: number | null
+}
+
 export interface RothcoSku {
   sku_code: string
   upc: string
   image: string | null
   weight: number | null
-  price: number | null
-  dealer_price: number | null
-  msrp: number | null
+  prices: RothcoSkuPrices | null
   specifications: Specification[]
 }
 

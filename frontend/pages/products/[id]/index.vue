@@ -572,58 +572,62 @@ const filteredComparisonListings = computed(() => {
   )
 })
 
-// Per-platform price summary: range when no variant selected, exact when one is
-const priceSummary = computed(() => {
-  const listings = filteredComparisonListings.value.filter(l => l.price)
+// Helper: aggregate a numeric value across items into min/max range
+function aggregateRange(current: { min: number; max: number } | undefined, value: number): { min: number; max: number } {
+  if (!current) return { min: value, max: value }
+  return { min: Math.min(current.min, value), max: Math.max(current.max, value) }
+}
 
-  const byPlatform = new Map<string, { label: string; platform?: Platform; min: number; max: number; currency: string }>()
+interface PriceTier { min: number; max: number }
+interface PriceSummaryEntry {
+  label: string
+  platform?: Platform
+  currency: string
+  sellingPrice?: PriceTier
+  listPrice?: PriceTier
+  msrp?: PriceTier
+  map?: PriceTier
+  cost?: PriceTier
+}
 
-  // Vendor prices (fall back to dealer_price from extras if main price is null)
+// Per-source price summary with all tiers
+const priceSummary = computed<PriceSummaryEntry[]>(() => {
+  const bySource = new Map<string, PriceSummaryEntry>()
+
+  // Vendor prices — extract all tiers from extras
   for (const vl of filteredVendorListings.value) {
-    const price = vl.price ?? (vl.extras?.dealer_price ? Number(vl.extras.dealer_price) : null)
-    if (price == null || isNaN(price)) continue
     const key = `vendor:${vl.plugin_name}`
-    const existing = byPlatform.get(key)
-    if (existing) {
-      existing.min = Math.min(existing.min, price)
-      existing.max = Math.max(existing.max, price)
-    } else {
-      byPlatform.set(key, {
-        label: vl.plugin_name,
-        min: price,
-        max: price,
-        currency: vl.currency ?? 'USD',
-      })
+    const entry = bySource.get(key) ?? { label: vl.plugin_name, currency: vl.currency ?? 'USD' }
+
+    if (vl.price != null && !isNaN(vl.price)) {
+      entry.sellingPrice = aggregateRange(entry.sellingPrice, vl.price)
     }
+    const msrp = vl.extras?.msrp ? Number(vl.extras.msrp) : null
+    if (msrp != null && !isNaN(msrp)) {
+      entry.msrp = aggregateRange(entry.msrp, msrp)
+    }
+    const mapPrice = vl.extras?.map_price ? Number(vl.extras.map_price) : null
+    if (mapPrice != null && !isNaN(mapPrice)) {
+      entry.map = aggregateRange(entry.map, mapPrice)
+    }
+    const cost = vl.extras?.dealer_price ? Number(vl.extras.dealer_price) : null
+    if (cost != null && !isNaN(cost)) {
+      entry.cost = aggregateRange(entry.cost, cost)
+    }
+
+    bySource.set(key, entry)
   }
 
-  // Platform prices
-  for (const l of listings) {
+  // Platform prices — only selling price available
+  for (const l of filteredComparisonListings.value) {
     if (!l.price) continue
     const key = `platform:${l.platform}`
-    const existing = byPlatform.get(key)
-    if (existing) {
-      existing.min = Math.min(existing.min, l.price.amount)
-      existing.max = Math.max(existing.max, l.price.amount)
-    } else {
-      byPlatform.set(key, {
-        label: l.platform,
-        platform: l.platform,
-        min: l.price.amount,
-        max: l.price.amount,
-        currency: l.price.currency,
-      })
-    }
+    const entry = bySource.get(key) ?? { label: l.platform, platform: l.platform, currency: l.price.currency }
+    entry.sellingPrice = aggregateRange(entry.sellingPrice, l.price.amount)
+    bySource.set(key, entry)
   }
 
-  return [...byPlatform.values()].map(({ label, platform, min, max, currency }) => ({
-    label,
-    platform,
-    min,
-    max,
-    currency,
-    isRange: min !== max,
-  }))
+  return [...bySource.values()]
 })
 
 // Get variant attributes for a platform listing (from mapping → variant)
@@ -791,17 +795,42 @@ function formatTimeAgo(isoTimestamp: string): string {
                 <div
                   v-for="ps in priceSummary"
                   :key="ps.label"
-                  class="flex items-center gap-3"
+                  class="space-y-2"
                 >
-                  <PlatformBadge v-if="ps.platform" :platform="ps.platform" />
-                  <VendorBadge v-else :name="ps.label" />
-                  <span v-if="ps.isRange" class="text-2xl font-semibold text-foreground tabular-nums">
-                    {{ ps.min.toFixed(2) }} – {{ ps.max.toFixed(2) }}
-                  </span>
-                  <span v-else class="text-2xl font-semibold text-foreground tabular-nums">
-                    {{ ps.min.toFixed(2) }}
-                  </span>
-                  <span class="text-sm text-muted">{{ ps.currency }}</span>
+                  <div class="flex items-center gap-2 mb-1">
+                    <PlatformBadge v-if="ps.platform" :platform="ps.platform" />
+                    <VendorBadge v-else :name="ps.label" />
+                  </div>
+                  <div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-sm pl-1">
+                    <template v-if="ps.sellingPrice">
+                      <span class="text-muted/60">Selling Price</span>
+                      <span class="text-2xl font-semibold text-foreground tabular-nums">
+                        {{ ps.sellingPrice.min === ps.sellingPrice.max ? ps.sellingPrice.min.toFixed(2) : `${ps.sellingPrice.min.toFixed(2)} – ${ps.sellingPrice.max.toFixed(2)}` }}
+                        <span class="text-sm font-normal text-muted">{{ ps.currency }}</span>
+                      </span>
+                    </template>
+                    <template v-if="ps.msrp">
+                      <span class="text-muted/60">MSRP</span>
+                      <span class="text-foreground tabular-nums">
+                        {{ ps.msrp.min === ps.msrp.max ? ps.msrp.min.toFixed(2) : `${ps.msrp.min.toFixed(2)} – ${ps.msrp.max.toFixed(2)}` }}
+                        <span class="text-muted/40">{{ ps.currency }}</span>
+                      </span>
+                    </template>
+                    <template v-if="ps.map">
+                      <span class="text-muted/60">MAP</span>
+                      <span class="text-foreground tabular-nums">
+                        {{ ps.map.min === ps.map.max ? ps.map.min.toFixed(2) : `${ps.map.min.toFixed(2)} – ${ps.map.max.toFixed(2)}` }}
+                        <span class="text-muted/40">{{ ps.currency }}</span>
+                      </span>
+                    </template>
+                    <template v-if="ps.cost">
+                      <span class="text-muted/60">Cost</span>
+                      <span class="text-foreground tabular-nums">
+                        {{ ps.cost.min === ps.cost.max ? ps.cost.min.toFixed(2) : `${ps.cost.min.toFixed(2)} – ${ps.cost.max.toFixed(2)}` }}
+                        <span class="text-muted/40">{{ ps.currency }}</span>
+                      </span>
+                    </template>
+                  </div>
                 </div>
               </template>
               <p v-else class="text-sm text-muted/60">No price data</p>
@@ -985,10 +1014,21 @@ function formatTimeAgo(isoTimestamp: string): string {
                   <p class="label-sm mb-1">Quantity</p>
                   <p class="text-foreground font-medium">{{ vl.quantity ?? 0 }}</p>
                 </div>
-                <div v-if="vl.price != null || vl.extras?.dealer_price">
-                  <p class="label-sm mb-1">Price</p>
-                  <p v-if="vl.price != null" class="text-foreground font-medium">{{ vl.price.toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
-                  <p v-else class="text-foreground font-medium">{{ Number(vl.extras.dealer_price).toFixed(2) }} {{ vl.currency ?? 'USD' }} <span class="text-muted/40">(dealer)</span></p>
+                <div v-if="vl.price != null">
+                  <p class="label-sm mb-1">Selling Price</p>
+                  <p class="text-foreground font-medium">{{ vl.price.toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
+                </div>
+                <div v-if="vl.extras?.msrp">
+                  <p class="label-sm mb-1">MSRP</p>
+                  <p class="text-foreground font-medium">{{ Number(vl.extras.msrp).toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
+                </div>
+                <div v-if="vl.extras?.map_price">
+                  <p class="label-sm mb-1">MAP</p>
+                  <p class="text-foreground font-medium">{{ Number(vl.extras.map_price).toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
+                </div>
+                <div v-if="vl.extras?.dealer_price">
+                  <p class="label-sm mb-1">Cost</p>
+                  <p class="text-foreground font-medium">{{ Number(vl.extras.dealer_price).toFixed(2) }} {{ vl.currency ?? 'USD' }}</p>
                 </div>
                 <div v-if="vl.sku" class="col-span-2">
                   <p class="label-sm mb-1">SKU</p>
@@ -1062,7 +1102,7 @@ function formatTimeAgo(isoTimestamp: string): string {
                   <p class="text-foreground font-medium">{{ listing.quantity }}</p>
                 </div>
                 <div v-if="listing.price">
-                  <p class="label-sm mb-1">Price</p>
+                  <p class="label-sm mb-1">Selling Price</p>
                   <p class="text-foreground font-medium">{{ listing.price.amount }} {{ listing.price.currency }}</p>
                 </div>
                 <div v-if="listing.sku" class="col-span-2">

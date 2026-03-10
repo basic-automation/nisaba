@@ -11,7 +11,7 @@ import type {
 
 export const metadata = {
   name: 'Rothco Wholesale',
-  version: '2.0.0',
+  version: '2.5.0',
   description:
     'Import Rothco product catalog with SKU variants and inventory via GraphQL v2 API.',
   category: 'vendor',
@@ -70,9 +70,11 @@ query ProductLineById($id: ID!) {
       upc
       image
       weight
-      price
-      dealer_price
-      msrp
+      prices {
+        price
+        case_price
+        map_price
+      }
       specifications {
         spec_name
         value
@@ -134,10 +136,15 @@ export async function fetchListings(
   const inventoryMap = await fetchInventory(token)
   Nisaba.log.info(`Loaded inventory for ${Object.keys(inventoryMap).length} UPCs`)
 
-  // Step 2: Fetch SKU images (sku_code → filename map)
+  // Step 2: Fetch SKU images (sku_code → filename map) — non-fatal, falls back to sku.image
   Nisaba.log.info('Fetching Rothco SKU images...')
-  const skuImageMap = await fetchSkuImages(token)
-  Nisaba.log.info(`Loaded images for ${Object.keys(skuImageMap).length} SKUs`)
+  let skuImageMap: Record<string, string> = {}
+  try {
+    skuImageMap = await fetchSkuImages(token)
+    Nisaba.log.info(`Loaded images for ${Object.keys(skuImageMap).length} SKUs`)
+  } catch (e: any) {
+    Nisaba.log.warn(`SKU images fetch failed (will use fallback): ${e?.message ?? e}`)
+  }
 
   // Step 3: Paginate through all product lines
   Nisaba.log.info('Fetching Rothco product line list...')
@@ -165,10 +172,12 @@ export async function fetchListings(
         if (sku.weight != null) extras.weight = String(sku.weight)
         if (detail.product_line_code) extras.product_line_code = detail.product_line_code
         if (detail.short_description) extras.description = detail.short_description
-        if (sku.dealer_price != null) extras.dealer_price = String(sku.dealer_price)
+        const prices = sku.prices
+        if (prices?.case_price != null) extras.dealer_price = String(prices.case_price)
+        if (prices?.map_price != null) extras.map_price = String(prices.map_price)
 
-        // Use MSRP (suggested retail) as listing price, fall back to price
-        const skuPrice = sku.msrp ?? sku.price ?? null
+        // Use MAP (minimum advertised price) as listing price, fall back to base price
+        const skuPrice = prices?.map_price ?? prices?.price ?? null
 
         listings.push({
           vendor_item_id: sku.sku_code,
@@ -237,7 +246,15 @@ async function gql(
 
     const data = await resp.json()
     if (data.errors && data.errors.length > 0) {
-      throw new Error(`GraphQL error: ${data.errors[0].message}`)
+      const msg = data.errors[0].message ?? 'Unknown error'
+      // Retry on server-side GraphQL errors (e.g. "Internal server error")
+      if (/internal server error/i.test(msg) && attempt < maxRetries) {
+        const delay = 2000 * (attempt + 1)
+        Nisaba.log.warn(`GraphQL error: ${msg}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`)
+        await Nisaba.sleep(delay)
+        continue
+      }
+      throw new Error(`GraphQL error: ${msg}`)
     }
 
     return data
