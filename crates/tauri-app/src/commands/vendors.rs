@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use base64::Engine as _;
+use nisaba_core::db::Db;
 use nisaba_core::types::{VendorListingCache, VendorPluginRow};
 use nisaba_vendor_runtime::{BatchCallback, VendorRuntime};
 use serde::Serialize;
@@ -465,9 +467,14 @@ pub async fn submit_vendor_plugin(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Clear stale cache when plugin version changes
+    // Clear stale cache and auto-sync when plugin version changes
     if is_update {
         let _ = db.clear_vendor_listings_cache(&row.id).await;
+        let db_sync = db.clone();
+        let plugin_id = row.id.clone();
+        tokio::spawn(async move {
+            run_vendor_sync_single(db_sync, plugin_id, None).await;
+        });
     }
 
     Ok(build_plugin_info(row, false, false))
@@ -575,9 +582,14 @@ pub async fn import_vendor_plugin(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Clear stale cache when plugin version changes
+    // Clear stale cache and auto-sync when plugin version changes
     if is_update {
         let _ = db.clear_vendor_listings_cache(&row.id).await;
+        let db_sync = db.clone();
+        let plugin_id = row.id.clone();
+        tokio::spawn(async move {
+            run_vendor_sync_single(db_sync, plugin_id, None).await;
+        });
     }
 
     Ok(build_plugin_info(row, false, false))
@@ -1229,4 +1241,136 @@ pub async fn import_vendor_listings(
         products_created,
         variants_created,
     })
+}
+
+// ── Automatic vendor sync (called by sync engine + plugin updates) ───
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Guard to prevent overlapping auto vendor syncs.
+static AUTO_VENDOR_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Run a sync for a single vendor plugin: execute → cache → update product data → recalc.
+pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<tauri::AppHandle>) {
+    let plugin = match db.get_registry_plugin(&plugin_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::warn!(plugin = %plugin_id, "Auto vendor sync: plugin not found");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(plugin = %plugin_id, error = %e, "Auto vendor sync: failed to load plugin");
+            return;
+        }
+    };
+
+    let config: HashMap<String, String> = plugin
+        .config_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let files = match parse_files_json(&plugin.files_json) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(plugin = %plugin_id, "Auto vendor sync: {e}");
+            return;
+        }
+    };
+
+    tracing::info!(plugin = %plugin.display_name, version = %plugin.version, "Auto vendor sync starting");
+
+    match execute_plugin_in_thread(files, config, None).await {
+        Ok(vendor_listings) => {
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let cache_rows: Vec<VendorListingCache> = vendor_listings
+                .iter()
+                .map(|l| listing_to_cache(&plugin_id, l, &now))
+                .collect();
+            let count = cache_rows.len();
+
+            if let Err(e) = db.save_vendor_listings_cache(&plugin_id, &cache_rows).await {
+                tracing::error!(plugin = %plugin_id, "Auto vendor sync: cache save failed: {e}");
+                return;
+            }
+
+            match db.update_product_vendor_data_from_cache(&plugin_id, &cache_rows).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(plugin = %plugin_id, updated = n, "Auto vendor sync: updated product vendor data");
+                    match db.recalc_products_for_plugin(&plugin_id).await {
+                        Ok(r) if r > 0 => tracing::info!(plugin = %plugin_id, recalced = r, "Auto vendor sync: recalculated quantities"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(plugin = %plugin_id, "Auto vendor sync: recalc failed: {e}"),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(plugin = %plugin_id, "Auto vendor sync: update product data failed: {e}"),
+            }
+
+            tracing::info!(plugin = %plugin.display_name, count, "Auto vendor sync complete");
+
+            // Notify frontend if app handle is available
+            if let Some(ref app) = app {
+                let _ = app.emit("vendor-sync", VendorSyncEvent {
+                    plugin_id: plugin_id.clone(),
+                    status: "completed".to_string(),
+                    listing_count: count,
+                    message: format!("Auto-synced {count} listings"),
+                });
+            }
+        }
+        Err(e) => {
+            tracing::error!(plugin = %plugin.display_name, "Auto vendor sync failed: {e}");
+            if let Some(ref app) = app {
+                let _ = app.emit("vendor-sync", VendorSyncEvent {
+                    plugin_id: plugin_id.clone(),
+                    status: "failed".to_string(),
+                    listing_count: 0,
+                    message: format!("Auto-sync failed: {e}"),
+                });
+            }
+        }
+    }
+}
+
+/// Run vendor sync for ALL installed+enabled plugins.
+/// Skips if another auto-sync is already running.
+pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
+    // Prevent overlapping runs — if already syncing, skip silently
+    if AUTO_VENDOR_SYNC_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("Auto vendor sync: skipping, already running");
+        return;
+    }
+
+    // Ensure flag is cleared on exit (even on early return / panic)
+    struct ResetOnDrop;
+    impl Drop for ResetOnDrop {
+        fn drop(&mut self) {
+            AUTO_VENDOR_SYNC_RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = ResetOnDrop;
+
+    let installs = match db.list_installed_plugins().await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!("Auto vendor sync: failed to list plugins: {e}");
+            return;
+        }
+    };
+
+    let active: Vec<_> = installs
+        .into_iter()
+        .filter(|i| i.installed && i.enabled)
+        .collect();
+
+    if active.is_empty() {
+        return;
+    }
+
+    tracing::info!(count = active.len(), "Auto vendor sync: refreshing all plugins");
+
+    for install in active {
+        run_vendor_sync_single(db.clone(), install.plugin_id, app.clone()).await;
+    }
 }

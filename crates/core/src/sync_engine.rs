@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, RwLock};
@@ -65,11 +67,17 @@ pub enum SyncCommand {
 
 // ── Sync Engine ───────────────────────────────────────────────
 
+/// Callback invoked after each sync cycle to refresh vendor plugin data.
+/// The closure returns a future that runs all approved vendor plugins,
+/// updates product_vendor_data, and recalculates quantities.
+pub type VendorSyncFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub struct SyncEngine {
     db: Arc<Db>,
     adapters: SharedAdapters,
     event_tx: mpsc::Sender<SyncEngineEvent>,
     max_retries: u32,
+    vendor_sync_fn: Option<VendorSyncFn>,
 }
 
 impl SyncEngine {
@@ -84,7 +92,14 @@ impl SyncEngine {
             adapters,
             event_tx,
             max_retries,
+            vendor_sync_fn: None,
         }
+    }
+
+    /// Attach a callback to run vendor plugin syncs after each platform cycle.
+    pub fn with_vendor_sync(mut self, f: VendorSyncFn) -> Self {
+        self.vendor_sync_fn = Some(f);
+        self
     }
 
     /// Run a single sync cycle: poll → detect → resolve → push → record.
@@ -649,6 +664,9 @@ impl SyncEngine {
                         if let Err(e) = self.run_cycle().await {
                             error!(error = %e, "Sync cycle failed");
                         }
+                        if let Some(ref sync_fn) = self.vendor_sync_fn {
+                            (sync_fn)().await;
+                        }
                     }
                 }
                 cmd = cmd_rx.recv() => {
@@ -657,6 +675,9 @@ impl SyncEngine {
                             info!("Manual sync triggered");
                             if let Err(e) = self.run_cycle().await {
                                 error!(error = %e, "Manual sync cycle failed");
+                            }
+                            if let Some(ref sync_fn) = self.vendor_sync_fn {
+                                (sync_fn)().await;
                             }
                         }
                         Some(SyncCommand::Pause) => {

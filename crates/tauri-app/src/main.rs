@@ -368,13 +368,22 @@ async fn init_company_context(
     let (event_tx, event_rx) = mpsc::channel(256);
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
-    // Build sync engine
+    // Build sync engine with vendor sync hook
+    let db_for_vendor = db.clone();
+    let app_for_vendor = handle.clone();
     let engine = SyncEngine::new(
         db.clone(),
         adapters.clone(),
         event_tx,
         config.general.max_retries,
-    );
+    )
+    .with_vendor_sync(Arc::new(move || {
+        let db = db_for_vendor.clone();
+        let app = app_for_vendor.clone();
+        Box::pin(async move {
+            commands::vendors::run_vendor_sync_all(db, Some(app)).await;
+        })
+    }));
 
     let interval_secs = parse_interval(&config.general.sync_schedule);
 
