@@ -38,12 +38,13 @@ seller_id = ""                            # Your Amazon Seller ID
 region = "NA"                             # "NA", "EU", or "FE"
 marketplace_ids = ["ATVPDKIKX0DER"]       # US marketplace; add more as needed
 
-# Products are NOT configured here — they're managed via the TUI's
-# Products tab (import wizard + mapping editor) and stored in the database.
-# This keeps config.toml focused on platform credentials and sync settings.
+# Products are NOT configured here — they live in the database and are managed
+# in the app's Products pages (import, variants, and the platform mapping
+# editor). This keeps config.toml focused on platform credentials and sync
+# settings.
 
 [alerts]
-default_low_stock_threshold = 5    # Alert when quantity <= this (overridable per product in TUI)
+default_low_stock_threshold = 5    # Alert when quantity <= this (overridable per product in the app)
 
 [company]
 enabled = false                    # Enable P2P company sync via Tor
