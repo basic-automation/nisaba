@@ -12,8 +12,10 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['"clother"', 'sans-serif'],
-        display: ['"pulpo-rust-50"', 'serif'],
+        // Licensed fonts first; system stacks are the fallback when the
+        // .woff2 files aren't present (see frontend/assets/css/fonts.css).
+        sans: ['"clother"', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        display: ['"pulpo-rust-50"', 'ui-serif', 'Georgia', 'Cambria', 'serif'],
       },
       colors: {
         // Palenight-inspired color scheme

@@ -47,7 +47,7 @@
     "updater": {
       "pubkey": "",
       "endpoints": [
-        "https://raw.githubusercontent.com/nicbudd/nisaba-releases/main/latest.json"
+        "https://raw.githubusercontent.com/basic-automation/nisaba/master/.updater/latest.json"
       ],
       "windows": {
         "installMode": "passive"

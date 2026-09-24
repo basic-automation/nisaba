@@ -1,3 +1,16 @@
+/*
+ * Nisaba UI typography.
+ *
+ * The four families below (Clother, Clarendon Wide Sketch, Pulpo Rust, Jubilat)
+ * are licensed Adobe Fonts and are NOT redistributed with this repository — the
+ * .woff2 files are gitignored. The @font-face rules are kept so the app picks
+ * them up automatically if you have a license: drop your own .woff2 files into
+ * frontend/public/fonts/ using the filenames below and they load on next build.
+ *
+ * Without them the app falls back to the system stacks declared in
+ * tailwind.config.ts and app.vue, and renders correctly — just not on-brand.
+ */
+
 /* Clother — default app font, locally embedded from Adobe Fonts */
 @font-face {
   font-family: "clother";

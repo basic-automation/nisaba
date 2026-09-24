@@ -21,3 +21,10 @@ nul
 
 # Claude Code
 .claude/
+
+# Licensed fonts are not redistributed — see frontend/assets/css/fonts.css
+frontend/public/fonts/*.woff2
+
+# Routine scratch + worktrees
+/scratch/
+/.worktrees/

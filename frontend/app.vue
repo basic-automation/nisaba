@@ -77,7 +77,7 @@ html, body {
   height: 100%;
   background-color: #1e293b;
   color: #e2e8f0;
-  font-family: 'clother', sans-serif;
+  font-family: 'clother', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 /* Glass scrollbar */
