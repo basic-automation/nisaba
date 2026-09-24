@@ -43,6 +43,14 @@ pub enum SyncEngineEvent {
     AuthExpired { platform: Platform },
     /// New unmapped listings were detected.
     UnmappedListingsDetected { count: usize },
+    /// A change a dry-run cycle resolved but deliberately did not make.
+    DryRunChange {
+        product_id: String,
+        product_name: String,
+        platform: Platform,
+        current_quantity: i64,
+        planned_quantity: i64,
+    },
 }
 
 /// Commands sent from the TUI to the sync engine.
@@ -71,6 +79,7 @@ pub struct SyncEngine {
     event_tx: mpsc::Sender<SyncEngineEvent>,
     max_retries: u32,
     vendor_sync_fn: Option<VendorSyncFn>,
+    dry_run: bool,
 }
 
 impl SyncEngine {
@@ -86,7 +95,28 @@ impl SyncEngine {
             event_tx,
             max_retries,
             vendor_sync_fn: None,
+            dry_run: false,
         }
+    }
+
+    /// Resolve every cycle as normal but make no changes at all: no
+    /// `set_quantity` against any platform, and no local writes either.
+    ///
+    /// The local half matters as much as the remote half. A dry run that still
+    /// marked XMR Bazaar orders processed, moved snapshots, or updated the
+    /// canonical quantity would leave the database believing work had happened,
+    /// and the next real cycle would skip exactly the changes the dry run was
+    /// asked to preview. Each change it *would* have made is reported as a
+    /// [`SyncEngineEvent::DryRunChange`], and `run_cycle`'s second return value
+    /// counts them.
+    pub fn dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
+    /// Whether this engine is in dry-run mode.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
     }
 
     /// Attach a callback to run vendor plugin syncs after each platform cycle.
@@ -207,8 +237,10 @@ impl SyncEngine {
                                 delta: -sale.units_sold,
                             });
 
-                        // Mark order as processed in DB
-                        if !order_id.is_empty() {
+                        // Mark order as processed in DB. A dry run must not:
+                        // consuming the order here would make the real cycle
+                        // that follows skip the very sale it previewed.
+                        if !order_id.is_empty() && !self.dry_run {
                             self.db
                                 .mark_xmr_order_processed(
                                     order_id,
@@ -292,9 +324,11 @@ impl SyncEngine {
                 max_qty = Some(max_qty.map_or(current_qty, |m: i64| m.max(current_qty)));
 
                 // Update the polled snapshot
-                self.db
-                    .upsert_snapshot(&product.id, mapping.platform.as_str(), current_qty, &now)
-                    .await?;
+                if !self.dry_run {
+                    self.db
+                        .upsert_snapshot(&product.id, mapping.platform.as_str(), current_qty, &now)
+                        .await?;
+                }
             }
 
             // If restock detected, use max minus sales on other platforms.
@@ -319,9 +353,11 @@ impl SyncEngine {
 
             if new_canonical == product.quantity {
                 // Record history even when no change (for time-series continuity)
-                self.db
-                    .record_inventory_history(&product.id, product.quantity, &cycle_id)
-                    .await?;
+                if !self.dry_run {
+                    self.db
+                        .record_inventory_history(&product.id, product.quantity, &cycle_id)
+                        .await?;
+                }
                 continue;
             }
 
@@ -336,9 +372,11 @@ impl SyncEngine {
             );
 
             // Update canonical quantity in DB
-            self.db
-                .update_product_quantity(&product.id, new_canonical)
-                .await?;
+            if !self.dry_run {
+                self.db
+                    .update_product_quantity(&product.id, new_canonical)
+                    .await?;
+            }
 
             // ── Step 4: Push to all mapped platforms ──────────
             for mapping in mappings {
@@ -372,6 +410,21 @@ impl SyncEngine {
                             state = desired,
                             "Stock mode already correct, skipping push"
                         );
+                        continue;
+                    }
+
+                    if self.dry_run {
+                        changes_pushed += 1;
+                        let _ = self
+                            .event_tx
+                            .send(SyncEngineEvent::DryRunChange {
+                                product_id: product.id.clone(),
+                                product_name: product.name.clone(),
+                                platform: mapping.platform,
+                                current_quantity: product.quantity,
+                                planned_quantity: new_canonical,
+                            })
+                            .await;
                         continue;
                     }
 
@@ -473,6 +526,21 @@ impl SyncEngine {
                     continue;
                 }
 
+                if self.dry_run {
+                    changes_pushed += 1;
+                    let _ = self
+                        .event_tx
+                        .send(SyncEngineEvent::DryRunChange {
+                            product_id: product.id.clone(),
+                            product_name: product.name.clone(),
+                            platform: mapping.platform,
+                            current_quantity: current_on_platform.unwrap_or(product.quantity),
+                            planned_quantity: new_canonical,
+                        })
+                        .await;
+                    continue;
+                }
+
                 match adapter
                     .set_quantity(&mapping.platform_item_id, new_canonical)
                     .await
@@ -548,9 +616,11 @@ impl SyncEngine {
             }
 
             // ── Step 5: Record history ────────────────────────
-            self.db
-                .record_inventory_history(&product.id, new_canonical, &cycle_id)
-                .await?;
+            if !self.dry_run {
+                self.db
+                    .record_inventory_history(&product.id, new_canonical, &cycle_id)
+                    .await?;
+            }
 
             products_synced += 1;
         }
@@ -636,13 +706,19 @@ impl SyncEngine {
         // Startup: recalculate all vendor-sourced product quantities so that
         // persisted product_vendor_data is applied BEFORE the first sync cycle
         // polls platforms and potentially overwrites quantities.
-        match self.db.recalc_all_vendor_sourced_products().await {
-            Ok(n) if n > 0 => info!(
-                count = n,
-                "Startup: recalculated vendor-sourced product quantities"
-            ),
-            Ok(_) => {}
-            Err(e) => warn!(error = %e, "Startup: failed to recalculate vendor-sourced products"),
+        if self.dry_run {
+            info!("Dry run: skipping startup vendor-sourced quantity recalculation");
+        } else {
+            match self.db.recalc_all_vendor_sourced_products().await {
+                Ok(n) if n > 0 => info!(
+                    count = n,
+                    "Startup: recalculated vendor-sourced product quantities"
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(error = %e, "Startup: failed to recalculate vendor-sourced products")
+                }
+            }
         }
 
         let mut paused = false;
@@ -658,7 +734,9 @@ impl SyncEngine {
                             error!(error = %e, "Sync cycle failed");
                         }
                         if let Some(ref sync_fn) = self.vendor_sync_fn {
-                            (sync_fn)().await;
+                            if !self.dry_run {
+                                (sync_fn)().await;
+                            }
                         }
                     }
                 }
@@ -670,7 +748,9 @@ impl SyncEngine {
                                 error!(error = %e, "Manual sync cycle failed");
                             }
                             if let Some(ref sync_fn) = self.vendor_sync_fn {
-                                (sync_fn)().await;
+                                if !self.dry_run {
+                                    (sync_fn)().await;
+                                }
                             }
                         }
                         Some(SyncCommand::Pause) => {
@@ -895,6 +975,13 @@ mod tests {
     }
 
     impl Harness {
+        /// Turn this harness's engine into a dry-run engine. Call before
+        /// `run_cycle`; everything else about the harness is unchanged.
+        fn into_dry_run(mut self) -> Self {
+            self.engine = self.engine.dry_run();
+            self
+        }
+
         async fn new(fakes: Vec<FakeAdapter>, max_retries: u32) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("sync-engine-test.db");
@@ -1502,6 +1589,192 @@ mod tests {
             1,
             "the stock mode was already correct, so the second cycle must not push again"
         );
+    }
+
+    // ── Dry run ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_dry_run_writes_to_no_platform_and_reports_what_it_would_do() {
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let mut harness = harness.into_dry_run();
+        assert!(harness.engine.is_dry_run());
+
+        let (synced, would_push) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(synced, 1);
+        assert_eq!(would_push, 1, "Squarespace is the one platform out of step");
+
+        assert!(
+            harness.adapter(Platform::Ebay).pushes().is_empty()
+                && harness.adapter(Platform::Squarespace).pushes().is_empty(),
+            "a dry run must never call set_quantity"
+        );
+
+        let planned: Vec<_> = harness
+            .drain_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                SyncEngineEvent::DryRunChange {
+                    platform,
+                    current_quantity,
+                    planned_quantity,
+                    ..
+                } => Some((platform, current_quantity, planned_quantity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(planned, vec![(Platform::Squarespace, 7, 3)]);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_leaves_the_local_database_untouched() {
+        // Just as important as not writing to a platform: if a dry run moved
+        // the canonical quantity or the snapshots, the real cycle that follows
+        // would see the work as already done and skip it.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 2)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 9, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let harness = harness.into_dry_run();
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            9,
+            "canonical quantity unchanged"
+        );
+        assert!(
+            harness
+                .db
+                .get_snapshot("p1", "ebay")
+                .await
+                .unwrap()
+                .is_none(),
+            "no snapshot was written"
+        );
+        assert!(
+            harness
+                .db
+                .get_inventory_history("p1", None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no history row was written"
+        );
+        assert!(
+            harness
+                .db
+                .list_recent_sync_events(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no sync event was recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_does_not_consume_a_stock_mode_order() {
+        // The XMR Bazaar dedup table is the subtle one: marking the order
+        // processed during a preview would make the next real cycle skip the
+        // sale entirely, so the unit would never come off the shelf.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 2, "order-42")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        let harness = harness.into_dry_run();
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 5);
+        assert!(harness.adapter(Platform::XmrBazaar).pushes().is_empty());
+        assert!(
+            !harness.db.is_xmr_order_processed("order-42").await.unwrap(),
+            "a previewed order must still be available to the next real cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_still_polls_every_platform() {
+        // Reading is the whole point — the preview is worthless if it does not
+        // ask the platforms what they currently hold.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 3, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let adapter = harness.adapter(Platform::Ebay);
+        let harness = harness.into_dry_run();
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(adapter.poll_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_real_cycle_after_a_dry_run_makes_the_change_the_dry_run_predicted() {
+        // The contract that makes a preview worth trusting.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let squarespace = harness.adapter(Platform::Squarespace);
+        let db = harness.db.clone();
+        let adapters = harness.engine.adapters.clone();
+        let (tx, _rx) = mpsc::channel(256);
+
+        let dry = harness.into_dry_run();
+        let (_, would_push) = dry.engine.run_cycle().await.unwrap();
+        assert_eq!(would_push, 1);
+        assert!(squarespace.pushes().is_empty());
+
+        // Same DB, same adapters, same canned readings — but for real.
+        let real = SyncEngine::new(db.clone(), adapters, tx, 0);
+        let (_, pushed) = real.run_cycle().await.unwrap();
+
+        assert_eq!(pushed, would_push, "the preview matched the real cycle");
+        assert_eq!(squarespace.pushes(), vec![("S-1".to_string(), 3)]);
+        assert_eq!(db.get_product("p1").await.unwrap().unwrap().quantity, 3);
     }
 
     #[tokio::test]
