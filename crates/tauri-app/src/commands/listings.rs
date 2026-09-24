@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use nisaba_core::traits::PlatformAdapter;
-use nisaba_core::types::{CreateListingRequest, FullListing, ListingPhoto, ListingPrice, Platform, PlatformListing, UpdateListingRequest};
+use nisaba_core::types::{
+    CreateListingRequest, FullListing, ListingPhoto, ListingPrice, Platform, PlatformListing,
+    UpdateListingRequest,
+};
+use nisaba_ebay::types::{EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion};
 use nisaba_ebay::EbayAdapter;
-use nisaba_ebay::types::{EbayCategorySuggestion, EbayAspectMetadata, EbayBusinessPolicy};
 use tauri::State;
 
 use crate::state::AppState;
@@ -35,7 +38,11 @@ pub struct UpdateListingParams {
     pub extras: Option<std::collections::HashMap<String, String>>,
 }
 
-type EbayBusinessPolicies = (Vec<EbayBusinessPolicy>, Vec<EbayBusinessPolicy>, Vec<EbayBusinessPolicy>);
+type EbayBusinessPolicies = (
+    Vec<EbayBusinessPolicy>,
+    Vec<EbayBusinessPolicy>,
+    Vec<EbayBusinessPolicy>,
+);
 
 async fn ensure_auth(adapter: &dyn PlatformAdapter) -> Result<(), String> {
     if !adapter.is_authenticated().await {
@@ -74,11 +81,18 @@ pub async fn fetch_all_listings(
         if let Ok(mappings) = db.list_all_active_mappings().await {
             let mapped: std::collections::HashMap<(&str, &str), &str> = mappings
                 .iter()
-                .map(|m| ((m.platform.as_str(), m.platform_item_id.as_str()), m.product_id.as_str()))
+                .map(|m| {
+                    (
+                        (m.platform.as_str(), m.platform_item_id.as_str()),
+                        m.product_id.as_str(),
+                    )
+                })
                 .collect();
 
             for listing in &listings {
-                if let Some(product_id) = mapped.get(&(plat.as_str(), listing.platform_item_id.as_str())) {
+                if let Some(product_id) =
+                    mapped.get(&(plat.as_str(), listing.platform_item_id.as_str()))
+                {
                     if let Some(price) = listing.price {
                         let _ = db
                             .record_pricing_snapshot(product_id, plat.as_str(), price, "USD")
@@ -86,7 +100,13 @@ pub async fn fetch_all_listings(
                     }
                     if let Some(ref url) = listing.image_url {
                         let _ = db
-                            .save_listing_photo(product_id, plat.as_str(), &listing.platform_item_id, url, 0)
+                            .save_listing_photo(
+                                product_id,
+                                plat.as_str(),
+                                &listing.platform_item_id,
+                                url,
+                                0,
+                            )
                             .await;
                     }
                 }
@@ -111,10 +131,8 @@ pub async fn get_cached_platform_listings(
         .ok_or_else(|| format!("Unknown platform: {platform}"))?;
     let db = state.active_db().await?;
     match db.get_cached_platform_listings(plat.as_str()).await {
-        Ok(Some(json)) => {
-            serde_json::from_str::<Vec<PlatformListing>>(&json)
-                .map_err(|e| format!("Failed to parse cached listings: {e}"))
-        }
+        Ok(Some(json)) => serde_json::from_str::<Vec<PlatformListing>>(&json)
+            .map_err(|e| format!("Failed to parse cached listings: {e}")),
         Ok(None) => Ok(Vec::new()),
         Err(e) => Err(e.to_string()),
     }
@@ -271,10 +289,7 @@ pub async fn migrate_listing(
 
     let request = CreateListingRequest {
         title: listing.title,
-        description_html: listing
-            .description
-            .as_ref()
-            .and_then(|d| d.html.clone()),
+        description_html: listing.description.as_ref().and_then(|d| d.html.clone()),
         sku: listing.sku,
         quantity: listing.quantity,
         price: listing.price,
@@ -288,9 +303,15 @@ pub async fn migrate_listing(
         .map_err(|e| e.to_string())?;
 
     let db = state.active_db().await?;
-    db.insert_mapping(&product_id, tgt_plat.as_str(), &new_item_id, None, &variant_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    db.insert_mapping(
+        &product_id,
+        tgt_plat.as_str(),
+        &new_item_id,
+        None,
+        &variant_id,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(new_item_id)
 }
@@ -339,8 +360,8 @@ pub async fn create_listing_on_platform(
         params.sku.as_deref(),
         &params.variant_id,
     )
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(new_item_id)
 }
@@ -503,13 +524,17 @@ pub async fn cache_listing_detail(
 
     // Cache photos
     if !listing.photos.is_empty() {
-        let photos: Vec<ListingPhoto> = listing.photos.iter().map(|p| ListingPhoto {
-            url: p.url.clone(),
-            position: p.position,
-            width: p.width,
-            height: p.height,
-            alt_text: p.alt_text.clone(),
-        }).collect();
+        let photos: Vec<ListingPhoto> = listing
+            .photos
+            .iter()
+            .map(|p| ListingPhoto {
+                url: p.url.clone(),
+                position: p.position,
+                width: p.width,
+                height: p.height,
+                alt_text: p.alt_text.clone(),
+            })
+            .collect();
         let _ = db
             .replace_listing_photos(&product_id, plat.as_str(), &platform_item_id, &photos)
             .await;

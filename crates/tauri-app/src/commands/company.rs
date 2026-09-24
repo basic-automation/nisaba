@@ -29,9 +29,7 @@ async fn start_p2p_for_company(
     let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
     // Drain P2P events
-    tokio::spawn(async move {
-        while let Some(_event) = event_rx.recv().await {}
-    });
+    tokio::spawn(async move { while let Some(_event) = event_rx.recv().await {} });
 
     let manager_clone = manager.clone();
     tokio::spawn(async move {
@@ -247,14 +245,9 @@ pub async fn join_company(
 
     // Send join request
     let hostname = format!("{}.onion", our_onion);
-    let _ = nisaba_p2p::client::P2PClient::join_company(
-        &admin_onion,
-        &secret,
-        &hostname,
-        &name,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    let _ = nisaba_p2p::client::P2PClient::join_company(&admin_onion, &secret, &hostname, &name)
+        .await
+        .map_err(|e| e.to_string())?;
 
     info!("Joined company via admin {}", admin_onion);
 
@@ -311,8 +304,15 @@ pub async fn leave_company(state: State<'_, AppState>, id: Option<String>) -> Re
     state.companies.write().await.remove(&company_id);
 
     // Get DB path before unregistering
-    let registry = state.app_db.list_registered_companies().await.map_err(|e| e.to_string())?;
-    let db_path = registry.iter().find(|e| e.id == company_id).map(|e| e.db_path.clone());
+    let registry = state
+        .app_db
+        .list_registered_companies()
+        .await
+        .map_err(|e| e.to_string())?;
+    let db_path = registry
+        .iter()
+        .find(|e| e.id == company_id)
+        .map(|e| e.db_path.clone());
 
     // Unregister from app DB
     state
@@ -419,7 +419,9 @@ pub async fn remove_company_peer(
     let db = state.active_db().await?;
     // Find peer_id by onion address in v2 table
     if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.remove_peer_v2(&peer_id).await.map_err(|e| e.to_string())?;
+        db.remove_peer_v2(&peer_id)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     // Also remove from legacy table
     let _ = db.remove_peer(&onion_address).await;
@@ -434,7 +436,9 @@ pub async fn approve_company_peer(
 ) -> Result<(), String> {
     let db = state.active_db().await?;
     if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.approve_peer_v2(&peer_id).await.map_err(|e| e.to_string())?;
+        db.approve_peer_v2(&peer_id)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let _ = db.approve_peer(&onion_address).await;
     info!(peer = %onion_address, "Peer approved");
@@ -448,7 +452,9 @@ pub async fn reject_company_peer(
 ) -> Result<(), String> {
     let db = state.active_db().await?;
     if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.reject_peer_v2(&peer_id).await.map_err(|e| e.to_string())?;
+        db.reject_peer_v2(&peer_id)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let _ = db.reject_peer(&onion_address).await;
     info!(peer = %onion_address, "Peer rejected");
@@ -466,7 +472,9 @@ pub async fn set_peer_role(
     }
     let db = state.active_db().await?;
     if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.update_peer_role_v2(&peer_id, &role).await.map_err(|e| e.to_string())?;
+        db.update_peer_role_v2(&peer_id, &role)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let _ = db.update_peer_role(&onion_address, &role).await;
     info!(peer = %onion_address, role = %role, "Peer role updated");
@@ -495,10 +503,7 @@ pub async fn trigger_p2p_sync(state: State<'_, AppState>) -> Result<(), String> 
 // ── Company Logo ─────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn update_company_logo(
-    state: State<'_, AppState>,
-    logo: String,
-) -> Result<(), String> {
+pub async fn update_company_logo(state: State<'_, AppState>, logo: String) -> Result<(), String> {
     let db = state.active_db().await?;
     let now = chrono::Utc::now().to_rfc3339();
     db.set_company_logo(&logo, &now)
@@ -514,9 +519,7 @@ pub async fn update_company_logo(
 }
 
 #[tauri::command]
-pub async fn remove_company_logo(
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn remove_company_logo(state: State<'_, AppState>) -> Result<(), String> {
     let db = state.active_db().await?;
     let now = chrono::Utc::now().to_rfc3339();
     db.set_company_logo("", &now)
@@ -545,17 +548,12 @@ pub async fn list_companies(
 }
 
 #[tauri::command]
-pub async fn get_active_company_id(
-    state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+pub async fn get_active_company_id(state: State<'_, AppState>) -> Result<Option<String>, String> {
     Ok(state.active_company_id.read().await.clone())
 }
 
 #[tauri::command]
-pub async fn switch_company(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<String, String> {
+pub async fn switch_company(state: State<'_, AppState>, id: String) -> Result<String, String> {
     // Verify company exists
     let companies = state.companies.read().await;
     if !companies.contains_key(&id) {

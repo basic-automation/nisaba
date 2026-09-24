@@ -48,7 +48,10 @@ impl SquarespaceAdapter {
         }
         Err(SyncError::ApiError {
             platform: Platform::Squarespace,
-            message: format!("Variant {} not found in any Squarespace product", variant_id),
+            message: format!(
+                "Variant {} not found in any Squarespace product",
+                variant_id
+            ),
         })
     }
 }
@@ -66,7 +69,10 @@ impl PlatformAdapter for SquarespaceAdapter {
     async fn fetch_inventory(&self) -> Result<Vec<PlatformInventoryItem>, SyncError> {
         self.auth.validate()?;
         let items = self.client.fetch_inventory(self.auth.api_key()).await?;
-        Ok(items.iter().filter_map(mapping::to_inventory_item).collect())
+        Ok(items
+            .iter()
+            .filter_map(mapping::to_inventory_item)
+            .collect())
     }
 
     async fn fetch_all_listings(&self) -> Result<Vec<PlatformListing>, SyncError> {
@@ -93,10 +99,7 @@ impl PlatformAdapter for SquarespaceAdapter {
         self.auth.validate()
     }
 
-    async fn fetch_full_listing(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<FullListing, SyncError> {
+    async fn fetch_full_listing(&self, platform_item_id: &str) -> Result<FullListing, SyncError> {
         self.auth.validate()?;
         let key = self.auth.api_key();
         let products = self.client.fetch_products(key).await?;
@@ -111,7 +114,10 @@ impl PlatformAdapter for SquarespaceAdapter {
 
         Err(SyncError::ApiError {
             platform: Platform::Squarespace,
-            message: format!("Variant {} not found in any Squarespace product", platform_item_id),
+            message: format!(
+                "Variant {} not found in any Squarespace product",
+                platform_item_id
+            ),
         })
     }
 
@@ -131,14 +137,12 @@ impl PlatformAdapter for SquarespaceAdapter {
                 .unwrap_or(false);
 
             if has_variant {
-                let description = product.description.as_ref().map(|desc| {
-                    ListingDescription {
-                        platform: Platform::Squarespace,
-                        platform_item_id: platform_item_id.to_string(),
-                        html: Some(desc.clone()),
-                        plain_text: None,
-                        fetched_at: chrono::Utc::now().to_rfc3339(),
-                    }
+                let description = product.description.as_ref().map(|desc| ListingDescription {
+                    platform: Platform::Squarespace,
+                    platform_item_id: platform_item_id.to_string(),
+                    html: Some(desc.clone()),
+                    plain_text: None,
+                    fetched_at: chrono::Utc::now().to_rfc3339(),
                 });
                 return Ok(description);
             }
@@ -146,14 +150,14 @@ impl PlatformAdapter for SquarespaceAdapter {
 
         Err(SyncError::ApiError {
             platform: Platform::Squarespace,
-            message: format!("Variant {} not found in any Squarespace product", platform_item_id),
+            message: format!(
+                "Variant {} not found in any Squarespace product",
+                platform_item_id
+            ),
         })
     }
 
-    async fn fetch_photos(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Vec<ListingPhoto>, SyncError> {
+    async fn fetch_photos(&self, platform_item_id: &str) -> Result<Vec<ListingPhoto>, SyncError> {
         self.auth.validate()?;
         let products = self.client.fetch_products(self.auth.api_key()).await?;
 
@@ -191,14 +195,14 @@ impl PlatformAdapter for SquarespaceAdapter {
 
         Err(SyncError::ApiError {
             platform: Platform::Squarespace,
-            message: format!("Variant {} not found in any Squarespace product", platform_item_id),
+            message: format!(
+                "Variant {} not found in any Squarespace product",
+                platform_item_id
+            ),
         })
     }
 
-    async fn fetch_price(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Option<ListingPrice>, SyncError> {
+    async fn fetch_price(&self, platform_item_id: &str) -> Result<Option<ListingPrice>, SyncError> {
         self.auth.validate()?;
         let products = self.client.fetch_products(self.auth.api_key()).await?;
 
@@ -212,8 +216,7 @@ impl PlatformAdapter for SquarespaceAdapter {
                         .and_then(|p| p.base_price.as_ref())
                         .and_then(|bp| {
                             let amount = bp.value.as_ref()?.parse::<f64>().ok()?;
-                            let currency =
-                                bp.currency.clone().unwrap_or_else(|| "USD".to_string());
+                            let currency = bp.currency.clone().unwrap_or_else(|| "USD".to_string());
                             Some(ListingPrice { amount, currency })
                         });
                     return Ok(price);
@@ -223,15 +226,14 @@ impl PlatformAdapter for SquarespaceAdapter {
 
         Err(SyncError::ApiError {
             platform: Platform::Squarespace,
-            message: format!("Variant {} not found in any Squarespace product", platform_item_id),
+            message: format!(
+                "Variant {} not found in any Squarespace product",
+                platform_item_id
+            ),
         })
     }
 
-    async fn set_description(
-        &self,
-        platform_item_id: &str,
-        html: &str,
-    ) -> Result<(), SyncError> {
+    async fn set_description(&self, platform_item_id: &str, html: &str) -> Result<(), SyncError> {
         self.auth.validate()?;
         let product_id = self.find_product_id_for_variant(platform_item_id).await?;
         let update_req = crate::types::SquarespaceUpdateProductRequest {
@@ -245,10 +247,7 @@ impl PlatformAdapter for SquarespaceAdapter {
             .await
     }
 
-    async fn create_listing(
-        &self,
-        request: CreateListingRequest,
-    ) -> Result<String, SyncError> {
+    async fn create_listing(&self, request: CreateListingRequest) -> Result<String, SyncError> {
         self.auth.validate()?;
         let key = self.auth.api_key();
 
@@ -261,7 +260,8 @@ impl PlatformAdapter for SquarespaceAdapter {
                 .or(pages.first())
                 .ok_or_else(|| SyncError::ApiError {
                     platform: Platform::Squarespace,
-                    message: "No store pages found. Create a store page in Squarespace first.".into(),
+                    message: "No store pages found. Create a store page in Squarespace first."
+                        .into(),
                 })?;
             info!(page_id = %page.id, page_title = %page.title, "Auto-selected store page");
             page.id.clone()

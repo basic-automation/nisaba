@@ -46,7 +46,9 @@ impl AppState {
     /// Resolve the active company ID as an owned String.
     async fn resolve_active_id(&self) -> Result<String, String> {
         let id = self.active_company_id.read().await;
-        id.as_ref().cloned().ok_or_else(|| "No active company".to_string())
+        id.as_ref()
+            .cloned()
+            .ok_or_else(|| "No active company".to_string())
     }
 
     /// Get the active company's DB.

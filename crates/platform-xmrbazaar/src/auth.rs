@@ -62,10 +62,7 @@ impl XmrBazaarAuth {
         // Parse the login form to discover field names and extract all hidden fields
         let login_form = html::parse_login_form(&page_html);
 
-        debug!(
-            has_form = login_form.is_some(),
-            "Parsed login page form"
-        );
+        debug!(has_form = login_form.is_some(), "Parsed login page form");
 
         // Build form params from the actual form fields
         let form_params: Vec<(String, String)> = if let Some(form) = &login_form {
@@ -92,8 +89,7 @@ impl XmrBazaarAuth {
             params
         } else {
             // Fallback: use best-guess field names
-            let validation_token =
-                html::extract_validation_token(&page_html).unwrap_or_default();
+            let validation_token = html::extract_validation_token(&page_html).unwrap_or_default();
 
             warn!(
                 has_token = !validation_token.is_empty(),
@@ -151,11 +147,7 @@ impl XmrBazaarAuth {
             .unwrap_or_default();
 
         // Log all response headers for diagnostics
-        let header_names: Vec<&str> = login_resp
-            .headers()
-            .keys()
-            .map(|k| k.as_str())
-            .collect();
+        let header_names: Vec<&str> = login_resp.headers().keys().map(|k| k.as_str()).collect();
 
         debug!(
             status = %status,
@@ -169,14 +161,14 @@ impl XmrBazaarAuth {
             // The Location header may be empty or absent on some servers, but
             // the Set-Cookie header may have set a valid PHPSESSID anyway.
             let (_, listings_url) = endpoints.my_listings();
-            let check = http
-                .get(&listings_url)
-                .send()
-                .await
-                .map_err(|e| SyncError::NetworkError {
-                    platform: Platform::XmrBazaar,
-                    message: e.to_string(),
-                })?;
+            let check =
+                http.get(&listings_url)
+                    .send()
+                    .await
+                    .map_err(|e| SyncError::NetworkError {
+                        platform: Platform::XmrBazaar,
+                        message: e.to_string(),
+                    })?;
 
             let check_url = check.url().to_string();
             debug!(

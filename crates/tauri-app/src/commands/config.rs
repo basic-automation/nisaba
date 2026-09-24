@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use nisaba_amazon::AmazonAdapter;
 use nisaba_core::config::AppConfig;
 use nisaba_core::crypto;
 use nisaba_core::sync_engine::SyncCommand;
 use nisaba_core::traits::PlatformAdapter;
 use nisaba_core::types::{Platform, PlatformCapabilities};
-use nisaba_amazon::AmazonAdapter;
 use nisaba_ebay::EbayAdapter;
 use nisaba_squarespace::SquarespaceAdapter;
 use nisaba_xmrbazaar::XmrBazaarAdapter;
@@ -21,13 +21,8 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
 }
 
 #[tauri::command]
-pub async fn update_config(
-    state: State<'_, AppState>,
-    config: AppConfig,
-) -> Result<(), String> {
-    config
-        .save(&state.config_path)
-        .map_err(|e| e.to_string())?;
+pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
+    config.save(&state.config_path).map_err(|e| e.to_string())?;
 
     // Rebuild adapters overlaying company config on the new TOML config
     let db = state.active_db().await?;
@@ -114,7 +109,9 @@ pub async fn update_company_platform_config(
 ) -> Result<(), String> {
     let company_id = {
         let id = state.active_company_id.read().await;
-        id.as_ref().cloned().ok_or_else(|| "No active company".to_string())?
+        id.as_ref()
+            .cloned()
+            .ok_or_else(|| "No active company".to_string())?
     };
 
     // Load secret from keyring and encrypt
@@ -122,8 +119,8 @@ pub async fn update_company_platform_config(
         .map_err(|e| format!("Failed to load company secret: {e}"))?;
     let key = crypto::derive_key(&secret);
 
-    let json_str = serde_json::to_string(&config)
-        .map_err(|e| format!("Failed to serialize config: {e}"))?;
+    let json_str =
+        serde_json::to_string(&config).map_err(|e| format!("Failed to serialize config: {e}"))?;
     let encrypted = crypto::encrypt(&json_str, &key);
 
     // Save to company DB

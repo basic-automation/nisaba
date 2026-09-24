@@ -4,16 +4,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum SyncError {
     #[error("Platform {platform} authentication failed: {message}")]
-    AuthError {
-        platform: Platform,
-        message: String,
-    },
+    AuthError { platform: Platform, message: String },
 
     #[error("Platform {platform} API error: {message}")]
-    ApiError {
-        platform: Platform,
-        message: String,
-    },
+    ApiError { platform: Platform, message: String },
 
     #[error("Platform {platform} rate limited, retry after {retry_after_secs}s")]
     RateLimited {
@@ -22,10 +16,7 @@ pub enum SyncError {
     },
 
     #[error("Platform {platform} network error: {message}")]
-    NetworkError {
-        platform: Platform,
-        message: String,
-    },
+    NetworkError { platform: Platform, message: String },
 
     #[error("Database error: {0}")]
     DatabaseError(String),
@@ -34,21 +25,13 @@ pub enum SyncError {
     ConfigError(String),
 
     #[error("Conflict resolution failed for product {product_id}: {message}")]
-    ConflictError {
-        product_id: String,
-        message: String,
-    },
+    ConflictError { product_id: String, message: String },
 
     #[error("Platform {platform} is not enabled")]
-    PlatformDisabled {
-        platform: Platform,
-    },
+    PlatformDisabled { platform: Platform },
 
     #[error("eBay revision limit reached for SKU {sku} ({count}/250 today)")]
-    EbayRevisionLimit {
-        sku: String,
-        count: u32,
-    },
+    EbayRevisionLimit { sku: String, count: u32 },
 
     #[error("Parse error: {0}")]
     ParseError(String),

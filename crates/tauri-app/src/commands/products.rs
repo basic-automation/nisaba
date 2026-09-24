@@ -231,9 +231,7 @@ pub async fn delete_variant(state: State<'_, AppState>, id: String) -> Result<()
         .await
         .map_err(|e| e.to_string())?
         .ok_or("Variant not found")?;
-    db.delete_variant(&id)
-        .await
-        .map_err(|e| e.to_string())?;
+    db.delete_variant(&id).await.map_err(|e| e.to_string())?;
     db.recalc_product_quantity(&variant.product_id)
         .await
         .map_err(|e| e.to_string())?;

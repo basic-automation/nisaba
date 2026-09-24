@@ -9,8 +9,7 @@ use crate::endpoints::Endpoints;
 use crate::scraper as html;
 use crate::types::{StockModeField, XmrListing, XmrListingDetail, XmrSaleRecord};
 
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0";
 
 pub struct XmrBazaarClient {
     /// Main HTTP client with redirect following.
@@ -132,9 +131,11 @@ impl XmrBazaarClient {
             message: e.to_string(),
         })?;
 
-        let form_data = html::parse_edit_form(&page).ok_or_else(|| SyncError::ParseError(
-            format!("Could not parse edit form for listing {listing_id}"),
-        ))?;
+        let form_data = html::parse_edit_form(&page).ok_or_else(|| {
+            SyncError::ParseError(format!(
+                "Could not parse edit form for listing {listing_id}"
+            ))
+        })?;
 
         // Build the form submission with updated quantity
         let qty_str = quantity.to_string();
@@ -177,7 +178,10 @@ impl XmrBazaarClient {
             let body = resp.text().await.unwrap_or_default();
             Err(SyncError::ApiError {
                 platform: Platform::XmrBazaar,
-                message: format!("Edit form submission failed ({status}): {}", &body[..body.len().min(200)]),
+                message: format!(
+                    "Edit form submission failed ({status}): {}",
+                    &body[..body.len().min(200)]
+                ),
             })
         }
     }
@@ -221,10 +225,9 @@ impl XmrBazaarClient {
             message: e.to_string(),
         })?;
 
-        let detail = html::parse_listing_detail(&page, endpoints.base_url())
-            .ok_or_else(|| SyncError::ParseError(
-                format!("Could not parse listing detail for {listing_id}"),
-            ))?;
+        let detail = html::parse_listing_detail(&page, endpoints.base_url()).ok_or_else(|| {
+            SyncError::ParseError(format!("Could not parse listing detail for {listing_id}"))
+        })?;
 
         debug!(
             listing_id,
@@ -450,9 +453,8 @@ impl XmrBazaarClient {
             message: e.to_string(),
         })?;
 
-        let form_data = html::parse_edit_form(&page).ok_or_else(|| {
-            SyncError::ParseError("Could not parse new listing form".to_string())
-        })?;
+        let form_data = html::parse_edit_form(&page)
+            .ok_or_else(|| SyncError::ParseError("Could not parse new listing form".to_string()))?;
 
         // Prepare our override values
         let currency = request
@@ -521,22 +523,20 @@ impl XmrBazaarClient {
         let mut downloaded_photos: Vec<(Vec<u8>, String)> = Vec::new(); // (bytes, filename)
         for (i, photo_url) in request.photo_urls.iter().take(max_photos).enumerate() {
             match self.http.get(photo_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.bytes().await {
-                        Ok(bytes) => {
-                            let filename = photo_url
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or("photo.jpg")
-                                .to_string();
-                            debug!(index = i, url = %photo_url, bytes = bytes.len(), "Downloaded photo");
-                            downloaded_photos.push((bytes.to_vec(), filename));
-                        }
-                        Err(e) => {
-                            debug!(url = %photo_url, error = %e, "Failed to read photo bytes, skipping");
-                        }
+                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                    Ok(bytes) => {
+                        let filename = photo_url
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("photo.jpg")
+                            .to_string();
+                        debug!(index = i, url = %photo_url, bytes = bytes.len(), "Downloaded photo");
+                        downloaded_photos.push((bytes.to_vec(), filename));
                     }
-                }
+                    Err(e) => {
+                        debug!(url = %photo_url, error = %e, "Failed to read photo bytes, skipping");
+                    }
+                },
                 Ok(resp) => {
                     debug!(url = %photo_url, status = %resp.status(), "Failed to download photo, skipping");
                 }
@@ -606,7 +606,10 @@ impl XmrBazaarClient {
                 form = form.part("photo", part);
             } else {
                 // additional_photo_selector_N=enabled tells the server an extra photo follows
-                form = form.text(format!("additional_photo_selector_{i}"), "enabled".to_string());
+                form = form.text(
+                    format!("additional_photo_selector_{i}"),
+                    "enabled".to_string(),
+                );
                 form = form.part(format!("additional_photo_{i}"), part);
             }
         }
@@ -671,9 +674,7 @@ impl XmrBazaarClient {
 
         Err(SyncError::ApiError {
             platform: Platform::XmrBazaar,
-            message: format!(
-                "Listing creation failed ({status}). {error_detail}"
-            ),
+            message: format!("Listing creation failed ({status}). {error_detail}"),
         })
     }
 
@@ -720,13 +721,18 @@ impl XmrBazaarClient {
             message: e.to_string(),
         })?;
 
-        let form_data = html::parse_edit_form(&page).ok_or_else(|| SyncError::ParseError(
-            format!("Could not parse edit form for listing {listing_id}"),
-        ))?;
+        let form_data = html::parse_edit_form(&page).ok_or_else(|| {
+            SyncError::ParseError(format!(
+                "Could not parse edit form for listing {listing_id}"
+            ))
+        })?;
 
         // Build the form submission with the updated field
         let mut form_params: Vec<(String, String)> = Vec::new();
-        form_params.push((form_data.csrf_field_name.clone(), form_data.csrf_token.clone()));
+        form_params.push((
+            form_data.csrf_field_name.clone(),
+            form_data.csrf_token.clone(),
+        ));
 
         let mut field_set = false;
         for (name, value) in &form_data.fields {

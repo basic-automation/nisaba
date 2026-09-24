@@ -155,7 +155,10 @@ pub struct EbayCreateItemRequest {
     pub product: EbayCreateItemProduct,
     pub availability: Option<EbayCreateItemAvailability>,
     pub condition: Option<String>,
-    #[serde(rename = "conditionDescription", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "conditionDescription",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub condition_description: Option<String>,
 }
 

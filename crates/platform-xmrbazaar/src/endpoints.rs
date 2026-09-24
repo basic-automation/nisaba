@@ -17,7 +17,10 @@ impl Endpoints {
 
     fn get_config(&self, name: &str) -> (&str, String) {
         if let Some(cfg) = self.overrides.get(name) {
-            (cfg.method.as_str(), format!("{}{}", self.base_url, cfg.path))
+            (
+                cfg.method.as_str(),
+                format!("{}{}", self.base_url, cfg.path),
+            )
         } else {
             let (method, path) = Self::defaults(name);
             (method, format!("{}{}", self.base_url, path))

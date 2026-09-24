@@ -110,10 +110,7 @@ pub fn to_full_listing(item: &EbayInventoryItem, offers: &[EbayOffer]) -> FullLi
             let amount = pricing.price.as_ref()?;
             let value_str = amount.value.as_ref()?;
             let value: f64 = value_str.parse().ok()?;
-            let currency = amount
-                .currency
-                .clone()
-                .unwrap_or_else(|| "USD".to_string());
+            let currency = amount.currency.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice {
                 amount: value,
                 currency,
@@ -188,10 +185,7 @@ pub fn trading_to_full_listing(item: &TradingItem) -> FullListing {
     let sold_qty = item.quantity_sold.unwrap_or(0);
     let available = total_qty - sold_qty;
 
-    let title = item
-        .title
-        .clone()
-        .unwrap_or_else(|| item.item_id.clone());
+    let title = item.title.clone().unwrap_or_else(|| item.item_id.clone());
 
     let description = item.description.clone().map(|html| ListingDescription {
         platform: Platform::Ebay,
@@ -225,10 +219,7 @@ pub fn trading_to_full_listing(item: &TradingItem) -> FullListing {
         .and_then(|ss| ss.current_price.as_ref())
         .and_then(|cp| {
             let val: f64 = cp.value.as_ref()?.parse().ok()?;
-            let currency = cp
-                .currency_id
-                .clone()
-                .unwrap_or_else(|| "USD".to_string());
+            let currency = cp.currency_id.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice {
                 amount: val,
                 currency,
@@ -257,19 +248,13 @@ pub fn trading_to_listing(item: &TradingItem) -> PlatformListing {
     let sold_qty = item.quantity_sold.unwrap_or(0);
     let available = total_qty - sold_qty;
 
-    let title = item
-        .title
-        .clone()
-        .unwrap_or_else(|| item.item_id.clone());
+    let title = item.title.clone().unwrap_or_else(|| item.item_id.clone());
 
-    let image_url = item
-        .picture_details
-        .as_ref()
-        .and_then(|pd| {
-            pd.gallery_url
-                .clone()
-                .or_else(|| pd.picture_urls.first().cloned())
-        });
+    let image_url = item.picture_details.as_ref().and_then(|pd| {
+        pd.gallery_url
+            .clone()
+            .or_else(|| pd.picture_urls.first().cloned())
+    });
 
     let price = item
         .selling_status

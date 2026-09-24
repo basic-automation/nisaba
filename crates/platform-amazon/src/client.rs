@@ -178,11 +178,10 @@ impl AmazonClient {
             });
         }
 
-        let item: AmazonListingItem =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Amazon,
-                message: format!("Failed to parse listing response: {e}"),
-            })?;
+        let item: AmazonListingItem = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Amazon,
+            message: format!("Failed to parse listing response: {e}"),
+        })?;
 
         debug!(sku = sku, "Fetched Amazon listing");
         Ok(item)

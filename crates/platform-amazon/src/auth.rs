@@ -63,11 +63,10 @@ impl AmazonAuth {
             });
         }
 
-        let token: AmazonTokenResponse =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Amazon,
-                message: format!("Failed to parse token response: {e}"),
-            })?;
+        let token: AmazonTokenResponse = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Amazon,
+            message: format!("Failed to parse token response: {e}"),
+        })?;
 
         debug!(
             "Amazon token exchange successful, expires in {}s",
@@ -109,11 +108,10 @@ impl AmazonAuth {
             });
         }
 
-        let token: AmazonTokenResponse =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Amazon,
-                message: format!("Failed to parse token response: {e}"),
-            })?;
+        let token: AmazonTokenResponse = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Amazon,
+            message: format!("Failed to parse token response: {e}"),
+        })?;
 
         Ok(token)
     }

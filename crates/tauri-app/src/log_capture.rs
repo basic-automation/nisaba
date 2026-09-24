@@ -56,7 +56,6 @@ impl LogBuffer {
         }
         (lines.iter().skip(cursor).cloned().collect(), total)
     }
-
 }
 
 pub struct CaptureLayer {

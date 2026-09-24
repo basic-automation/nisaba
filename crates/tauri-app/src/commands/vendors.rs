@@ -154,7 +154,11 @@ fn extract_icon(files: &HashMap<String, String>) -> Option<String> {
 fn read_directory_to_files_map(dir_path: &Path) -> Result<HashMap<String, String>, String> {
     let mut files = HashMap::new();
 
-    fn visit(base: &Path, current: &Path, files: &mut HashMap<String, String>) -> Result<(), String> {
+    fn visit(
+        base: &Path,
+        current: &Path,
+        files: &mut HashMap<String, String>,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(current)
             .map_err(|e| format!("Failed to read directory {}: {e}", current.display()))?;
         for entry in entries {
@@ -198,8 +202,8 @@ fn read_directory_to_files_map(dir_path: &Path) -> Result<HashMap<String, String
 /// Extract files from a zip archive, auto-stripping a root folder prefix if present.
 fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, String> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Failed to open zip: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip: {e}"))?;
 
     // Detect common root prefix (e.g. "plugin-v1.0/")
     // Collect all entry names first to avoid borrow issues
@@ -238,12 +242,14 @@ fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, Str
 
         if is_text_file(&name) {
             let mut content = String::new();
-            entry.read_to_string(&mut content)
+            entry
+                .read_to_string(&mut content)
                 .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
             files.insert(name, content);
         } else if is_binary_file(&name) {
             let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)
+            entry
+                .read_to_end(&mut bytes)
                 .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
             let mime = mime_for_ext(&name);
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -260,7 +266,9 @@ fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, Str
 
 /// Run VendorRuntime::read_metadata_from_files in a thread that owns a LocalSet.
 /// deno_core JsRuntime uses Rc internally and is !Send.
-async fn read_metadata_in_thread(files: HashMap<String, String>) -> Result<nisaba_vendor_runtime::PluginMetadata, String> {
+async fn read_metadata_in_thread(
+    files: HashMap<String, String>,
+) -> Result<nisaba_vendor_runtime::PluginMetadata, String> {
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -284,8 +292,12 @@ async fn execute_plugin_in_thread(
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(VendorRuntime::execute_plugin_from_files(&files, config, batch_callback))
-            .map_err(|e| format!("Plugin execution failed: {e}"))
+        rt.block_on(VendorRuntime::execute_plugin_from_files(
+            &files,
+            config,
+            batch_callback,
+        ))
+        .map_err(|e| format!("Plugin execution failed: {e}"))
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
@@ -322,8 +334,7 @@ fn parse_files_json(files_json: &str) -> Result<HashMap<String, String>, String>
     if files_json.is_empty() {
         return Err("Plugin has no files".to_string());
     }
-    serde_json::from_str(files_json)
-        .map_err(|e| format!("Failed to parse plugin files: {e}"))
+    serde_json::from_str(files_json).map_err(|e| format!("Failed to parse plugin files: {e}"))
 }
 
 // ── Registry commands (company-level, syncs via P2P) ──────────
@@ -333,7 +344,10 @@ pub async fn list_registry_plugins(
     state: State<'_, AppState>,
 ) -> Result<Vec<VendorPluginInfo>, String> {
     let db = state.active_db().await?;
-    let plugins = db.list_registry_plugins().await.map_err(|e| e.to_string())?;
+    let plugins = db
+        .list_registry_plugins()
+        .await
+        .map_err(|e| e.to_string())?;
     let installs = db.list_installed_plugins().await.unwrap_or_default();
 
     let install_map: HashMap<String, (bool, bool)> = installs
@@ -344,10 +358,7 @@ pub async fn list_registry_plugins(
     let infos = plugins
         .into_iter()
         .map(|p| {
-            let (installed, enabled) = install_map
-                .get(&p.id)
-                .copied()
-                .unwrap_or((false, false));
+            let (installed, enabled) = install_map.get(&p.id).copied().unwrap_or((false, false));
             build_plugin_info(p, installed, enabled)
         })
         .collect();
@@ -374,15 +385,18 @@ pub async fn submit_vendor_plugin(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let is_zip = content_type.contains("zip")
-        || url.ends_with(".zip");
+    let is_zip = content_type.contains("zip") || url.ends_with(".zip");
 
     let files = if is_zip {
-        let bytes = resp.bytes().await
+        let bytes = resp
+            .bytes()
+            .await
             .map_err(|e| format!("Failed to read plugin body: {e}"))?;
         extract_zip_to_files_map(&bytes)?
     } else {
-        let code = resp.text().await
+        let code = resp
+            .text()
+            .await
             .map_err(|e| format!("Failed to read plugin body: {e}"))?;
         let mut map = HashMap::new();
         map.insert("index.ts".to_string(), code);
@@ -773,8 +787,14 @@ pub async fn fetch_vendor_listings(
     let db = state.active_db().await?;
 
     // Verify installed and enabled
-    let installs = db.list_installed_plugins().await.map_err(|e| e.to_string())?;
-    if !installs.iter().any(|i| i.plugin_id == plugin_id && i.installed && i.enabled) {
+    let installs = db
+        .list_installed_plugins()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !installs
+        .iter()
+        .any(|i| i.plugin_id == plugin_id && i.installed && i.enabled)
+    {
         return Err("Plugin not installed or not enabled".to_string());
     }
 
@@ -858,8 +878,14 @@ pub async fn sync_vendor_listings(
     let db = state.active_db().await?;
 
     // Verify installed and enabled
-    let installs = db.list_installed_plugins().await.map_err(|e| e.to_string())?;
-    if !installs.iter().any(|i| i.plugin_id == plugin_id && i.installed && i.enabled) {
+    let installs = db
+        .list_installed_plugins()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !installs
+        .iter()
+        .any(|i| i.plugin_id == plugin_id && i.installed && i.enabled)
+    {
         state.vendor_syncing.lock().await.remove(&plugin_id);
         return Err("Plugin not installed or not enabled".to_string());
     }
@@ -882,21 +908,27 @@ pub async fn sync_vendor_listings(
     let files = parse_files_json(&plugin.files_json)?;
 
     // Emit started event
-    let _ = app.emit("vendor-sync", VendorSyncEvent {
-        plugin_id: plugin_id.clone(),
-        status: "started".to_string(),
-        listing_count: 0,
-        message: "Sync started".to_string(),
-    });
+    let _ = app.emit(
+        "vendor-sync",
+        VendorSyncEvent {
+            plugin_id: plugin_id.clone(),
+            status: "started".to_string(),
+            listing_count: 0,
+            message: "Sync started".to_string(),
+        },
+    );
 
     // Create batch callback to stream progressive results to the frontend
     let app_for_batch = app.clone();
     let pid_for_batch = plugin_id.clone();
     let batch_callback = BatchCallback(Box::new(move |json: String| {
-        let _ = app_for_batch.emit("vendor-sync-batch", serde_json::json!({
-            "plugin_id": pid_for_batch,
-            "listings_json": json,
-        }));
+        let _ = app_for_batch.emit(
+            "vendor-sync-batch",
+            serde_json::json!({
+                "plugin_id": pid_for_batch,
+                "listings_json": json,
+            }),
+        );
     }));
 
     let pid = plugin_id.clone();
@@ -916,49 +948,72 @@ pub async fn sync_vendor_listings(
 
                 if let Err(e) = db_spawn.save_vendor_listings_cache(&pid, &cache_rows).await {
                     tracing::error!(plugin = %pid, "Failed to save vendor listings cache: {e}");
-                    let _ = app_handle.emit("vendor-sync", VendorSyncEvent {
-                        plugin_id: pid.clone(),
-                        status: "completed".to_string(),
-                        listing_count: count,
-                        message: format!("Synced {count} listings (cache save failed: {e})"),
-                    });
+                    let _ = app_handle.emit(
+                        "vendor-sync",
+                        VendorSyncEvent {
+                            plugin_id: pid.clone(),
+                            status: "completed".to_string(),
+                            listing_count: count,
+                            message: format!("Synced {count} listings (cache save failed: {e})"),
+                        },
+                    );
                 } else {
                     // Update permanent product_vendor_data with fresh values
-                    match db_spawn.update_product_vendor_data_from_cache(&pid, &cache_rows).await {
+                    match db_spawn
+                        .update_product_vendor_data_from_cache(&pid, &cache_rows)
+                        .await
+                    {
                         Ok(n) if n > 0 => {
                             tracing::info!(plugin = %pid, updated = n, "Updated product vendor data from sync");
                             // Recalc product quantities to reflect updated vendor stock
                             match db_spawn.recalc_products_for_plugin(&pid).await {
-                                Ok(r) if r > 0 => tracing::info!(plugin = %pid, recalced = r, "Recalculated product quantities after vendor sync"),
+                                Ok(r) if r > 0 => {
+                                    tracing::info!(plugin = %pid, recalced = r, "Recalculated product quantities after vendor sync")
+                                }
                                 Ok(_) => {}
-                                Err(e) => tracing::warn!(plugin = %pid, "Failed to recalc products after vendor sync: {e}"),
+                                Err(e) => {
+                                    tracing::warn!(plugin = %pid, "Failed to recalc products after vendor sync: {e}")
+                                }
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => tracing::warn!(plugin = %pid, "Failed to update product vendor data: {e}"),
+                        Err(e) => {
+                            tracing::warn!(plugin = %pid, "Failed to update product vendor data: {e}")
+                        }
                     }
 
                     tracing::info!(plugin = %pid, count, "Saved vendor listings cache");
-                    let _ = app_handle.emit("vendor-sync", VendorSyncEvent {
-                        plugin_id: pid.clone(),
-                        status: "completed".to_string(),
-                        listing_count: count,
-                        message: format!("Synced {count} listings"),
-                    });
+                    let _ = app_handle.emit(
+                        "vendor-sync",
+                        VendorSyncEvent {
+                            plugin_id: pid.clone(),
+                            status: "completed".to_string(),
+                            listing_count: count,
+                            message: format!("Synced {count} listings"),
+                        },
+                    );
                 }
             }
             Err(e) => {
-                let _ = app_handle.emit("vendor-sync", VendorSyncEvent {
-                    plugin_id: pid.clone(),
-                    status: "failed".to_string(),
-                    listing_count: 0,
-                    message: e.clone(),
-                });
+                let _ = app_handle.emit(
+                    "vendor-sync",
+                    VendorSyncEvent {
+                        plugin_id: pid.clone(),
+                        status: "failed".to_string(),
+                        listing_count: 0,
+                        message: e.clone(),
+                    },
+                );
                 tracing::error!(plugin = %pid, "Vendor sync failed: {e}");
             }
         }
 
-        app_handle.state::<AppState>().vendor_syncing.lock().await.remove(&pid);
+        app_handle
+            .state::<AppState>()
+            .vendor_syncing
+            .lock()
+            .await
+            .remove(&pid);
     });
 
     Ok(())
@@ -971,7 +1026,10 @@ pub async fn get_vendor_sync_status(
 ) -> Result<VendorSyncStatus, String> {
     let syncing = state.vendor_syncing.lock().await.contains(&plugin_id);
     let db = state.active_db().await?;
-    let meta = db.get_vendor_cache_meta(&plugin_id).await.map_err(|e| e.to_string())?;
+    let meta = db
+        .get_vendor_cache_meta(&plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(VendorSyncStatus {
         syncing,
@@ -1294,40 +1352,55 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
                 return;
             }
 
-            match db.update_product_vendor_data_from_cache(&plugin_id, &cache_rows).await {
+            match db
+                .update_product_vendor_data_from_cache(&plugin_id, &cache_rows)
+                .await
+            {
                 Ok(n) if n > 0 => {
                     tracing::info!(plugin = %plugin_id, updated = n, "Auto vendor sync: updated product vendor data");
                     match db.recalc_products_for_plugin(&plugin_id).await {
-                        Ok(r) if r > 0 => tracing::info!(plugin = %plugin_id, recalced = r, "Auto vendor sync: recalculated quantities"),
+                        Ok(r) if r > 0 => {
+                            tracing::info!(plugin = %plugin_id, recalced = r, "Auto vendor sync: recalculated quantities")
+                        }
                         Ok(_) => {}
-                        Err(e) => tracing::warn!(plugin = %plugin_id, "Auto vendor sync: recalc failed: {e}"),
+                        Err(e) => {
+                            tracing::warn!(plugin = %plugin_id, "Auto vendor sync: recalc failed: {e}")
+                        }
                     }
                 }
                 Ok(_) => {}
-                Err(e) => tracing::warn!(plugin = %plugin_id, "Auto vendor sync: update product data failed: {e}"),
+                Err(e) => {
+                    tracing::warn!(plugin = %plugin_id, "Auto vendor sync: update product data failed: {e}")
+                }
             }
 
             tracing::info!(plugin = %plugin.display_name, count, "Auto vendor sync complete");
 
             // Notify frontend if app handle is available
             if let Some(ref app) = app {
-                let _ = app.emit("vendor-sync", VendorSyncEvent {
-                    plugin_id: plugin_id.clone(),
-                    status: "completed".to_string(),
-                    listing_count: count,
-                    message: format!("Auto-synced {count} listings"),
-                });
+                let _ = app.emit(
+                    "vendor-sync",
+                    VendorSyncEvent {
+                        plugin_id: plugin_id.clone(),
+                        status: "completed".to_string(),
+                        listing_count: count,
+                        message: format!("Auto-synced {count} listings"),
+                    },
+                );
             }
         }
         Err(e) => {
             tracing::error!(plugin = %plugin.display_name, "Auto vendor sync failed: {e}");
             if let Some(ref app) = app {
-                let _ = app.emit("vendor-sync", VendorSyncEvent {
-                    plugin_id: plugin_id.clone(),
-                    status: "failed".to_string(),
-                    listing_count: 0,
-                    message: format!("Auto-sync failed: {e}"),
-                });
+                let _ = app.emit(
+                    "vendor-sync",
+                    VendorSyncEvent {
+                        plugin_id: plugin_id.clone(),
+                        status: "failed".to_string(),
+                        listing_count: 0,
+                        message: format!("Auto-sync failed: {e}"),
+                    },
+                );
             }
         }
     }
@@ -1337,7 +1410,10 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
 /// Skips if another auto-sync is already running.
 pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
     // Prevent overlapping runs — if already syncing, skip silently
-    if AUTO_VENDOR_SYNC_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if AUTO_VENDOR_SYNC_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         tracing::debug!("Auto vendor sync: skipping, already running");
         return;
     }
@@ -1368,7 +1444,10 @@ pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
         return;
     }
 
-    tracing::info!(count = active.len(), "Auto vendor sync: refreshing all plugins");
+    tracing::info!(
+        count = active.len(),
+        "Auto vendor sync: refreshing all plugins"
+    );
 
     for install in active {
         run_vendor_sync_single(db.clone(), install.plugin_id, app.clone()).await;

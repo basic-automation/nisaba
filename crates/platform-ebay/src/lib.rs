@@ -13,16 +13,15 @@ use nisaba_core::db::Db;
 use nisaba_core::error::SyncError;
 use nisaba_core::traits::PlatformAdapter;
 use nisaba_core::types::{
-    CreateListingRequest, FullListing, ListingDescription, ListingPhoto, ListingPrice,
-    Platform, PlatformCapabilities, PlatformInventoryItem, PlatformListing, UpdateListingRequest,
+    CreateListingRequest, FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform,
+    PlatformCapabilities, PlatformInventoryItem, PlatformListing, UpdateListingRequest,
 };
 use tracing::{debug, info, warn};
 
 use crate::types::{
+    EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion, EbayCreateAmount,
     EbayCreateItemAvailability, EbayCreateItemProduct, EbayCreateItemRequest,
-    EbayCreateOfferRequest, EbayCreateOfferPricing, EbayCreateAmount, EbayListingPolicies,
-    EbayCategorySuggestion, EbayAspectMetadata, EbayBusinessPolicy,
-    ShipToLocationUpdate,
+    EbayCreateOfferPricing, EbayCreateOfferRequest, EbayListingPolicies, ShipToLocationUpdate,
 };
 
 use crate::auth::EbayAuth;
@@ -82,8 +81,7 @@ impl EbayAdapter {
     pub async fn complete_auth(&self, code: &str) -> Result<(), SyncError> {
         let token = self.auth.exchange_code(self.client.http(), code).await?;
 
-        let expires_at = Utc::now()
-            + chrono::Duration::seconds(token.expires_in);
+        let expires_at = Utc::now() + chrono::Duration::seconds(token.expires_in);
         let expires_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
         self.db
@@ -119,7 +117,9 @@ impl EbayAdapter {
         let needs_refresh = {
             let expires = self.expires_at.read().await;
             match *expires {
-                Some(exp) => Utc::now() + chrono::Duration::seconds(TOKEN_REFRESH_MARGIN_SECS) >= exp,
+                Some(exp) => {
+                    Utc::now() + chrono::Duration::seconds(TOKEN_REFRESH_MARGIN_SECS) >= exp
+                }
                 None => false, // No expiry info — assume it's still valid
             }
         };
@@ -154,15 +154,27 @@ impl EbayAdapter {
         marketplace_id: &str,
     ) -> Result<Vec<EbayCategorySuggestion>, SyncError> {
         let token = self.get_access_token().await?;
-        let tree_id = self.client.get_default_category_tree_id(&token, marketplace_id).await?;
-        self.client.get_category_suggestions(&token, &tree_id, query).await
+        let tree_id = self
+            .client
+            .get_default_category_tree_id(&token, marketplace_id)
+            .await?;
+        self.client
+            .get_category_suggestions(&token, &tree_id, query)
+            .await
     }
 
     /// Get all business policies (fulfillment, payment, return) for the seller.
     pub async fn get_business_policies(
         &self,
         marketplace_id: &str,
-    ) -> Result<(Vec<EbayBusinessPolicy>, Vec<EbayBusinessPolicy>, Vec<EbayBusinessPolicy>), SyncError> {
+    ) -> Result<
+        (
+            Vec<EbayBusinessPolicy>,
+            Vec<EbayBusinessPolicy>,
+            Vec<EbayBusinessPolicy>,
+        ),
+        SyncError,
+    > {
         let token = self.get_access_token().await?;
         let (fulfillment, payment, ret) = tokio::try_join!(
             self.client.get_fulfillment_policies(&token, marketplace_id),
@@ -179,8 +191,13 @@ impl EbayAdapter {
         marketplace_id: &str,
     ) -> Result<Vec<EbayAspectMetadata>, SyncError> {
         let token = self.get_access_token().await?;
-        let tree_id = self.client.get_default_category_tree_id(&token, marketplace_id).await?;
-        self.client.get_item_aspects_for_category(&token, &tree_id, category_id).await
+        let tree_id = self
+            .client
+            .get_default_category_tree_id(&token, marketplace_id)
+            .await?;
+        self.client
+            .get_item_aspects_for_category(&token, &tree_id, category_id)
+            .await
     }
 
     /// Internal refresh logic shared by get_access_token and refresh_auth.
@@ -196,8 +213,7 @@ impl EbayAdapter {
             .refresh_token(self.client.http(), &refresh)
             .await?;
 
-        let expires_at = Utc::now()
-            + chrono::Duration::seconds(token.expires_in);
+        let expires_at = Utc::now() + chrono::Duration::seconds(token.expires_in);
         let expires_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
         self.db
@@ -251,11 +267,11 @@ impl PlatformAdapter for EbayAdapter {
                 let mut sku_prices: std::collections::HashMap<String, f64> =
                     std::collections::HashMap::new();
                 for offer in &offers {
-                    if let (Some(sku), Some(pricing)) =
-                        (&offer.sku, &offer.pricing_summary)
-                    {
+                    if let (Some(sku), Some(pricing)) = (&offer.sku, &offer.pricing_summary) {
                         if let Some(amount) = &pricing.price {
-                            if let Some(val) = amount.value.as_ref().and_then(|v| v.parse::<f64>().ok()) {
+                            if let Some(val) =
+                                amount.value.as_ref().and_then(|v| v.parse::<f64>().ok())
+                            {
                                 sku_prices.insert(sku.clone(), val);
                             }
                         }
@@ -279,8 +295,10 @@ impl PlatformAdapter for EbayAdapter {
         match self.client.fetch_active_listings_trading(&token).await {
             Ok(trading_items) => {
                 // Collect existing SKUs to avoid duplicates
-                let existing_skus: std::collections::HashSet<String> =
-                    listings.iter().map(|l| l.platform_item_id.clone()).collect();
+                let existing_skus: std::collections::HashSet<String> = listings
+                    .iter()
+                    .map(|l| l.platform_item_id.clone())
+                    .collect();
 
                 for item in &trading_items {
                     // Skip if we already have this item via Inventory API (matched by SKU)
@@ -317,14 +335,15 @@ impl PlatformAdapter for EbayAdapter {
         Ok(())
     }
 
-    async fn fetch_full_listing(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<FullListing, SyncError> {
+    async fn fetch_full_listing(&self, platform_item_id: &str) -> Result<FullListing, SyncError> {
         let token = self.get_access_token().await?;
 
         // Try Inventory API first (SKU-based items)
-        match self.client.fetch_inventory_item(&token, platform_item_id).await {
+        match self
+            .client
+            .fetch_inventory_item(&token, platform_item_id)
+            .await
+        {
             Ok(item) => {
                 let offers = self.client.fetch_offers(&token, platform_item_id).await?;
                 Ok(mapping::to_full_listing(&item, &offers))
@@ -345,7 +364,10 @@ impl PlatformAdapter for EbayAdapter {
         platform_item_id: &str,
     ) -> Result<Option<ListingDescription>, SyncError> {
         let token = self.get_access_token().await?;
-        let item = self.client.fetch_inventory_item(&token, platform_item_id).await?;
+        let item = self
+            .client
+            .fetch_inventory_item(&token, platform_item_id)
+            .await?;
 
         let description = item
             .product
@@ -362,12 +384,12 @@ impl PlatformAdapter for EbayAdapter {
         Ok(description)
     }
 
-    async fn fetch_photos(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Vec<ListingPhoto>, SyncError> {
+    async fn fetch_photos(&self, platform_item_id: &str) -> Result<Vec<ListingPhoto>, SyncError> {
         let token = self.get_access_token().await?;
-        let item = self.client.fetch_inventory_item(&token, platform_item_id).await?;
+        let item = self
+            .client
+            .fetch_inventory_item(&token, platform_item_id)
+            .await?;
 
         let photos = item
             .product
@@ -390,10 +412,7 @@ impl PlatformAdapter for EbayAdapter {
         Ok(photos)
     }
 
-    async fn fetch_price(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Option<ListingPrice>, SyncError> {
+    async fn fetch_price(&self, platform_item_id: &str) -> Result<Option<ListingPrice>, SyncError> {
         let token = self.get_access_token().await?;
         let offers = self.client.fetch_offers(&token, platform_item_id).await?;
 
@@ -404,10 +423,7 @@ impl PlatformAdapter for EbayAdapter {
                 let amount = pricing.price.as_ref()?;
                 let value_str = amount.value.as_ref()?;
                 let value: f64 = value_str.parse().ok()?;
-                let currency = amount
-                    .currency
-                    .clone()
-                    .unwrap_or_else(|| "USD".to_string());
+                let currency = amount.currency.clone().unwrap_or_else(|| "USD".to_string());
                 Some(ListingPrice {
                     amount: value,
                     currency,
@@ -426,7 +442,10 @@ impl PlatformAdapter for EbayAdapter {
         let token = self.get_access_token().await?;
 
         // Fetch current quantity so we don't change it
-        let item = self.client.fetch_inventory_item(&token, platform_item_id).await?;
+        let item = self
+            .client
+            .fetch_inventory_item(&token, platform_item_id)
+            .await?;
         let quantity = item
             .availability
             .as_ref()
@@ -445,11 +464,7 @@ impl PlatformAdapter for EbayAdapter {
             .await
     }
 
-    async fn set_description(
-        &self,
-        platform_item_id: &str,
-        html: &str,
-    ) -> Result<(), SyncError> {
+    async fn set_description(&self, platform_item_id: &str, html: &str) -> Result<(), SyncError> {
         let token = self.get_access_token().await?;
         self.client
             .update_inventory_item(&token, platform_item_id, html)
@@ -486,20 +501,26 @@ impl PlatformAdapter for EbayAdapter {
             });
 
         if has_inv_changes {
-            let aspects: Option<std::collections::HashMap<String, Vec<String>>> =
-                extras.and_then(|e| e.get("ebay_aspects"))
-                    .and_then(|json| serde_json::from_str(json).ok());
-            let condition = extras.and_then(|e| e.get("ebay_condition")).map(|s| s.as_str());
-            let condition_desc = extras.and_then(|e| e.get("ebay_condition_description")).map(|s| s.as_str());
+            let aspects: Option<std::collections::HashMap<String, Vec<String>>> = extras
+                .and_then(|e| e.get("ebay_aspects"))
+                .and_then(|json| serde_json::from_str(json).ok());
+            let condition = extras
+                .and_then(|e| e.get("ebay_condition"))
+                .map(|s| s.as_str());
+            let condition_desc = extras
+                .and_then(|e| e.get("ebay_condition_description"))
+                .map(|s| s.as_str());
 
-            self.client.update_inventory_item_full(
-                &token,
-                platform_item_id,
-                request.description_html.as_deref(),
-                aspects.as_ref(),
-                condition,
-                condition_desc,
-            ).await?;
+            self.client
+                .update_inventory_item_full(
+                    &token,
+                    platform_item_id,
+                    request.description_html.as_deref(),
+                    aspects.as_ref(),
+                    condition,
+                    condition_desc,
+                )
+                .await?;
         }
 
         if let Some(price) = &request.price {
@@ -552,43 +573,49 @@ impl PlatformAdapter for EbayAdapter {
         Ok(())
     }
 
-    async fn create_listing(
-        &self,
-        request: CreateListingRequest,
-    ) -> Result<String, SyncError> {
+    async fn create_listing(&self, request: CreateListingRequest) -> Result<String, SyncError> {
         let token = self.get_access_token().await?;
 
         // Use the provided SKU, or generate one from the title
-        let sku = request
-            .sku
-            .clone()
-            .unwrap_or_else(|| {
-                let sanitized: String = request
-                    .title
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                    .take(50)
-                    .collect();
-                format!("{}-{}", sanitized, chrono::Utc::now().timestamp_millis())
-            });
+        let sku = request.sku.clone().unwrap_or_else(|| {
+            let sanitized: String = request
+                .title
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .take(50)
+                .collect();
+            format!("{}-{}", sanitized, chrono::Utc::now().timestamp_millis())
+        });
 
         // Parse extras for eBay-specific fields
-        let condition = request.extras.get("ebay_condition")
+        let condition = request
+            .extras
+            .get("ebay_condition")
             .cloned()
             .unwrap_or_else(|| "NEW".to_string());
         let condition_description = request.extras.get("ebay_condition_description").cloned();
         let category_id = request.extras.get("ebay_category_id").cloned();
 
-        let aspects: Option<std::collections::HashMap<String, Vec<String>>> =
-            request.extras.get("ebay_aspects")
-                .and_then(|json| serde_json::from_str(json).ok());
+        let aspects: Option<std::collections::HashMap<String, Vec<String>>> = request
+            .extras
+            .get("ebay_aspects")
+            .and_then(|json| serde_json::from_str(json).ok());
 
-        let fulfillment_policy_id = request.extras.get("ebay_fulfillment_policy_id")
-            .cloned().unwrap_or_default();
-        let payment_policy_id = request.extras.get("ebay_payment_policy_id")
-            .cloned().unwrap_or_default();
-        let return_policy_id = request.extras.get("ebay_return_policy_id")
-            .cloned().unwrap_or_default();
+        let fulfillment_policy_id = request
+            .extras
+            .get("ebay_fulfillment_policy_id")
+            .cloned()
+            .unwrap_or_default();
+        let payment_policy_id = request
+            .extras
+            .get("ebay_payment_policy_id")
+            .cloned()
+            .unwrap_or_default();
+        let return_policy_id = request
+            .extras
+            .get("ebay_return_policy_id")
+            .cloned()
+            .unwrap_or_default();
 
         // Step 1: Create the inventory item
         let create_item = EbayCreateItemRequest {
@@ -624,7 +651,9 @@ impl PlatformAdapter for EbayAdapter {
         let offer_request = EbayCreateOfferRequest {
             sku: sku.clone(),
             marketplace_id: "EBAY_US".to_string(),
-            format: request.extras.get("ebay_format")
+            format: request
+                .extras
+                .get("ebay_format")
                 .cloned()
                 .unwrap_or_else(|| "FIXED_PRICE".to_string()),
             available_quantity: request.quantity,
@@ -642,10 +671,7 @@ impl PlatformAdapter for EbayAdapter {
             category_id,
         };
 
-        let offer_id = self
-            .client
-            .create_offer(&token, &offer_request)
-            .await?;
+        let offer_id = self.client.create_offer(&token, &offer_request).await?;
 
         // Step 3: Publish the offer to make it live
         let listing_id = self.client.publish_offer(&token, &offer_id).await?;

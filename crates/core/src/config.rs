@@ -212,7 +212,9 @@ impl AppConfig {
     /// Resolve which config file to use:
     ///   1. Explicit path (from CLI arg)
     ///   2. `%APPDATA%/nisaba/config.toml` — created with defaults if missing
-    pub fn resolve_and_load(explicit_path: Option<&str>) -> Result<(Self, std::path::PathBuf), SyncError> {
+    pub fn resolve_and_load(
+        explicit_path: Option<&str>,
+    ) -> Result<(Self, std::path::PathBuf), SyncError> {
         if let Some(p) = explicit_path {
             let path = std::path::PathBuf::from(p);
             if !path.exists() {
@@ -237,10 +239,9 @@ impl AppConfig {
         let config_path = data_dir.join("config.toml");
 
         if !config_path.exists() {
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|e| SyncError::ConfigError(format!(
-                    "Failed to create {}: {e}", data_dir.display()
-                )))?;
+            std::fs::create_dir_all(&data_dir).map_err(|e| {
+                SyncError::ConfigError(format!("Failed to create {}: {e}", data_dir.display()))
+            })?;
 
             let default_config = Self::default_config();
             default_config.save(&config_path)?;

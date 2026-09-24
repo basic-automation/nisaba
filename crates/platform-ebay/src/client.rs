@@ -233,11 +233,10 @@ impl EbayClient {
             });
         }
 
-        let item: EbayInventoryItem =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Ebay,
-                message: format!("Failed to parse inventory item response: {e}"),
-            })?;
+        let item: EbayInventoryItem = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse inventory item response: {e}"),
+        })?;
 
         debug!(sku = sku, "Fetched eBay inventory item");
         Ok(item)
@@ -312,10 +311,7 @@ impl EbayClient {
     }
 
     /// Fetch all offers across all SKUs (for bulk price lookup).
-    pub async fn fetch_all_offers(
-        &self,
-        access_token: &str,
-    ) -> Result<Vec<EbayOffer>, SyncError> {
+    pub async fn fetch_all_offers(&self, access_token: &str) -> Result<Vec<EbayOffer>, SyncError> {
         let mut all_offers = Vec::new();
         let mut offset = 0;
         let limit = 100;
@@ -672,7 +668,11 @@ impl EbayClient {
             });
         }
 
-        debug!(sku = sku, price = price, "Updated eBay price via bulk endpoint");
+        debug!(
+            sku = sku,
+            price = price,
+            "Updated eBay price via bulk endpoint"
+        );
         Ok(())
     }
 
@@ -683,10 +683,7 @@ impl EbayClient {
         offer_id: &str,
         body: &serde_json::Value,
     ) -> Result<(), SyncError> {
-        let url = format!(
-            "{}/sell/inventory/v1/offer/{}",
-            self.api_base, offer_id
-        );
+        let url = format!("{}/sell/inventory/v1/offer/{}", self.api_base, offer_id);
 
         let resp = self
             .http
@@ -825,20 +822,41 @@ impl EbayClient {
             "{}/sell/account/v1/fulfillment_policy?marketplace_id={}",
             self.api_base, marketplace_id
         );
-        let resp = self.http.get(&url).bearer_auth(access_token).send().await
-            .map_err(|e| SyncError::NetworkError { platform: Platform::Ebay, message: e.to_string() })?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SyncError::ApiError { platform: Platform::Ebay, message: format!("Get fulfillment policies failed: {body}") });
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Get fulfillment policies failed: {body}"),
+            });
         }
 
-        let data: EbayFulfillmentPoliciesResponse = resp.json().await
-            .map_err(|e| SyncError::ApiError { platform: Platform::Ebay, message: format!("Parse fulfillment policies failed: {e}") })?;
+        let data: EbayFulfillmentPoliciesResponse =
+            resp.json().await.map_err(|e| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Parse fulfillment policies failed: {e}"),
+            })?;
 
-        Ok(data.policies.into_iter().filter_map(|p| {
-            Some(EbayBusinessPolicy { id: p.id?, name: p.name.unwrap_or_default() })
-        }).collect())
+        Ok(data
+            .policies
+            .into_iter()
+            .filter_map(|p| {
+                Some(EbayBusinessPolicy {
+                    id: p.id?,
+                    name: p.name.unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     /// Fetch all payment policies for the seller.
@@ -851,20 +869,41 @@ impl EbayClient {
             "{}/sell/account/v1/payment_policy?marketplace_id={}",
             self.api_base, marketplace_id
         );
-        let resp = self.http.get(&url).bearer_auth(access_token).send().await
-            .map_err(|e| SyncError::NetworkError { platform: Platform::Ebay, message: e.to_string() })?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SyncError::ApiError { platform: Platform::Ebay, message: format!("Get payment policies failed: {body}") });
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Get payment policies failed: {body}"),
+            });
         }
 
-        let data: EbayPaymentPoliciesResponse = resp.json().await
-            .map_err(|e| SyncError::ApiError { platform: Platform::Ebay, message: format!("Parse payment policies failed: {e}") })?;
+        let data: EbayPaymentPoliciesResponse =
+            resp.json().await.map_err(|e| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Parse payment policies failed: {e}"),
+            })?;
 
-        Ok(data.policies.into_iter().filter_map(|p| {
-            Some(EbayBusinessPolicy { id: p.id?, name: p.name.unwrap_or_default() })
-        }).collect())
+        Ok(data
+            .policies
+            .into_iter()
+            .filter_map(|p| {
+                Some(EbayBusinessPolicy {
+                    id: p.id?,
+                    name: p.name.unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     /// Fetch all return policies for the seller.
@@ -877,20 +916,41 @@ impl EbayClient {
             "{}/sell/account/v1/return_policy?marketplace_id={}",
             self.api_base, marketplace_id
         );
-        let resp = self.http.get(&url).bearer_auth(access_token).send().await
-            .map_err(|e| SyncError::NetworkError { platform: Platform::Ebay, message: e.to_string() })?;
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SyncError::ApiError { platform: Platform::Ebay, message: format!("Get return policies failed: {body}") });
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Get return policies failed: {body}"),
+            });
         }
 
-        let data: EbayReturnPoliciesResponse = resp.json().await
-            .map_err(|e| SyncError::ApiError { platform: Platform::Ebay, message: format!("Parse return policies failed: {e}") })?;
+        let data: EbayReturnPoliciesResponse =
+            resp.json().await.map_err(|e| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Parse return policies failed: {e}"),
+            })?;
 
-        Ok(data.policies.into_iter().filter_map(|p| {
-            Some(EbayBusinessPolicy { id: p.id?, name: p.name.unwrap_or_default() })
-        }).collect())
+        Ok(data
+            .policies
+            .into_iter()
+            .filter_map(|p| {
+                Some(EbayBusinessPolicy {
+                    id: p.id?,
+                    name: p.name.unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------
@@ -934,10 +994,12 @@ impl EbayClient {
                 message: format!("Failed to parse category tree ID response: {e}"),
             })?;
 
-        response.category_tree_id.ok_or_else(|| SyncError::ApiError {
-            platform: Platform::Ebay,
-            message: "No categoryTreeId returned".into(),
-        })
+        response
+            .category_tree_id
+            .ok_or_else(|| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: "No categoryTreeId returned".into(),
+            })
     }
 
     /// Get category suggestions for a query string.
@@ -949,7 +1011,9 @@ impl EbayClient {
     ) -> Result<Vec<EbayCategorySuggestion>, SyncError> {
         let url = format!(
             "{}/commerce/taxonomy/v1/category_tree/{}/get_category_suggestions?q={}",
-            self.api_base, category_tree_id, url_encode(query)
+            self.api_base,
+            category_tree_id,
+            url_encode(query)
         );
 
         let resp = self
@@ -1013,11 +1077,10 @@ impl EbayClient {
             });
         }
 
-        let response: EbayAspectsResponse =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Ebay,
-                message: format!("Failed to parse aspects response: {e}"),
-            })?;
+        let response: EbayAspectsResponse = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse aspects response: {e}"),
+        })?;
 
         Ok(response.aspects.unwrap_or_default())
     }
@@ -1127,7 +1190,10 @@ impl EbayClient {
             page += 1;
         }
 
-        info!(count = all_items.len(), "Fetched eBay active listings via Trading API");
+        info!(
+            count = all_items.len(),
+            "Fetched eBay active listings via Trading API"
+        );
         Ok(all_items)
     }
 

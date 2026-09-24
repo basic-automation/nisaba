@@ -109,7 +109,9 @@ impl AmazonAdapter {
             if !has_refresh {
                 return Err(SyncError::AuthError {
                     platform: Platform::Amazon,
-                    message: "No access token or refresh token available. Run Amazon OAuth setup first.".into(),
+                    message:
+                        "No access token or refresh token available. Run Amazon OAuth setup first."
+                            .into(),
                 });
             }
             true
@@ -224,8 +226,7 @@ impl PlatformAdapter for AmazonAdapter {
     }
 
     async fn is_authenticated(&self) -> bool {
-        self.access_token.read().await.is_some()
-            || self.refresh_token_val.read().await.is_some()
+        self.access_token.read().await.is_some() || self.refresh_token_val.read().await.is_some()
     }
 
     async fn refresh_auth(&self) -> Result<(), SyncError> {
@@ -234,10 +235,7 @@ impl PlatformAdapter for AmazonAdapter {
         Ok(())
     }
 
-    async fn fetch_full_listing(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<FullListing, SyncError> {
+    async fn fetch_full_listing(&self, platform_item_id: &str) -> Result<FullListing, SyncError> {
         let token = self.get_access_token().await?;
         let item = self
             .client
@@ -251,10 +249,7 @@ impl PlatformAdapter for AmazonAdapter {
         Ok(mapping::to_full_listing(&item))
     }
 
-    async fn fetch_price(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Option<ListingPrice>, SyncError> {
+    async fn fetch_price(&self, platform_item_id: &str) -> Result<Option<ListingPrice>, SyncError> {
         let token = self.get_access_token().await?;
         let item = self
             .client
@@ -272,10 +267,7 @@ impl PlatformAdapter for AmazonAdapter {
             .and_then(|o| o.price.as_ref())
             .and_then(|p| {
                 let val: f64 = p.amount.as_ref()?.parse().ok()?;
-                let currency = p
-                    .currency_code
-                    .clone()
-                    .unwrap_or_else(|| "USD".to_string());
+                let currency = p.currency_code.clone().unwrap_or_else(|| "USD".to_string());
                 Some(ListingPrice {
                     amount: val,
                     currency,
@@ -303,10 +295,7 @@ impl PlatformAdapter for AmazonAdapter {
             .await
     }
 
-    async fn create_listing(
-        &self,
-        request: CreateListingRequest,
-    ) -> Result<String, SyncError> {
+    async fn create_listing(&self, request: CreateListingRequest) -> Result<String, SyncError> {
         let token = self.get_access_token().await?;
 
         let sku = request.sku.clone().unwrap_or_else(|| {
@@ -325,11 +314,7 @@ impl PlatformAdapter for AmazonAdapter {
             .cloned()
             .unwrap_or_else(|| "PRODUCT".to_string());
 
-        let price_amount = request
-            .price
-            .as_ref()
-            .map(|p| p.amount)
-            .unwrap_or(0.0);
+        let price_amount = request.price.as_ref().map(|p| p.amount).unwrap_or(0.0);
         let price_currency = request
             .price
             .as_ref()

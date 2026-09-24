@@ -1,6 +1,6 @@
-use turso::{params, Builder, Connection, Database, Error as TursoError};
-use turso::params::Params;
 use tracing::{debug, info};
+use turso::params::Params;
+use turso::{params, Builder, Connection, Database, Error as TursoError};
 
 use crate::config::CompanyRegistryEntry;
 use crate::error::SyncError;
@@ -41,10 +41,7 @@ impl Db {
     /// schema, so no data-bearing tables are lost on a brand-new DB.
     pub async fn open(path: &str) -> Result<Self, SyncError> {
         let p = path.to_string();
-        let result = tokio::task::spawn(async move {
-            Builder::new_local(&p).build().await
-        })
-        .await;
+        let result = tokio::task::spawn(async move { Builder::new_local(&p).build().await }).await;
 
         let db = match result {
             Ok(Ok(db)) => db,
@@ -83,9 +80,14 @@ impl Db {
     ///   and handles DDL safely (turso's MVCC mode crashes during DDL checkpoints)
     async fn apply_db_pragmas(&self) -> Result<(), SyncError> {
         let conn = self.db.connect()?;
-        conn.pragma_update("journal_mode", "'wal'").await
-            .map_err(|e| SyncError::DatabaseError(format!("Failed to set journal_mode=wal: {e}")))?;
-        debug!("Applied database pragmas (journal_mode=wal, busy_timeout=5000, synchronous=NORMAL)");
+        conn.pragma_update("journal_mode", "'wal'")
+            .await
+            .map_err(|e| {
+                SyncError::DatabaseError(format!("Failed to set journal_mode=wal: {e}"))
+            })?;
+        debug!(
+            "Applied database pragmas (journal_mode=wal, busy_timeout=5000, synchronous=NORMAL)"
+        );
         Ok(())
     }
 
@@ -126,7 +128,9 @@ impl Db {
                 Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
             }
 
-            let result = conn.execute(sql, params.clone()).await
+            let result = conn
+                .execute(sql, params.clone())
+                .await
                 .and(conn.execute("COMMIT", ()).await);
 
             match result {
@@ -141,7 +145,9 @@ impl Db {
                 }
             }
         }
-        Err(SyncError::DatabaseError(format!("Write failed after 5 retries: {sql}")))
+        Err(SyncError::DatabaseError(format!(
+            "Write failed after 5 retries: {sql}"
+        )))
     }
 
     /// Execute multiple write statements atomically under a MVCC concurrent transaction.
@@ -178,7 +184,8 @@ impl Db {
                     Ok(_) => return Ok(()),
                     Err(ref e) if is_retryable(e) => {
                         let _ = conn.execute("ROLLBACK", ()).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
+                            .await;
                         continue;
                     }
                     Err(e) => {
@@ -197,7 +204,9 @@ impl Db {
                 return Err(SyncError::DatabaseError(e.to_string()));
             }
         }
-        Err(SyncError::DatabaseError("Batch write failed after 5 retries".to_string()))
+        Err(SyncError::DatabaseError(
+            "Batch write failed after 5 retries".to_string(),
+        ))
     }
 
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
@@ -310,7 +319,10 @@ impl Db {
                 // dropped the deleted_at/updated_at columns added by migration 2.
                 // Add them back idempotently.
                 let _ = conn
-                    .execute("ALTER TABLE platform_mappings ADD COLUMN deleted_at TEXT", ())
+                    .execute(
+                        "ALTER TABLE platform_mappings ADD COLUMN deleted_at TEXT",
+                        (),
+                    )
                     .await;
                 let _ = conn
                     .execute(
@@ -322,8 +334,10 @@ impl Db {
             }
 
             if version < 9 {
-                conn.execute_batch(include_str!("../../../migrations/009_vendor_listings_cache.sql"))
-                    .await?;
+                conn.execute_batch(include_str!(
+                    "../../../migrations/009_vendor_listings_cache.sql"
+                ))
+                .await?;
                 debug!("Applied migration 009_vendor_listings_cache.sql");
             }
 
@@ -342,17 +356,25 @@ impl Db {
                 // Idempotent — ignore error if columns already exist (e.g. from
                 // a previous interrupted migration that didn't bump the version).
                 let _ = conn
-                    .execute("ALTER TABLE product_variants ADD COLUMN source_plugin_id TEXT", ())
+                    .execute(
+                        "ALTER TABLE product_variants ADD COLUMN source_plugin_id TEXT",
+                        (),
+                    )
                     .await;
                 let _ = conn
-                    .execute("ALTER TABLE product_variants ADD COLUMN source_vendor_item_id TEXT", ())
+                    .execute(
+                        "ALTER TABLE product_variants ADD COLUMN source_vendor_item_id TEXT",
+                        (),
+                    )
                     .await;
                 debug!("Applied migration 012_variant_vendor_source.sql");
             }
 
             if version < 13 {
-                conn.execute_batch(include_str!("../../../migrations/013_product_vendor_data.sql"))
-                    .await?;
+                conn.execute_batch(include_str!(
+                    "../../../migrations/013_product_vendor_data.sql"
+                ))
+                .await?;
 
                 // Backfill: create product_vendor_data rows from existing variants
                 // that have source_plugin_id and source_vendor_item_id
@@ -396,12 +418,12 @@ impl Db {
                     let mut enrichments = Vec::new();
                     while let Some(row) = cache_rows.next().await? {
                         enrichments.push((
-                            row.get::<String>(0)?,       // plugin_id
-                            row.get::<String>(1)?,       // vendor_item_id
-                            row.get::<Option<f64>>(2)?,  // price
+                            row.get::<String>(0)?,         // plugin_id
+                            row.get::<String>(1)?,         // vendor_item_id
+                            row.get::<Option<f64>>(2)?,    // price
                             row.get::<Option<String>>(3)?, // currency
                             row.get::<Option<String>>(4)?, // url
-                            row.get::<String>(5)?,       // extras_json
+                            row.get::<String>(5)?,         // extras_json
                             row.get::<Option<String>>(6)?, // group_key
                         ));
                     }
@@ -620,8 +642,10 @@ impl Db {
             }
 
             if version < 17 {
-                conn.execute_batch(include_str!("../../../migrations/014_cached_platform_listings.sql"))
-                    .await?;
+                conn.execute_batch(include_str!(
+                    "../../../migrations/014_cached_platform_listings.sql"
+                ))
+                .await?;
                 debug!("Applied migration 017: cached_platform_listings table");
             }
 
@@ -725,13 +749,29 @@ impl Db {
     pub async fn delete_product(&self, id: &str) -> Result<(), SyncError> {
         let p = to_params(params![id]);
         self.execute_writes(&[
-            ("DELETE FROM platform_mappings WHERE product_id = ?1", p.clone()),
-            ("DELETE FROM platform_snapshots WHERE product_id = ?1", p.clone()),
-            ("DELETE FROM inventory_history WHERE product_id = ?1", p.clone()),
-            ("DELETE FROM product_vendor_data WHERE product_id = ?1", p.clone()),
-            ("DELETE FROM product_variants WHERE product_id = ?1", p.clone()),
+            (
+                "DELETE FROM platform_mappings WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM platform_snapshots WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM inventory_history WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM product_vendor_data WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM product_variants WHERE product_id = ?1",
+                p.clone(),
+            ),
             ("DELETE FROM products WHERE id = ?1", p),
-        ]).await?;
+        ])
+        .await?;
         Ok(())
     }
 
@@ -816,7 +856,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn update_variant_quantity(&self, variant_id: &str, qty: i64) -> Result<(), SyncError> {
+    pub async fn update_variant_quantity(
+        &self,
+        variant_id: &str,
+        qty: i64,
+    ) -> Result<(), SyncError> {
         self.execute_write(
             "UPDATE product_variants SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![qty, variant_id],
@@ -828,9 +872,13 @@ impl Db {
     pub async fn delete_variant(&self, id: &str) -> Result<(), SyncError> {
         let p = to_params(params![id]);
         self.execute_writes(&[
-            ("DELETE FROM platform_mappings WHERE variant_id = ?1", p.clone()),
+            (
+                "DELETE FROM platform_mappings WHERE variant_id = ?1",
+                p.clone(),
+            ),
             ("DELETE FROM product_variants WHERE id = ?1", p),
-        ]).await?;
+        ])
+        .await?;
         Ok(())
     }
 
@@ -1100,7 +1148,8 @@ impl Db {
             Ok(Some(PlatformSnapshot {
                 id: row.get::<i64>(0)?,
                 product_id: row.get::<String>(1)?,
-                platform: Platform::from_str_loose(&row.get::<String>(2)?).unwrap_or(Platform::Ebay),
+                platform: Platform::from_str_loose(&row.get::<String>(2)?)
+                    .unwrap_or(Platform::Ebay),
                 last_known_quantity: row.get::<i64>(3)?,
                 last_polled_at: row.get::<String>(4)?,
                 last_pushed_at: row.get::<Option<String>>(5)?,
@@ -1148,10 +1197,7 @@ impl Db {
 
     // ── Sync Events ───────────────────────────────────────────
 
-    pub async fn insert_sync_event(
-        &self,
-        event: &NewSyncEvent<'_>,
-    ) -> Result<(), SyncError> {
+    pub async fn insert_sync_event(&self, event: &NewSyncEvent<'_>) -> Result<(), SyncError> {
         self.execute_write(
             "INSERT INTO sync_events (product_id, source_platform, target_platform, old_quantity, new_quantity, event_type, sync_cycle_id, error_message)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1190,11 +1236,12 @@ impl Db {
     }
 
     pub async fn prune_old_sync_events(&self, days: i64) -> Result<u64, SyncError> {
-        let result = self.execute_write(
-            "DELETE FROM sync_events WHERE created_at < datetime('now', ?1)",
-            params![format!("-{days} days")],
-        )
-        .await?;
+        let result = self
+            .execute_write(
+                "DELETE FROM sync_events WHERE created_at < datetime('now', ?1)",
+                params![format!("-{days} days")],
+            )
+            .await?;
         Ok(result)
     }
 
@@ -1212,7 +1259,8 @@ impl Db {
 
         if let Some(row) = rows.next().await? {
             Ok(Some(AuthToken {
-                platform: Platform::from_str_loose(&row.get::<String>(0)?).unwrap_or(Platform::Ebay),
+                platform: Platform::from_str_loose(&row.get::<String>(0)?)
+                    .unwrap_or(Platform::Ebay),
                 access_token: row.get::<String>(1)?,
                 refresh_token: row.get::<Option<String>>(2)?,
                 expires_at: row.get::<Option<String>>(3)?,
@@ -1416,8 +1464,7 @@ impl Db {
 
         let mut photos = Vec::new();
         while let Some(row) = rows.next().await? {
-            let plat = Platform::from_str_loose(&row.get::<String>(0)?)
-                .unwrap_or(Platform::Ebay);
+            let plat = Platform::from_str_loose(&row.get::<String>(0)?).unwrap_or(Platform::Ebay);
             photos.push((
                 plat,
                 ListingPhoto {
@@ -1434,9 +1481,7 @@ impl Db {
 
     /// Get the first photo URL for every product (for grid thumbnails).
     /// Returns (product_id, url) pairs — one per product (lowest position).
-    pub async fn get_all_product_first_photos(
-        &self,
-    ) -> Result<Vec<(String, String)>, SyncError> {
+    pub async fn get_all_product_first_photos(&self) -> Result<Vec<(String, String)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -1637,10 +1682,7 @@ impl Db {
     }
 
     /// Load all cached full listings for a product (instant, no API calls).
-    pub async fn get_cached_listings(
-        &self,
-        product_id: &str,
-    ) -> Result<Vec<String>, SyncError> {
+    pub async fn get_cached_listings(&self, product_id: &str) -> Result<Vec<String>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -1724,9 +1766,7 @@ impl Db {
 
     /// Get cache freshness for ALL products (bulk query for product grid).
     /// Returns (product_id, most_recent_timestamp) pairs.
-    pub async fn get_all_cache_freshness(
-        &self,
-    ) -> Result<Vec<(String, String)>, SyncError> {
+    pub async fn get_all_cache_freshness(&self) -> Result<Vec<(String, String)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -1797,17 +1837,18 @@ impl Db {
     // ── History Downsampling ─────────────────────────────────
 
     pub async fn downsample_old_history(&self, days: i64) -> Result<u64, SyncError> {
-        let result = self.execute_write(
-            "DELETE FROM inventory_history
+        let result = self
+            .execute_write(
+                "DELETE FROM inventory_history
              WHERE recorded_at < datetime('now', ?1)
              AND id NOT IN (
                  SELECT MIN(id) FROM inventory_history
                  WHERE recorded_at < datetime('now', ?1)
                  GROUP BY product_id, date(recorded_at)
              )",
-            params![format!("-{days} days")],
-        )
-        .await?;
+                params![format!("-{days} days")],
+            )
+            .await?;
         Ok(result)
     }
 
@@ -1845,7 +1886,8 @@ impl Db {
             snapshots.push(PlatformSnapshot {
                 id: row.get::<i64>(0)?,
                 product_id: row.get::<String>(1)?,
-                platform: Platform::from_str_loose(&row.get::<String>(2)?).unwrap_or(Platform::Ebay),
+                platform: Platform::from_str_loose(&row.get::<String>(2)?)
+                    .unwrap_or(Platform::Ebay),
                 last_known_quantity: row.get::<i64>(3)?,
                 last_polled_at: row.get::<String>(4)?,
                 last_pushed_at: row.get::<Option<String>>(5)?,
@@ -1880,10 +1922,15 @@ impl Db {
 
     // ── P2P Company ────────────────────────────────────────────
 
-    pub async fn get_company(&self) -> Result<Option<(String, String, String, Option<String>, String)>, SyncError> {
+    pub async fn get_company(
+        &self,
+    ) -> Result<Option<(String, String, String, Option<String>, String)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
-            .query("SELECT id, name, secret, our_onion, role FROM company LIMIT 1", ())
+            .query(
+                "SELECT id, name, secret, our_onion, role FROM company LIMIT 1",
+                (),
+            )
             .await?;
         if let Some(row) = rows.next().await? {
             Ok(Some((
@@ -1945,7 +1992,9 @@ impl Db {
 
     // ── P2P Peers ─────────────────────────────────────────────
 
-    pub async fn list_peers(&self) -> Result<Vec<(String, String, String, bool, String, Option<String>)>, SyncError> {
+    pub async fn list_peers(
+        &self,
+    ) -> Result<Vec<(String, String, String, bool, String, Option<String>)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -1969,7 +2018,10 @@ impl Db {
         Ok(peers)
     }
 
-    pub async fn get_peer(&self, onion_address: &str) -> Result<Option<(String, String, String, bool)>, SyncError> {
+    pub async fn get_peer(
+        &self,
+        onion_address: &str,
+    ) -> Result<Option<(String, String, String, bool)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2008,7 +2060,10 @@ impl Db {
     pub async fn remove_peer(&self, onion_address: &str) -> Result<(), SyncError> {
         let p = to_params(params![onion_address]);
         self.execute_writes(&[
-            ("DELETE FROM company_peers WHERE onion_address = ?1", p.clone()),
+            (
+                "DELETE FROM company_peers WHERE onion_address = ?1",
+                p.clone(),
+            ),
             ("DELETE FROM p2p_sync_state WHERE peer_address = ?1", p),
         ])
         .await?;
@@ -2057,7 +2112,10 @@ impl Db {
 
     // ── P2P Sync State ────────────────────────────────────────
 
-    pub async fn get_sync_state(&self, peer_address: &str) -> Result<Option<(String, Option<String>, bool, Option<String>, i64)>, SyncError> {
+    pub async fn get_sync_state(
+        &self,
+        peer_address: &str,
+    ) -> Result<Option<(String, Option<String>, bool, Option<String>, i64)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2122,7 +2180,22 @@ impl Db {
 
     // ── Syncable Mappings (includes soft-deleted for P2P) ────
 
-    pub async fn list_all_mappings_for_sync(&self) -> Result<Vec<(i64, String, String, String, Option<String>, bool, Option<String>, String, Option<String>)>, SyncError> {
+    pub async fn list_all_mappings_for_sync(
+        &self,
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            bool,
+            Option<String>,
+            String,
+            Option<String>,
+        )>,
+        SyncError,
+    > {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2193,7 +2266,10 @@ impl Db {
         .await?;
 
         if !to_fix.is_empty() {
-            info!(count = to_fix.len(), "Created default variants for simple products");
+            info!(
+                count = to_fix.len(),
+                "Created default variants for simple products"
+            );
         }
 
         Ok(())
@@ -2301,15 +2377,21 @@ impl Db {
     async fn add_company_logo_columns(&self) -> Result<(), SyncError> {
         let conn = self.connect().await?;
         // Try to add columns; ignore errors if table doesn't exist or column already exists
-        let _ = conn.execute_batch("ALTER TABLE company ADD COLUMN logo TEXT").await;
-        let _ = conn.execute_batch("ALTER TABLE company ADD COLUMN logo_updated_at TEXT").await;
+        let _ = conn
+            .execute_batch("ALTER TABLE company ADD COLUMN logo TEXT")
+            .await;
+        let _ = conn
+            .execute_batch("ALTER TABLE company ADD COLUMN logo_updated_at TEXT")
+            .await;
         Ok(())
     }
 
     async fn add_registry_logo_column(&self) -> Result<(), SyncError> {
         let conn = self.connect().await?;
         // Try to add column; ignore errors if table doesn't exist or column already exists
-        let _ = conn.execute_batch("ALTER TABLE company_registry ADD COLUMN logo TEXT").await;
+        let _ = conn
+            .execute_batch("ALTER TABLE company_registry ADD COLUMN logo TEXT")
+            .await;
         Ok(())
     }
 
@@ -2358,11 +2440,8 @@ impl Db {
 
     pub async fn unregister_company(&self, id: &str) -> Result<(), SyncError> {
         let conn = self.connect().await?;
-        conn.execute(
-            "DELETE FROM company_registry WHERE id = ?1",
-            params![id],
-        )
-        .await?;
+        conn.execute("DELETE FROM company_registry WHERE id = ?1", params![id])
+            .await?;
         Ok(())
     }
 
@@ -2418,10 +2497,7 @@ impl Db {
             )
             .await?;
         if let Some(row) = rows.next().await? {
-            Ok(Some((
-                row.get::<String>(0)?,
-                row.get::<String>(1)?,
-            )))
+            Ok(Some((row.get::<String>(0)?, row.get::<String>(1)?)))
         } else {
             Ok(None)
         }
@@ -2444,7 +2520,10 @@ impl Db {
 
     // ── Peers V2 (with stable peer_id) ────────────────────────
 
-    pub async fn list_peers_v2(&self) -> Result<Vec<(String, String, String, String, bool, String, Option<String>)>, SyncError> {
+    pub async fn list_peers_v2(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, bool, String, Option<String>)>, SyncError>
+    {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2469,7 +2548,10 @@ impl Db {
         Ok(peers)
     }
 
-    pub async fn get_peer_v2(&self, peer_id: &str) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
+    pub async fn get_peer_v2(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2490,7 +2572,10 @@ impl Db {
         }
     }
 
-    pub async fn get_peer_by_onion(&self, onion_address: &str) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
+    pub async fn get_peer_by_onion(
+        &self,
+        onion_address: &str,
+    ) -> Result<Option<(String, String, String, String, bool)>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2532,7 +2617,10 @@ impl Db {
         // Read the onion address for sync state cleanup
         let conn = self.connect().await?;
         let mut rows = conn
-            .query("SELECT onion_address FROM company_peers_v2 WHERE peer_id = ?1", params![peer_id])
+            .query(
+                "SELECT onion_address FROM company_peers_v2 WHERE peer_id = ?1",
+                params![peer_id],
+            )
             .await?;
         let addr: Option<String> = if let Some(row) = rows.next().await? {
             Some(row.get(0)?)
@@ -2545,8 +2633,14 @@ impl Db {
         // Write: delete peer and optionally its sync state
         if let Some(addr) = addr {
             self.execute_writes(&[
-                ("DELETE FROM p2p_sync_state WHERE peer_address = ?1", to_params(params![addr])),
-                ("DELETE FROM company_peers_v2 WHERE peer_id = ?1", to_params(params![peer_id])),
+                (
+                    "DELETE FROM p2p_sync_state WHERE peer_address = ?1",
+                    to_params(params![addr]),
+                ),
+                (
+                    "DELETE FROM company_peers_v2 WHERE peer_id = ?1",
+                    to_params(params![peer_id]),
+                ),
             ])
             .await?;
         } else {
@@ -2689,7 +2783,10 @@ impl Db {
         Ok(plugins)
     }
 
-    pub async fn get_registry_plugin(&self, id: &str) -> Result<Option<VendorPluginRow>, SyncError> {
+    pub async fn get_registry_plugin(
+        &self,
+        id: &str,
+    ) -> Result<Option<VendorPluginRow>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2708,7 +2805,10 @@ impl Db {
         }
     }
 
-    pub async fn find_registry_plugin_by_name(&self, display_name: &str) -> Result<Option<VendorPluginRow>, SyncError> {
+    pub async fn find_registry_plugin_by_name(
+        &self,
+        display_name: &str,
+    ) -> Result<Option<VendorPluginRow>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -2777,11 +2877,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn set_plugin_config(
-        &self,
-        id: &str,
-        config_json: &str,
-    ) -> Result<(), SyncError> {
+    pub async fn set_plugin_config(&self, id: &str, config_json: &str) -> Result<(), SyncError> {
         self.execute_write(
             "UPDATE vendor_plugin_registry SET config_json = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![config_json, id],
@@ -2793,7 +2889,10 @@ impl Db {
     pub async fn delete_registry_plugin(&self, id: &str) -> Result<(), SyncError> {
         let p = to_params(params![id]);
         self.execute_writes(&[
-            ("DELETE FROM vendor_plugin_installs WHERE plugin_id = ?1", p.clone()),
+            (
+                "DELETE FROM vendor_plugin_installs WHERE plugin_id = ?1",
+                p.clone(),
+            ),
             ("DELETE FROM vendor_plugin_registry WHERE id = ?1", p),
         ])
         .await?;
@@ -2844,7 +2943,11 @@ impl Db {
         Ok(())
     }
 
-    pub async fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<(), SyncError> {
+    pub async fn set_plugin_enabled(
+        &self,
+        plugin_id: &str,
+        enabled: bool,
+    ) -> Result<(), SyncError> {
         self.execute_write(
             "UPDATE vendor_plugin_installs SET enabled = ?1 WHERE plugin_id = ?2",
             params![enabled, plugin_id],
@@ -3065,7 +3168,8 @@ impl Db {
                     url: row.get::<Option<String>>(9)?,
                     extras: serde_json::from_str(&extras_json).unwrap_or_default(),
                     group_key: row.get::<Option<String>>(11)?,
-                    variant_attributes: serde_json::from_str(&variant_attrs_json).unwrap_or_default(),
+                    variant_attributes: serde_json::from_str(&variant_attrs_json)
+                        .unwrap_or_default(),
                     fetched_at: row.get::<String>(13)?,
                 },
             ));
@@ -3127,7 +3231,11 @@ impl Db {
         // Step 1: Read from product_vendor_data (the permanent store)
         let out = self.get_product_vendor_data(product_id).await?;
         if !out.is_empty() {
-            tracing::info!(product_id, matched = out.len(), "Vendor listings from product_vendor_data");
+            tracing::info!(
+                product_id,
+                matched = out.len(),
+                "Vendor listings from product_vendor_data"
+            );
             return Ok(out);
         }
 
@@ -3159,7 +3267,9 @@ impl Db {
         while let Some(row) = vrows.next().await? {
             let source_plugin_id: Option<String> = row.get::<Option<String>>(5)?;
             let source_vendor_item_id: Option<String> = row.get::<Option<String>>(6)?;
-            let attrs_json: String = row.get::<Option<String>>(4)?.unwrap_or_else(|| "{}".to_string());
+            let attrs_json: String = row
+                .get::<Option<String>>(4)?
+                .unwrap_or_else(|| "{}".to_string());
 
             if let (Some(ref pid), Some(ref vid)) = (&source_plugin_id, &source_vendor_item_id) {
                 source_ids.push((pid.clone(), vid.clone()));
@@ -3217,7 +3327,10 @@ impl Db {
 
         let mut out = Vec::new();
         for v in &variants {
-            let vid = v.source_vendor_item_id.clone().unwrap_or_else(|| v.name.clone());
+            let vid = v
+                .source_vendor_item_id
+                .clone()
+                .unwrap_or_else(|| v.name.clone());
             let pid = v.source_plugin_id.clone().unwrap_or_default();
             out.push((
                 plugin_name.clone(),
@@ -3240,7 +3353,11 @@ impl Db {
             ));
         }
 
-        tracing::info!(product_id, matched = out.len(), "Vendor listings (legacy fallback)");
+        tracing::info!(
+            product_id,
+            matched = out.len(),
+            "Vendor listings (legacy fallback)"
+        );
         Ok(out)
     }
 
@@ -3391,7 +3508,9 @@ fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncErro
         status: row.get::<String>(8)?,
         submitted_by: row.get::<Option<String>>(9)?,
         approved_by: row.get::<Option<String>>(10)?,
-        category: row.get::<Option<String>>(11)?.unwrap_or_else(|| "vendor".into()),
+        category: row
+            .get::<Option<String>>(11)?
+            .unwrap_or_else(|| "vendor".into()),
         icon: row.get::<Option<String>>(12)?,
         include_vendor_stock: row.get::<Option<i64>>(13)?.unwrap_or(0) != 0,
         created_at: row.get::<String>(14)?,
@@ -3426,7 +3545,9 @@ fn parse_mapping(row: &turso::Row) -> Result<PlatformMapping, SyncError> {
 }
 
 fn parse_variant(row: &turso::Row) -> Result<ProductVariant, SyncError> {
-    let attrs_json: String = row.get::<Option<String>>(4)?.unwrap_or_else(|| "{}".to_string());
+    let attrs_json: String = row
+        .get::<Option<String>>(4)?
+        .unwrap_or_else(|| "{}".to_string());
     let attributes: std::collections::HashMap<String, String> =
         serde_json::from_str(&attrs_json).unwrap_or_default();
     Ok(ProductVariant {
@@ -3600,9 +3721,15 @@ mod tests {
         };
         db.insert_product(&product).await.unwrap();
 
-        db.record_inventory_history("p1", 10, "cycle-1").await.unwrap();
-        db.record_inventory_history("p1", 8, "cycle-2").await.unwrap();
-        db.record_inventory_history("p1", 5, "cycle-3").await.unwrap();
+        db.record_inventory_history("p1", 10, "cycle-1")
+            .await
+            .unwrap();
+        db.record_inventory_history("p1", 8, "cycle-2")
+            .await
+            .unwrap();
+        db.record_inventory_history("p1", 5, "cycle-3")
+            .await
+            .unwrap();
 
         let history = db.get_inventory_history("p1", None).await.unwrap();
         assert_eq!(history.len(), 3);

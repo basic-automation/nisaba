@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
 use nisaba_core::types::{
-    FullListing, ListingPhoto, ListingPrice, Platform, PlatformInventoryItem,
-    PlatformListing,
+    FullListing, ListingPhoto, ListingPrice, Platform, PlatformInventoryItem, PlatformListing,
 };
 
 use crate::types::AmazonListingItem;
@@ -98,20 +97,14 @@ pub fn to_full_listing(item: &AmazonListingItem) -> FullListing {
         .and_then(|o| o.price.as_ref())
         .and_then(|p| {
             let val: f64 = p.amount.as_ref()?.parse().ok()?;
-            let currency = p
-                .currency_code
-                .clone()
-                .unwrap_or_else(|| "USD".to_string());
+            let currency = p.currency_code.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice {
                 amount: val,
                 currency,
             })
         });
 
-    let asin = item
-        .summaries
-        .first()
-        .and_then(|s| s.asin.clone());
+    let asin = item.summaries.first().and_then(|s| s.asin.clone());
 
     let url = asin.map(|asin| format!("https://www.amazon.com/dp/{}", asin));
 

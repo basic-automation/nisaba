@@ -22,8 +22,24 @@ pub fn strip_html_tags(html: &str) -> String {
 /// and bullet markers for list items.
 fn collect_plain_text(element: ElementRef, output: &mut String) {
     let block_tags = [
-        "p", "div", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
-        "ul", "ol", "blockquote", "section", "article", "tr", "header", "footer",
+        "p",
+        "div",
+        "br",
+        "hr",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "ul",
+        "ol",
+        "blockquote",
+        "section",
+        "article",
+        "tr",
+        "header",
+        "footer",
     ];
 
     for child in element.children() {
@@ -131,11 +147,7 @@ pub fn parse_listings(html: &str, base_url: &str) -> Vec<XmrListing> {
 
         let photos = image_url.iter().cloned().collect();
 
-        let edit_url = format!(
-            "{}/edit-listing/{}/",
-            base_url.trim_end_matches('/'),
-            id
-        );
+        let edit_url = format!("{}/edit-listing/{}/", base_url.trim_end_matches('/'), id);
 
         listings.push(XmrListing {
             id,
@@ -149,7 +161,10 @@ pub fn parse_listings(html: &str, base_url: &str) -> Vec<XmrListing> {
         });
     }
 
-    debug!(count = listings.len(), "Parsed XMR Bazaar listings from HTML");
+    debug!(
+        count = listings.len(),
+        "Parsed XMR Bazaar listings from HTML"
+    );
     listings
 }
 
@@ -209,9 +224,9 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
                 .ok();
             option_sel
                 .and_then(|sel| {
-                    el.select(&sel).next().and_then(|opt| {
-                        opt.value().attr("value").map(|v| v.to_string())
-                    })
+                    el.select(&sel)
+                        .next()
+                        .and_then(|opt| opt.value().attr("value").map(|v| v.to_string()))
                 })
                 .or_else(|| {
                     // No selected option found; try first option with a non-empty value
@@ -226,10 +241,7 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
                 })
                 .unwrap_or_default()
         } else {
-            el.value()
-                .attr("value")
-                .unwrap_or("")
-                .to_string()
+            el.value().attr("value").unwrap_or("").to_string()
         };
 
         fields.push((name, value));
@@ -251,7 +263,13 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
 
 /// Extract description text from form fields, looking for common field names.
 pub fn extract_description_from_form(form_data: &EditFormData) -> Option<String> {
-    let description_field_names = ["description", "body", "content", "desc", "listing_description"];
+    let description_field_names = [
+        "description",
+        "body",
+        "content",
+        "desc",
+        "listing_description",
+    ];
 
     for (name, value) in &form_data.fields {
         let name_lower = name.to_lowercase();
@@ -405,9 +423,7 @@ fn extract_price_from_form(document: &Html) -> Option<f64> {
         if let Ok(sel) = Selector::parse(selector_str) {
             if let Some(el) = document.select(&sel).next() {
                 if let Some(value) = el.value().attr("value") {
-                    let cleaned = value
-                        .trim()
-                        .replace(['$', ',', '€', '£'], "");
+                    let cleaned = value.trim().replace(['$', ',', '€', '£'], "");
                     if let Ok(price) = cleaned.trim().parse::<f64>() {
                         return Some(price);
                     }
@@ -575,7 +591,11 @@ pub fn extract_validation_token(html: &str) -> Option<String> {
             if let Some(val) = el.value().attr("value") {
                 // Validation tokens are typically long base64 strings
                 if val.len() > 40 {
-                    debug!(field_name = name, value_len = val.len(), "Found candidate validation token");
+                    debug!(
+                        field_name = name,
+                        value_len = val.len(),
+                        "Found candidate validation token"
+                    );
                     return Some(val.to_string());
                 }
             }
@@ -735,7 +755,10 @@ pub fn detect_stock_mode_field(form_data: &EditFormData) -> Option<StockModeFiel
         let name_lower = name.to_lowercase();
 
         // Skip unrelated fields
-        if name_lower == "csrf" || name_lower.contains("token") || name_lower.contains("description") {
+        if name_lower == "csrf"
+            || name_lower.contains("token")
+            || name_lower.contains("description")
+        {
             continue;
         }
 

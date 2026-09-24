@@ -191,8 +191,14 @@ impl P2PManager {
         // Load our stable peer_id if available
         let our_peer_id = self.db.get_company_peer_id().await.ok().flatten();
 
-        let response =
-            P2PClient::sync_with_peer(peer_onion, secret, payload, our_onion, our_peer_id.as_deref()).await?;
+        let response = P2PClient::sync_with_peer(
+            peer_onion,
+            secret,
+            payload,
+            our_onion,
+            our_peer_id.as_deref(),
+        )
+        .await?;
 
         // Merge the responder's payload into our DB
         let merge_summary = merge_remote_payload(&self.db, &response.payload).await?;
@@ -220,9 +226,7 @@ impl P2PManager {
             if let Ok(last) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f%z")
                 .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S"))
             {
-                let elapsed = chrono::Utc::now()
-                    .naive_utc()
-                    .signed_duration_since(last);
+                let elapsed = chrono::Utc::now().naive_utc().signed_duration_since(last);
                 if elapsed < chrono::Duration::minutes(5) {
                     return Ok(false); // Too soon since last platform sync
                 }
@@ -240,9 +244,7 @@ impl P2PManager {
                 continue;
             }
             if let Some(ts) = last_seen {
-                if let Ok(seen) =
-                    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
-                {
+                if let Ok(seen) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
                     if now.signed_duration_since(seen.and_utc()) < threshold {
                         online_roster.push(addr.clone());
                     }
@@ -298,8 +300,7 @@ impl P2PManager {
         mut cmd_rx: mpsc::Receiver<P2PCommand>,
         interval_secs: u64,
     ) {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {

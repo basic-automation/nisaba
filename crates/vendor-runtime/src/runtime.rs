@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
 use deno_core::{
-    ModuleLoadOptions, ModuleLoadResponse, ModuleLoadReferrer, ModuleSource,
-    ModuleSourceCode, ModuleSpecifier, ModuleType, JsRuntime, RuntimeOptions,
+    JsRuntime, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse, ModuleSource,
+    ModuleSourceCode, ModuleSpecifier, ModuleType, RuntimeOptions,
 };
 use deno_error::JsErrorBox;
 use tracing::debug;
@@ -34,16 +34,15 @@ impl deno_core::ModuleLoader for TsModuleLoader {
     ) -> ModuleLoadResponse {
         let specifier = module_specifier.clone();
         ModuleLoadResponse::Async(Box::pin(async move {
-            let path = specifier
-                .to_file_path()
-                .map_err(|_| JsErrorBox::generic(
-                    format!("Cannot convert specifier to file path: {specifier}")
-                ))?;
+            let path = specifier.to_file_path().map_err(|_| {
+                JsErrorBox::generic(format!(
+                    "Cannot convert specifier to file path: {specifier}"
+                ))
+            })?;
 
-            let code = tokio::fs::read_to_string(&path).await
-                .map_err(|e| JsErrorBox::generic(
-                    format!("Failed to read {}: {e}", path.display())
-                ))?;
+            let code = tokio::fs::read_to_string(&path).await.map_err(|e| {
+                JsErrorBox::generic(format!("Failed to read {}: {e}", path.display()))
+            })?;
 
             let is_ts = path
                 .extension()
@@ -58,20 +57,19 @@ impl deno_core::ModuleLoader for TsModuleLoader {
                     capture_tokens: false,
                     scope_analysis: false,
                     maybe_syntax: None,
-                }).map_err(|e| JsErrorBox::generic(
-                    format!("TypeScript parse error: {e}")
-                ))?;
+                })
+                .map_err(|e| JsErrorBox::generic(format!("TypeScript parse error: {e}")))?;
 
-                let transpiled = parsed.transpile(
-                    &deno_ast::TranspileOptions::default(),
-                    &deno_ast::TranspileModuleOptions::default(),
-                    &deno_ast::EmitOptions {
-                        source_map: deno_ast::SourceMapOption::None,
-                        ..Default::default()
-                    },
-                ).map_err(|e| JsErrorBox::generic(
-                    format!("TypeScript transpile error: {e}")
-                ))?;
+                let transpiled = parsed
+                    .transpile(
+                        &deno_ast::TranspileOptions::default(),
+                        &deno_ast::TranspileModuleOptions::default(),
+                        &deno_ast::EmitOptions {
+                            source_map: deno_ast::SourceMapOption::None,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|e| JsErrorBox::generic(format!("TypeScript transpile error: {e}")))?;
 
                 transpiled.into_source().text.to_string()
             } else {
@@ -127,12 +125,18 @@ impl VendorRuntime {
 
         let mut runtime = Self::create_runtime();
 
-        let mod_id = runtime.load_main_es_module(&wrapper_url).await
+        let mod_id = runtime
+            .load_main_es_module(&wrapper_url)
+            .await
             .map_err(|e| anyhow!("Failed to load plugin module: {e}"))?;
         let receiver = runtime.mod_evaluate(mod_id);
-        runtime.run_event_loop(Default::default()).await
+        runtime
+            .run_event_loop(Default::default())
+            .await
             .map_err(|e| anyhow!("Event loop error: {e}"))?;
-        receiver.await.map_err(|e| anyhow!("Module evaluation error: {e}"))?;
+        receiver
+            .await
+            .map_err(|e| anyhow!("Module evaluation error: {e}"))?;
 
         let _ = tokio::fs::remove_file(&wrapper_path).await;
 
@@ -186,12 +190,18 @@ impl VendorRuntime {
             runtime.op_state().borrow_mut().put(cb);
         }
 
-        let mod_id = runtime.load_main_es_module(&wrapper_url).await
+        let mod_id = runtime
+            .load_main_es_module(&wrapper_url)
+            .await
             .map_err(|e| anyhow!("Failed to load plugin module: {e}"))?;
         let receiver = runtime.mod_evaluate(mod_id);
-        runtime.run_event_loop(Default::default()).await
+        runtime
+            .run_event_loop(Default::default())
+            .await
             .map_err(|e| anyhow!("Event loop error: {e}"))?;
-        receiver.await.map_err(|e| anyhow!("Module evaluation error: {e}"))?;
+        receiver
+            .await
+            .map_err(|e| anyhow!("Module evaluation error: {e}"))?;
 
         let _ = tokio::fs::remove_file(&plugin_path).await;
         let _ = tokio::fs::remove_file(&wrapper_path).await;
@@ -287,12 +297,18 @@ impl VendorRuntime {
             runtime.op_state().borrow_mut().put(cb);
         }
 
-        let mod_id = runtime.load_main_es_module(&wrapper_url).await
+        let mod_id = runtime
+            .load_main_es_module(&wrapper_url)
+            .await
             .map_err(|e| anyhow!("Failed to load plugin module: {e}"))?;
         let receiver = runtime.mod_evaluate(mod_id);
-        runtime.run_event_loop(Default::default()).await
+        runtime
+            .run_event_loop(Default::default())
+            .await
             .map_err(|e| anyhow!("Event loop error: {e}"))?;
-        receiver.await.map_err(|e| anyhow!("Module evaluation error: {e}"))?;
+        receiver
+            .await
+            .map_err(|e| anyhow!("Module evaluation error: {e}"))?;
 
         let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
 

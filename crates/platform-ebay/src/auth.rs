@@ -94,13 +94,15 @@ impl EbayAuth {
             });
         }
 
-        let token: EbayTokenResponse =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Ebay,
-                message: format!("Failed to parse token response: {e}"),
-            })?;
+        let token: EbayTokenResponse = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse token response: {e}"),
+        })?;
 
-        debug!("eBay token exchange successful, expires in {}s", token.expires_in);
+        debug!(
+            "eBay token exchange successful, expires in {}s",
+            token.expires_in
+        );
         Ok(token)
     }
 
@@ -137,11 +139,10 @@ impl EbayAuth {
             });
         }
 
-        let token: EbayTokenResponse =
-            resp.json().await.map_err(|e| SyncError::ApiError {
-                platform: Platform::Ebay,
-                message: format!("Failed to parse token response: {e}"),
-            })?;
+        let token: EbayTokenResponse = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse token response: {e}"),
+        })?;
 
         Ok(token)
     }

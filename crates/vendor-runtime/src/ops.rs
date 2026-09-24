@@ -27,8 +27,8 @@ pub async fn op_nisaba_fetch(
     });
 
     let client = reqwest::Client::new();
-    let method = reqwest::Method::from_bytes(opts.method.as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let method =
+        reqwest::Method::from_bytes(opts.method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
     let mut req = client.request(method, &url);
 
@@ -40,20 +40,24 @@ pub async fn op_nisaba_fetch(
         req = req.body(body);
     }
 
-    let resp = req.send().await.map_err(|e| {
-        deno_error::JsErrorBox::generic(format!("Fetch error: {e}"))
-    })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: {e}")))?;
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
     let headers: std::collections::HashMap<String, String> = resp_headers
         .iter()
-        .map(|(k, v): (&reqwest::header::HeaderName, &reqwest::header::HeaderValue)| {
-            (k.to_string(), v.to_str().unwrap_or("").to_string())
-        })
+        .map(
+            |(k, v): (&reqwest::header::HeaderName, &reqwest::header::HeaderValue)| {
+                (k.to_string(), v.to_str().unwrap_or("").to_string())
+            },
+        )
         .collect();
-    let body: String = resp.text().await.map_err(|e| {
-        deno_error::JsErrorBox::generic(format!("Body read error: {e}"))
-    })?;
+    let body: String = resp
+        .text()
+        .await
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("Body read error: {e}")))?;
 
     let result = serde_json::json!({
         "status": status,

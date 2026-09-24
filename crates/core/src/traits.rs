@@ -32,10 +32,7 @@ pub trait PlatformAdapter: Send + Sync {
     async fn refresh_auth(&self) -> Result<(), SyncError>;
 
     /// Fetch a complete listing with description, photos, price, etc.
-    async fn fetch_full_listing(
-        &self,
-        _platform_item_id: &str,
-    ) -> Result<FullListing, SyncError> {
+    async fn fetch_full_listing(&self, _platform_item_id: &str) -> Result<FullListing, SyncError> {
         Err(SyncError::Other(format!(
             "{} does not support fetch_full_listing",
             self.platform()
@@ -54,10 +51,7 @@ pub trait PlatformAdapter: Send + Sync {
     }
 
     /// Fetch photos for a listing.
-    async fn fetch_photos(
-        &self,
-        _platform_item_id: &str,
-    ) -> Result<Vec<ListingPhoto>, SyncError> {
+    async fn fetch_photos(&self, _platform_item_id: &str) -> Result<Vec<ListingPhoto>, SyncError> {
         Err(SyncError::Other(format!(
             "{} does not support fetch_photos",
             self.platform()
@@ -101,11 +95,7 @@ pub trait PlatformAdapter: Send + Sync {
     }
 
     /// Set the HTML description for a listing.
-    async fn set_description(
-        &self,
-        _platform_item_id: &str,
-        _html: &str,
-    ) -> Result<(), SyncError> {
+    async fn set_description(&self, _platform_item_id: &str, _html: &str) -> Result<(), SyncError> {
         Err(SyncError::Other(format!(
             "{} does not support set_description",
             self.platform()
@@ -113,10 +103,7 @@ pub trait PlatformAdapter: Send + Sync {
     }
 
     /// Create a new listing on this platform. Returns the new platform_item_id.
-    async fn create_listing(
-        &self,
-        _request: CreateListingRequest,
-    ) -> Result<String, SyncError> {
+    async fn create_listing(&self, _request: CreateListingRequest) -> Result<String, SyncError> {
         Err(SyncError::Other(format!(
             "{} does not support create_listing",
             self.platform()

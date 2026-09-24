@@ -175,7 +175,10 @@ impl SquarespaceClient {
                 message: format!("Failed to parse store pages response: {e}"),
             })?;
 
-        debug!(count = response.store_pages.len(), "Fetched Squarespace store pages");
+        debug!(
+            count = response.store_pages.len(),
+            "Fetched Squarespace store pages"
+        );
         Ok(response.store_pages)
     }
 

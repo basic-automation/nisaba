@@ -19,9 +19,7 @@ pub async fn get_all_product_prices(
     state: State<'_, AppState>,
 ) -> Result<Vec<PricingSnapshot>, String> {
     let db = state.active_db().await?;
-    db.get_all_latest_prices()
-        .await
-        .map_err(|e| e.to_string())
+    db.get_all_latest_prices().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

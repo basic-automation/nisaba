@@ -7,7 +7,10 @@ use nisaba_core::db::Db;
 use nisaba_core::types::{Platform, Product};
 
 use crate::error::P2PError;
-use crate::types::{CompanyConfigPayload, CompanyLogoPayload, MergeSummary, PlatformSyncMeta, SyncPayload, SyncableAuthToken, SyncableMapping, SyncableVariant, SyncableVendorPlugin};
+use crate::types::{
+    CompanyConfigPayload, CompanyLogoPayload, MergeSummary, PlatformSyncMeta, SyncPayload,
+    SyncableAuthToken, SyncableMapping, SyncableVariant, SyncableVendorPlugin,
+};
 
 type MappingKey = (String, String, String);
 type MappingMeta = (i64, Option<String>, String);
@@ -22,18 +25,30 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     let raw_mappings = db.list_all_mappings_for_sync().await?;
     let platform_mappings: Vec<SyncableMapping> = raw_mappings
         .into_iter()
-        .map(|(_, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id)| {
-            SyncableMapping {
+        .map(
+            |(
+                _,
                 product_id,
-                platform: Platform::from_str_loose(&platform).unwrap_or(Platform::Ebay),
+                platform,
                 platform_item_id,
                 platform_sku,
                 is_active,
                 deleted_at,
                 updated_at,
                 variant_id,
-            }
-        })
+            )| {
+                SyncableMapping {
+                    product_id,
+                    platform: Platform::from_str_loose(&platform).unwrap_or(Platform::Ebay),
+                    platform_item_id,
+                    platform_sku,
+                    is_active,
+                    deleted_at,
+                    updated_at,
+                    variant_id,
+                }
+            },
+        )
         .collect();
 
     // Load product variants
@@ -41,7 +56,8 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     let product_variants: Vec<SyncableVariant> = all_variants
         .into_iter()
         .map(|v| {
-            let attrs_json = serde_json::to_string(&v.attributes).unwrap_or_else(|_| "{}".to_string());
+            let attrs_json =
+                serde_json::to_string(&v.attributes).unwrap_or_else(|_| "{}".to_string());
             SyncableVariant {
                 id: v.id,
                 product_id: v.product_id,
@@ -62,7 +78,10 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     let last_platform_sync_by = db.get_p2p_meta("last_platform_sync_by").await?;
 
     // Load company config (cleartext for transit)
-    let company_config = db.get_company_config().await?.map(|(config_json, updated_at)| CompanyConfigPayload {
+    let company_config = db
+        .get_company_config()
+        .await?
+        .map(|(config_json, updated_at)| CompanyConfigPayload {
             config_json,
             updated_at,
         });
@@ -83,7 +102,10 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     }
 
     // Load company logo
-    let company_logo = db.get_company_logo().await?.map(|(logo, updated_at)| CompanyLogoPayload { logo, updated_at });
+    let company_logo = db
+        .get_company_logo()
+        .await?
+        .map(|(logo, updated_at)| CompanyLogoPayload { logo, updated_at });
 
     // Load vendor plugin registry
     let vendor_plugins: Vec<SyncableVendorPlugin> = match db.list_registry_plugins().await {
@@ -130,18 +152,13 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
 
 /// Merge a remote peer's payload into our local database.
 /// Returns a summary of what changed.
-pub async fn merge_remote_payload(
-    db: &Db,
-    remote: &SyncPayload,
-) -> Result<MergeSummary, P2PError> {
+pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<MergeSummary, P2PError> {
     let mut summary = MergeSummary::default();
 
     // ── Products: last-write-wins by updated_at ──────────────
     let local_products = db.list_products().await?;
-    let local_map: HashMap<String, &Product> = local_products
-        .iter()
-        .map(|p| (p.id.clone(), p))
-        .collect();
+    let local_map: HashMap<String, &Product> =
+        local_products.iter().map(|p| (p.id.clone(), p)).collect();
 
     for remote_product in &remote.products {
         match local_map.get(&remote_product.id) {
@@ -199,13 +216,15 @@ pub async fn merge_remote_payload(
     let local_raw_mappings = db.list_all_mappings_for_sync().await?;
     let local_mapping_map: HashMap<MappingKey, MappingMeta> = local_raw_mappings
         .iter()
-        .map(|(id, product_id, platform, _, _, _, deleted_at, updated_at, variant_id)| {
-            let vkey = variant_id.clone().unwrap_or_default();
-            (
-                (product_id.clone(), platform.clone(), vkey),
-                (*id, deleted_at.clone(), updated_at.clone()),
-            )
-        })
+        .map(
+            |(id, product_id, platform, _, _, _, deleted_at, updated_at, variant_id)| {
+                let vkey = variant_id.clone().unwrap_or_default();
+                (
+                    (product_id.clone(), platform.clone(), vkey),
+                    (*id, deleted_at.clone(), updated_at.clone()),
+                )
+            },
+        )
         .collect();
 
     for remote_mapping in &remote.platform_mappings {

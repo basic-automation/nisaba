@@ -38,18 +38,11 @@ pub enum SyncEngineEvent {
         new_quantity: i64,
     },
     /// An error occurred on a specific platform.
-    PlatformError {
-        platform: Platform,
-        message: String,
-    },
+    PlatformError { platform: Platform, message: String },
     /// Auth expired / needs refresh on a platform.
-    AuthExpired {
-        platform: Platform,
-    },
+    AuthExpired { platform: Platform },
     /// New unmapped listings were detected.
-    UnmappedListingsDetected {
-        count: usize,
-    },
+    UnmappedListingsDetected { count: usize },
 }
 
 /// Commands sent from the TUI to the sync engine.
@@ -169,23 +162,19 @@ impl SyncEngine {
                         let order_id = sale.order_id.as_deref().unwrap_or("");
 
                         // DB-level deduplication: skip already-processed orders
-                        if !order_id.is_empty()
-                            && self.db.is_xmr_order_processed(order_id).await? {
-                                debug!(
-                                    order_id,
-                                    platform = %platform,
-                                    "Skipping already-processed order"
-                                );
-                                continue;
-                            }
+                        if !order_id.is_empty() && self.db.is_xmr_order_processed(order_id).await? {
+                            debug!(
+                                order_id,
+                                platform = %platform,
+                                "Skipping already-processed order"
+                            );
+                            continue;
+                        }
 
                         // Look up which product this listing maps to
                         let mapping = self
                             .db
-                            .get_mapping_by_platform_item(
-                                platform.as_str(),
-                                &sale.platform_item_id,
-                            )
+                            .get_mapping_by_platform_item(platform.as_str(), &sale.platform_item_id)
                             .await?;
 
                         let Some(mapping) = mapping else {
@@ -638,16 +627,15 @@ impl SyncEngine {
     }
 
     /// Run the engine loop, listening for commands and executing cycles on a timer.
-    pub async fn run(
-        self,
-        mut cmd_rx: mpsc::Receiver<SyncCommand>,
-        interval_secs: u64,
-    ) {
+    pub async fn run(self, mut cmd_rx: mpsc::Receiver<SyncCommand>, interval_secs: u64) {
         // Startup: recalculate all vendor-sourced product quantities so that
         // persisted product_vendor_data is applied BEFORE the first sync cycle
         // polls platforms and potentially overwrites quantities.
         match self.db.recalc_all_vendor_sourced_products().await {
-            Ok(n) if n > 0 => info!(count = n, "Startup: recalculated vendor-sourced product quantities"),
+            Ok(n) if n > 0 => info!(
+                count = n,
+                "Startup: recalculated vendor-sourced product quantities"
+            ),
             Ok(_) => {}
             Err(e) => warn!(error = %e, "Startup: failed to recalculate vendor-sourced products"),
         }

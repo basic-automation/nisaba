@@ -100,15 +100,11 @@ impl PlatformAdapter for XmrBazaarAdapter {
     }
 
     async fn is_authenticated(&self) -> bool {
-        self.auth
-            .check_session(&self.client, &self.endpoints)
-            .await
+        self.auth.check_session(&self.client, &self.endpoints).await
     }
 
     async fn refresh_auth(&self) -> Result<(), SyncError> {
-        self.auth
-            .login(&self.client, &self.endpoints)
-            .await
+        self.auth.login(&self.client, &self.endpoints).await
     }
 
     async fn detect_sales(&self) -> Result<Vec<SaleDetection>, SyncError> {
@@ -142,10 +138,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
         Ok(sales)
     }
 
-    async fn fetch_full_listing(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<FullListing, SyncError> {
+    async fn fetch_full_listing(&self, platform_item_id: &str) -> Result<FullListing, SyncError> {
         // Fetch all listings to find the matching one for basic info
         let listings = self.client.fetch_listings(&self.endpoints).await?;
         let listing = listings
@@ -166,13 +159,10 @@ impl PlatformAdapter for XmrBazaarAdapter {
 
         // Build price, preferring detail price over listing price
         let currency = detail.currency.clone().unwrap_or_else(|| "USD".to_string());
-        let price = detail
-            .price
-            .or(listing.price)
-            .map(|amount| ListingPrice {
-                amount,
-                currency: currency.clone(),
-            });
+        let price = detail.price.or(listing.price).map(|amount| ListingPrice {
+            amount,
+            currency: currency.clone(),
+        });
 
         // Build description
         let description = detail.description.as_ref().map(|desc| ListingDescription {
@@ -244,10 +234,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
         }))
     }
 
-    async fn fetch_photos(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Vec<ListingPhoto>, SyncError> {
+    async fn fetch_photos(&self, platform_item_id: &str) -> Result<Vec<ListingPhoto>, SyncError> {
         let detail = self
             .client
             .fetch_listing_detail(&self.endpoints, platform_item_id)
@@ -269,10 +256,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
         Ok(photos)
     }
 
-    async fn fetch_price(
-        &self,
-        platform_item_id: &str,
-    ) -> Result<Option<ListingPrice>, SyncError> {
+    async fn fetch_price(&self, platform_item_id: &str) -> Result<Option<ListingPrice>, SyncError> {
         // First try to get price from the edit page detail (more accurate)
         let detail = self
             .client
@@ -281,10 +265,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
 
         let currency = detail.currency.clone().unwrap_or_else(|| "USD".to_string());
         if let Some(amount) = detail.price {
-            return Ok(Some(ListingPrice {
-                amount,
-                currency,
-            }));
+            return Ok(Some(ListingPrice { amount, currency }));
         }
 
         // Fall back to listings page price
@@ -312,11 +293,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
             .await
     }
 
-    async fn set_description(
-        &self,
-        platform_item_id: &str,
-        html: &str,
-    ) -> Result<(), SyncError> {
+    async fn set_description(&self, platform_item_id: &str, html: &str) -> Result<(), SyncError> {
         // Try the most common field name first; update_listing_field will
         // fall back to adding the field if it doesn't already exist.
         self.client
@@ -338,10 +315,7 @@ impl PlatformAdapter for XmrBazaarAdapter {
         Ok(())
     }
 
-    async fn create_listing(
-        &self,
-        request: CreateListingRequest,
-    ) -> Result<String, SyncError> {
+    async fn create_listing(&self, request: CreateListingRequest) -> Result<String, SyncError> {
         self.client
             .create_listing(&self.endpoints, &request, &self.monero_address)
             .await

@@ -9,7 +9,9 @@ mod state;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nisaba_core::config::{AmazonConfig, AppConfig, EbayConfig, SquarespaceConfig, XmrBazaarConfig};
+use nisaba_core::config::{
+    AmazonConfig, AppConfig, EbayConfig, SquarespaceConfig, XmrBazaarConfig,
+};
 use nisaba_core::crypto;
 use nisaba_core::db::Db;
 use nisaba_core::sync_engine::SyncEngine;
@@ -339,9 +341,7 @@ async fn init_company_context(
             match db.get_company_config().await {
                 Ok(Some((encrypted_json, _updated_at))) => {
                     match crypto::decrypt(&encrypted_json, &key) {
-                        Ok(json) => {
-                            serde_json::from_str::<serde_json::Value>(&json).ok()
-                        }
+                        Ok(json) => serde_json::from_str::<serde_json::Value>(&json).ok(),
                         Err(e) => {
                             warn!(company = %name, "Failed to decrypt config: {e}");
                             None
@@ -447,10 +447,7 @@ async fn init_company_context(
 ///
 /// Starts with all platforms DISABLED. Only the company's own saved config can enable platforms.
 /// General/database/alerts settings are inherited from the base (global) config.
-fn build_adapter_config(
-    base: &AppConfig,
-    company_config: &Option<serde_json::Value>,
-) -> AppConfig {
+fn build_adapter_config(base: &AppConfig, company_config: &Option<serde_json::Value>) -> AppConfig {
     let mut config = base.clone();
 
     // Always start with platforms disabled — each company must explicitly enable its own.

@@ -19,10 +19,7 @@ pub async fn export_data(
         .await
         .map_err(|e| e.to_string())?;
 
-    let product_variants = db
-        .list_all_variants()
-        .await
-        .map_err(|e| e.to_string())?;
+    let product_variants = db.list_all_variants().await.map_err(|e| e.to_string())?;
 
     let export = ExportData {
         version: 2,
@@ -52,8 +49,7 @@ pub async fn export_data(
     };
 
     let file_path = path.into_path().map_err(|e| e.to_string())?;
-    std::fs::write(&file_path, &json)
-        .map_err(|e| format!("Failed to write file: {e}"))?;
+    std::fs::write(&file_path, &json).map_err(|e| format!("Failed to write file: {e}"))?;
 
     let summary = format!(
         "Exported {} products, {} mappings, {} snapshots, {} XMR orders",
@@ -87,8 +83,8 @@ pub async fn import_data(
     };
 
     let file_path = path.into_path().map_err(|e| e.to_string())?;
-    let contents = std::fs::read_to_string(&file_path)
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let contents =
+        std::fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let data: ExportData =
         serde_json::from_str(&contents).map_err(|e| format!("Invalid export file: {e}"))?;
@@ -101,9 +97,7 @@ pub async fn import_data(
     }
 
     let db = state.active_db().await?;
-    db.import_data(&data)
-        .await
-        .map_err(|e| e.to_string())?;
+    db.import_data(&data).await.map_err(|e| e.to_string())?;
 
     let summary = format!(
         "Imported {} products, {} mappings, {} snapshots, {} XMR orders",

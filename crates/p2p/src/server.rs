@@ -25,8 +25,6 @@ pub struct P2PState {
 
 /// Build the Axum router for the onion service.
 pub fn build_router(state: Arc<P2PState>) -> Router {
-    
-
     Router::new()
         .route("/api/ping", get(handle_ping))
         .route("/api/sync", post(handle_sync))
@@ -64,7 +62,11 @@ async fn auth_middleware(
 
     match secret {
         Some(s) if s == state.company_secret => next.run(req).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing company secret").into_response(),
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing company secret",
+        )
+            .into_response(),
     }
 }
 
@@ -125,11 +127,19 @@ async fn handle_sync(
     let _ = state.db.update_peer_last_seen(&request.sender_onion).await;
     // Also update v2 table if we have a peer_id
     if !request.sender_peer_id.is_empty() {
-        let _ = state.db.update_peer_last_seen_v2(&request.sender_peer_id).await;
+        let _ = state
+            .db
+            .update_peer_last_seen_v2(&request.sender_peer_id)
+            .await;
         // Update onion address if it changed
-        if let Ok(Some((_, current_onion, _, _, _))) = state.db.get_peer_v2(&request.sender_peer_id).await {
+        if let Ok(Some((_, current_onion, _, _, _))) =
+            state.db.get_peer_v2(&request.sender_peer_id).await
+        {
             if current_onion != request.sender_onion {
-                let _ = state.db.update_peer_onion_address(&request.sender_peer_id, &request.sender_onion).await;
+                let _ = state
+                    .db
+                    .update_peer_onion_address(&request.sender_peer_id, &request.sender_onion)
+                    .await;
                 info!(peer_id = %request.sender_peer_id, new_onion = %request.sender_onion, "Peer onion address updated via sync");
             }
         }
@@ -182,7 +192,13 @@ async fn handle_join(
     let peer_id = uuid::Uuid::new_v4().to_string();
     state
         .db
-        .insert_peer_v2(&peer_id, &request.onion_address, &request.name, "member", false)
+        .insert_peer_v2(
+            &peer_id,
+            &request.onion_address,
+            &request.name,
+            "member",
+            false,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -262,7 +278,13 @@ async fn handle_add_peer(
     let peer_id = uuid::Uuid::new_v4().to_string();
     state
         .db
-        .insert_peer_v2(&peer_id, &request.onion_address, &request.name, "member", true)
+        .insert_peer_v2(
+            &peer_id,
+            &request.onion_address,
+            &request.name,
+            "member",
+            true,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -323,7 +345,10 @@ async fn handle_set_peer_role(
     check_admin(&state.db).await?;
 
     if request.role != "admin" && request.role != "member" {
-        return Err((StatusCode::BAD_REQUEST, "Role must be 'admin' or 'member'".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Role must be 'admin' or 'member'".to_string(),
+        ));
     }
 
     state

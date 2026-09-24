@@ -120,10 +120,7 @@ fn generate_thumbnail(source_bytes: &[u8], thumb_path: &Path) -> bool {
     if w <= THUMB_MAX_WIDTH {
         // Image is already small, just save a JPEG copy as the thumb
         let mut buf = Cursor::new(Vec::new());
-        if img
-            .write_to(&mut buf, ImageFormat::Jpeg)
-            .is_ok()
-        {
+        if img.write_to(&mut buf, ImageFormat::Jpeg).is_ok() {
             return std::fs::write(thumb_path, buf.into_inner()).is_ok();
         }
         return false;
@@ -133,8 +130,7 @@ fn generate_thumbnail(source_bytes: &[u8], thumb_path: &Path) -> bool {
     let resized = img.resize_exact(THUMB_MAX_WIDTH, new_h, FilterType::Triangle);
 
     let mut buf = Cursor::new(Vec::new());
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, THUMB_QUALITY);
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, THUMB_QUALITY);
     if resized.write_with_encoder(encoder).is_ok() {
         return std::fs::write(thumb_path, buf.into_inner()).is_ok();
     }
@@ -229,22 +225,20 @@ pub async fn cache_images(
             tasks.spawn(async move {
                 let _permit = sem.acquire().await;
                 match client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        match resp.bytes().await {
-                            Ok(bytes) if !bytes.is_empty() => {
-                                if let Err(e) = std::fs::write(&path, &bytes) {
-                                    tracing::warn!(url, error = %e, "Failed to write cached image");
-                                    None
-                                } else {
-                                    Some((url, fname))
-                                }
-                            }
-                            _ => {
-                                tracing::warn!(url, "Empty response body for image");
+                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                        Ok(bytes) if !bytes.is_empty() => {
+                            if let Err(e) = std::fs::write(&path, &bytes) {
+                                tracing::warn!(url, error = %e, "Failed to write cached image");
                                 None
+                            } else {
+                                Some((url, fname))
                             }
                         }
-                    }
+                        _ => {
+                            tracing::warn!(url, "Empty response body for image");
+                            None
+                        }
+                    },
                     Ok(resp) => {
                         tracing::warn!(url, status = %resp.status(), "Non-200 response for image");
                         None
