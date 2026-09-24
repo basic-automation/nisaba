@@ -22,8 +22,20 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       `nicbudd/nisaba-releases`
 - [x] CI: `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on Linux + Windows,
       plus a `npm run generate` frontend build
-- [ ] Get CI green on the first run — Linux Tauri system deps and the clippy `-D warnings`
-      gate are unproven against this tree
+- [ ] **CI is red** — `cargo fmt --all -- --check` fails on 280 hunks; the workspace has
+      never been run through rustfmt. Run `cargo fmt --all`, review, and commit in one
+      mechanical pass. This blocks every other CI signal, since the build step never runs.
+- [ ] Clear the clippy backlog behind CI's `-D warnings` gate; it is unproven against this
+      tree because the format check fails first
+- [ ] `crates/core`'s `turso 0.5` pulls in `aegis 0.9.7`, whose vendored C (`libaegis`)
+      fails to compile locally with AVX-512 intrinsics under `-mtune=native`
+      (`_mm512_xor_si512 requires target feature 'avx512f'`). Confirm whether it builds on
+      the CI runners; if it is a general problem, pin/patch `aegis` or raise it upstream —
+      a dependency that will not compile is a hard blocker for contributors.
+- [ ] Normalize line endings — the tree carries CRLF from its Windows origin, so a clean
+      checkout on Linux shows 56 files modified with whole-file diffs. Add a
+      `.gitattributes` (`* text=auto eol=lf`) and normalize in one commit while the tree is
+      otherwise clean, or every contributor's PR is a whole-file rewrite.
 - [ ] Decide `rust-toolchain.toml`: the dev host is nightly, CI pins stable, and nothing
       in-tree uses `#![feature(...)]` — pin stable explicitly so the two cannot drift
 - [ ] `SECURITY.md` with a disclosure contact — the app holds marketplace OAuth tokens and
