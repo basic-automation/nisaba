@@ -168,6 +168,44 @@ pub fn parse_listings(html: &str, base_url: &str) -> Vec<XmrListing> {
     listings
 }
 
+/// The `<form>` an element belongs to, if any.
+fn enclosing_form(el: ElementRef) -> Option<ElementRef> {
+    el.ancestors()
+        .filter_map(ElementRef::wrap)
+        .find(|a| a.value().name() == "form")
+}
+
+/// Whether a form control would actually be submitted by a browser.
+///
+/// The adapter re-posts the entire edit form to change one field, so anything
+/// kept here is written back to a live listing. HTML only submits "successful
+/// controls": a disabled control never is, an unchecked checkbox or radio never
+/// is, and only the submit button the user activated is. File inputs are
+/// successful in a browser, but they cannot be expressed in the
+/// `application/x-www-form-urlencoded` body this adapter sends — posting the
+/// name with an empty value asks the server to clear the photo — so they are
+/// dropped too.
+fn is_successful_control(el: ElementRef) -> bool {
+    let element = el.value();
+
+    if element.attr("disabled").is_some() {
+        return false;
+    }
+
+    if element.name() != "input" {
+        // <select> and <textarea> are always submitted when named and enabled.
+        return true;
+    }
+
+    let input_type = element.attr("type").unwrap_or("text").to_ascii_lowercase();
+
+    match input_type.as_str() {
+        "checkbox" | "radio" => element.attr("checked").is_some(),
+        "file" | "submit" | "reset" | "button" | "image" => false,
+        _ => true,
+    }
+}
+
 /// Parse a listing edit form to extract form token and all form fields.
 /// Also extracts textarea content for fields like description.
 /// Works with both Django-style (csrfmiddlewaretoken) and PHP-style (validation) tokens.
@@ -176,7 +214,7 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
 
     // Find form token — try multiple field names
     let token_names = ["validation", "csrfmiddlewaretoken", "_csrf", "csrf_token"];
-    let mut csrf_token = None;
+    let mut token_input = None;
     let mut csrf_field_name = String::new();
 
     for name in &token_names {
@@ -184,25 +222,26 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
         let found = Selector::parse(&selector_str).ok().and_then(|sel| {
             document
                 .select(&sel)
-                .next()
-                .and_then(|el| el.value().attr("value"))
-                .filter(|v| !v.is_empty())
-                .map(|v| v.to_string())
+                .find(|el| el.value().attr("value").is_some_and(|v| !v.is_empty()))
         });
-        if let Some(token) = found {
-            csrf_token = Some(token);
+        if let Some(el) = found {
+            token_input = Some(el);
             csrf_field_name = name.to_string();
             break;
         }
     }
 
-    let csrf_token = csrf_token?;
+    let token_input = token_input?;
+    let csrf_token = token_input.value().attr("value")?.to_string();
 
-    // Collect all form fields
-    let input_sel = Selector::parse("form input, form select, form textarea").ok()?;
+    // Collect the fields of the form the token belongs to. A listing page also
+    // carries site search, login and newsletter forms; sweeping the whole
+    // document would post their fields back at the listing.
+    let field_sel = Selector::parse("input, select, textarea").ok()?;
+    let form_root = enclosing_form(token_input).unwrap_or_else(|| document.root_element());
     let mut fields = Vec::new();
 
-    for el in document.select(&input_sel) {
+    for el in form_root.select(&field_sel) {
         let name = match el.value().attr("name") {
             Some(n) => n.to_string(),
             None => continue,
@@ -210,6 +249,13 @@ pub fn parse_edit_form(html: &str) -> Option<EditFormData> {
 
         // Skip the token field — we track it separately
         if name == csrf_field_name {
+            continue;
+        }
+
+        // Everything we collect here is posted straight back at the listing, so
+        // a control we keep that a browser would have dropped is a silent edit.
+        // Mirror the HTML definition of a "successful control".
+        if !is_successful_control(el) {
             continue;
         }
 

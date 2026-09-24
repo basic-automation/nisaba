@@ -1,0 +1,80 @@
+<!doctype html>
+<!--
+  The seller's "my sales" table, in the shape XMR Bazaar renders it.
+
+  Synthetic: the order ids, listing ids and titles are invented. What matters
+  for `parse_sales_page` is the structure and the mix of statuses — this is the
+  input that decides whether the sync engine decrements real stock, so a row it
+  mis-reads is a listing that oversells or goes dark.
+-->
+<html lang="en">
+  <head><title>My sales</title></head>
+  <body>
+    <table class="my-sales-table">
+      <thead>
+        <tr><th>Order</th><th>Status</th><th>Product</th><th>Date</th></tr>
+      </thead>
+      <tbody>
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"><a href="/order/436a/">436a</a></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Completed</span></td>
+          <td class="my-sales-td-product">
+            <a href="/listing/FxHA/"><span class="my-sales-product-title">Ripstop Field Pants</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-21</span></td>
+        </tr>
+
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"><a href="/order/91bc/">91bc</a></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Shipped</span></td>
+          <td class="my-sales-td-product">
+            <a href="/listing/Qm2T/"><span class="my-sales-product-title">Wool Watch Cap</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-22</span></td>
+        </tr>
+
+        <!-- Declined: the buyer never paid. Decrementing stock for this would
+             take a unit off the shelf that was never sold. -->
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"><a href="/order/ccc1/">ccc1</a></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Declined</span></td>
+          <td class="my-sales-td-product">
+            <a href="/listing/FxHA/"><span class="my-sales-product-title">Ripstop Field Pants</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-22</span></td>
+        </tr>
+
+        <!-- Still in flight. Not a sale yet. -->
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"><a href="/order/dd02/">dd02</a></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Awaiting payment</span></td>
+          <td class="my-sales-td-product">
+            <a href="/listing/Qm2T/"><span class="my-sales-product-title">Wool Watch Cap</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-23</span></td>
+        </tr>
+
+        <!-- Malformed: no order link at all. Must be skipped, not panicked on. -->
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Completed</span></td>
+          <td class="my-sales-td-product">
+            <a href="/listing/ZZZZ/"><span class="my-sales-product-title">Orphaned Row</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-23</span></td>
+        </tr>
+
+        <!-- Completed, but the product cell links to a profile rather than a
+             listing. Without a listing id there is nothing to map a sale to. -->
+        <tr class="my-sales-tr">
+          <td class="my-sales-td-guid"><a href="/order/ee03/">ee03</a></td>
+          <td class="my-sales-td-status"><span class="my-sales-status-tag">Completed</span></td>
+          <td class="my-sales-td-product">
+            <a href="/profile/someone/"><span class="my-sales-product-title">Deleted Listing</span></a>
+          </td>
+          <td><span class="my-sales-date">2026-09-23</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>
