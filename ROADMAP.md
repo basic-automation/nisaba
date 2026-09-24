@@ -22,16 +22,22 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       `nicbudd/nisaba-releases`
 - [x] CI: `cargo fmt --check`, `build`, `test`, `clippy -D warnings` on Linux + Windows,
       plus a `npm run generate` frontend build
-- [ ] **CI is red** — `cargo fmt --all -- --check` fails on 280 hunks; the workspace has
-      never been run through rustfmt. Run `cargo fmt --all`, review, and commit in one
-      mechanical pass. This blocks every other CI signal, since the build step never runs.
-- [ ] Clear the clippy backlog behind CI's `-D warnings` gate; it is unproven against this
-      tree because the format check fails first
+- [x] Run `cargo fmt --all` across the workspace — 280 hunks, never formatted; the check
+      now passes and no longer blocks the rest of CI
+- [ ] **The workspace does not build on stable Rust.** `onyums 0.2.5` declares
+      `#![feature(addr_parse_ascii)]`, so `cargo build` fails with E0554 on the stable
+      channel — CI's Linux and Windows jobs both die there. In-tree code is stable-clean;
+      the gate is a dependency. onyums went stable at 0.3.0 and is now at 0.5.0, and
+      `crates/p2p` only touches two functions (`onyums::serve`, `onyums::get_onion_name`),
+      so bumping is the fix. Until then the project is nightly-only and the README's build
+      instructions are wrong for anyone on stable.
+- [ ] Clear the clippy backlog behind CI's `-D warnings` gate; still unproven because the
+      build fails before clippy runs
 - [ ] `crates/core`'s `turso 0.5` pulls in `aegis 0.9.7`, whose vendored C (`libaegis`)
-      fails to compile locally with AVX-512 intrinsics under `-mtune=native`
-      (`_mm512_xor_si512 requires target feature 'avx512f'`). Confirm whether it builds on
-      the CI runners; if it is a general problem, pin/patch `aegis` or raise it upstream —
-      a dependency that will not compile is a hard blocker for contributors.
+      fails to compile on the dev workstation with AVX-512 intrinsics under `-mtune=native`
+      (`_mm512_xor_si512 requires target feature 'avx512f'`). **Still unconfirmed on CI** —
+      the runners never reach `aegis`, because the onyums stable-channel failure above
+      aborts the build first. Recheck once that is fixed.
 - [ ] Normalize line endings — the tree carries CRLF from its Windows origin, so a clean
       checkout on Linux shows 56 files modified with whole-file diffs. Add a
       `.gitattributes` (`* text=auto eol=lf`) and normalize in one commit while the tree is
