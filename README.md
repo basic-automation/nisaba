@@ -16,7 +16,8 @@ Built with Rust + Tauri 2 and a Nuxt 3 frontend.
   sync engine only attempt what a platform actually supports.
 - **Inventory reconciliation** — a sync engine with quantity deltas, conflict resolution,
   and sale detection for platforms that use stock modes (unlimited / one-time) instead of
-  numeric quantities.
+  numeric quantities. It also has a **dry-run mode** that resolves a full cycle and reports
+  every change it would make without writing to any platform — or to the local database.
 - **Listing management** — descriptions, photos, and multi-tier pricing, edited locally
   and published per platform.
 - **Vendor plugins** — TypeScript modules run in an embedded Deno runtime to import

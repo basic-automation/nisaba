@@ -70,8 +70,8 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 113 tests. `crates/core` 40 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
-`sync_engine` 17), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
+Current state: 118 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+`sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`). Every adapter's live network path, the P2P layer
 and the plugin runtime are still untested.
@@ -209,7 +209,14 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [x] Per-sync-cycle vendor data refresh
 - [ ] `conflict.rs` exposes one strategy; make the resolution policy explicit and
       user-selectable (last-writer-wins vs. platform-authoritative vs. manual review)
-- [ ] A dry-run mode that reports what a sync *would* change without writing to any platform
+- [x] A dry-run mode that reports what a sync *would* change without writing to any platform
+      — `SyncEngine::dry_run()`. It suppresses local writes too (snapshots, canonical
+      quantity, history, sync events, the XMR order-dedup table and the vendor-sync
+      callback), so a preview cannot make the following real cycle skip the change it
+      previewed, and reports each planned change as `SyncEngineEvent::DryRunChange`.
+- [ ] Surface dry-run in the UI and the headless daemon — the engine supports it but nothing
+      offers it to a user yet. A "preview this sync" button is the safest possible way to
+      exercise the adapters against a real account.
 - [ ] Partial-failure semantics — one platform down must not abort the cycle or corrupt
       `PlatformSnapshot` state. The cycle does survive a failed poll (there is now a test
       for it), but it then **writes to the platform it could not read**: with no entry in
