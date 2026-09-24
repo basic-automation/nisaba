@@ -210,6 +210,26 @@ impl Db {
     }
 
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
+    /// Apply every migration step the DB has not seen yet.
+    ///
+    /// Two things about the numbering are worth knowing before adding a step,
+    /// because neither is obvious from `migrations/`:
+    ///
+    /// * **Not every step has a `.sql` file, and the `008` gap is deliberate.**
+    ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
+    ///   inline in Rust instead — `004` (company logo columns), `008` (repairing
+    ///   the columns migration 007 dropped when it rebuilt `platform_mappings`),
+    ///   `010`, `012` and `015`–`016` are all inline. `migrations/` holds only
+    ///   the steps whose whole body is SQL, so its filenames are not, and were
+    ///   never meant to be, a complete list.
+    /// * **A file's number is not its schema version.** The `NNN_` prefixes and
+    ///   `PRAGMA user_version` drifted apart as inline steps were added:
+    ///   `migrations/014_cached_platform_listings.sql` is applied at
+    ///   `version < 17`. The `if version < N` gate is the authority; the
+    ///   filename is a label.
+    ///
+    /// Adding a step means bumping [`CURRENT_SCHEMA_VERSION`] and appending a
+    /// new `if version < N` block. Never edit or renumber a step that shipped.
     pub async fn migrate(&self) -> Result<(), SyncError> {
         let conn = self.connect().await?;
 
@@ -3579,6 +3599,120 @@ mod tests {
         db.migrate().await.unwrap();
 
         // Verify the schema version
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// Every table the app reads or writes after a migration from empty. A
+    /// migration step that silently fails leaves the DB one table short, and
+    /// the first symptom today is a runtime error deep in a sync cycle.
+    const EXPECTED_TABLES: &[&str] = &[
+        "app_settings",
+        "auth_tokens",
+        "cached_listings",
+        "cached_platform_listings",
+        "company",
+        "company_config",
+        "company_peers",
+        "company_registry",
+        "inventory_history",
+        "listing_descriptions",
+        "listing_photos",
+        "platform_mappings",
+        "platform_snapshots",
+        "pricing_snapshots",
+        "products",
+        "product_variants",
+        "product_vendor_data",
+        "sync_events",
+        "vendor_listings_cache",
+        "vendor_plugin_installs",
+        "vendor_plugin_registry",
+        "xmr_processed_orders",
+    ];
+
+    async fn table_names(db: &Db) -> Vec<String> {
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        names
+    }
+
+    async fn column_names(db: &Db, table: &str) -> Vec<String> {
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(1).unwrap());
+        }
+        names
+    }
+
+    #[tokio::test]
+    async fn migrating_an_empty_db_builds_the_whole_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        let tables = table_names(&db).await;
+        for expected in EXPECTED_TABLES {
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "table `{expected}` missing after migrating from empty; got {tables:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_008_restores_the_columns_migration_007_dropped() {
+        // Migration 007 rebuilds `platform_mappings`, which loses the columns
+        // migration 002 added. 008 is the inline repair — this is the assertion
+        // that keeps the pair honest, since neither step has a test of its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repair.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        let columns = column_names(&db, "platform_mappings").await;
+        for expected in ["deleted_at", "updated_at", "variant_id", "is_active"] {
+            assert!(
+                columns.iter().any(|c| c == expected),
+                "platform_mappings is missing `{expected}`; got {columns:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migrating_twice_is_a_no_op() {
+        // `migrate()` runs on every launch, so a step that is not gated on the
+        // version — or not idempotent — corrupts the schema on the second run.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("twice.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+
+        db.migrate().await.unwrap();
+        let first = table_names(&db).await;
+
+        db.migrate().await.unwrap();
+        let second = table_names(&db).await;
+
+        assert_eq!(first, second, "a second migrate() changed the schema");
+
         let conn = db.connect().await.unwrap();
         let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
