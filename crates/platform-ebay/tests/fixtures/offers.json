@@ -1,0 +1,39 @@
+{
+  "_comment": "GET /sell/inventory/v1/offer?sku=... — shape only. Ids are invented.",
+  "offers": [
+    {
+      "offerId": "offer_no_price",
+      "sku": "PANTS-RIPSTOP-M",
+      "marketplaceId": "EBAY_US",
+      "format": "FIXED_PRICE",
+      "listingId": null,
+      "pricingSummary": null,
+      "availableQuantity": 7,
+      "status": "UNPUBLISHED",
+      "categoryId": "57988",
+      "listingPolicies": {
+        "fulfillmentPolicyId": "fp_1",
+        "paymentPolicyId": "pp_1",
+        "returnPolicyId": "rp_1"
+      }
+    },
+    {
+      "offerId": "offer_published",
+      "sku": "PANTS-RIPSTOP-M",
+      "marketplaceId": "EBAY_US",
+      "format": "FIXED_PRICE",
+      "listingId": "110512345678",
+      "pricingSummary": { "price": { "value": "48.00", "currency": "USD" } },
+      "availableQuantity": 7,
+      "status": "PUBLISHED",
+      "categoryId": "57988",
+      "listingPolicies": {
+        "fulfillmentPolicyId": "fp_2",
+        "paymentPolicyId": "pp_2",
+        "returnPolicyId": "rp_2"
+      }
+    }
+  ],
+  "total": 2,
+  "next": null
+}
