@@ -1,0 +1,97 @@
+{
+  "_comment": "GET /listings/2021-08-01/items/{sellerId} — shape only. SKUs, ASINs and image hosts are invented; no real seller, token or listing appears here.",
+  "numberOfResults": 4,
+  "nextToken": null,
+  "items": [
+    {
+      "sku": "PANTS-RIPSTOP-M",
+      "summaries": [
+        {
+          "marketplaceId": "ATVPDKIKX0DER",
+          "itemName": "Ripstop Field Pants — Medium",
+          "asin": "B000EXAMPLE1",
+          "productType": "PANTS",
+          "mainImage": {
+            "link": "https://images.example.test/pants-main.jpg",
+            "height": 500,
+            "width": 500
+          },
+          "status": ["BUYABLE"]
+        }
+      ],
+      "fulfillmentAvailability": [
+        { "fulfillmentChannelCode": "DEFAULT", "quantity": 7 }
+      ],
+      "offers": [
+        {
+          "marketplaceId": "ATVPDKIKX0DER",
+          "offerType": "B2C",
+          "price": { "currencyCode": "USD", "amount": "48.00" }
+        }
+      ],
+      "issues": []
+    },
+    {
+      "_comment": "Stocked on two fulfilment channels — merchant-fulfilled and FBA — and offered in two marketplaces.",
+      "sku": "CAP-WOOL",
+      "summaries": [
+        {
+          "marketplaceId": "ATVPDKIKX0DER",
+          "itemName": "Wool Watch Cap",
+          "asin": "B000EXAMPLE2",
+          "productType": "HAT",
+          "mainImage": { "link": "https://images.example.test/cap-main.jpg" },
+          "status": ["BUYABLE"]
+        }
+      ],
+      "fulfillmentAvailability": [
+        { "fulfillmentChannelCode": "DEFAULT", "quantity": 2 },
+        { "fulfillmentChannelCode": "AMAZON_NA", "quantity": 11 }
+      ],
+      "offers": [
+        {
+          "marketplaceId": "ATVPDKIKX0DER",
+          "offerType": "B2C",
+          "price": { "currencyCode": "USD", "amount": "24.00" }
+        },
+        {
+          "marketplaceId": "A2EUQ1WTGCTBG2",
+          "offerType": "B2C",
+          "price": { "currencyCode": "CAD", "amount": "32.50" }
+        }
+      ],
+      "issues": []
+    },
+    {
+      "_comment": "Suppressed listing: no offer, no stock, and an issue explaining why.",
+      "sku": "BOOTS-SUPPRESSED",
+      "summaries": [
+        {
+          "marketplaceId": "ATVPDKIKX0DER",
+          "itemName": "Jungle Boots",
+          "asin": "B000EXAMPLE3",
+          "productType": "SHOES",
+          "mainImage": null,
+          "status": []
+        }
+      ],
+      "fulfillmentAvailability": [],
+      "offers": [],
+      "issues": [
+        {
+          "code": "90220",
+          "message": "A value is required for attribute 'country_of_origin'.",
+          "severity": "ERROR"
+        }
+      ]
+    },
+    {
+      "_comment": "Nothing but a SKU — Amazon returns this for an incomplete draft.",
+      "sku": "DRAFT-ONLY",
+      "summaries": [],
+      "fulfillmentAvailability": [],
+      "offers": [],
+      "issues": []
+    }
+  ]
+}
