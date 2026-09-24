@@ -56,8 +56,9 @@ in [`crates/tauri-app/src/commands`](crates/tauri-app/src/commands) (`products`,
 
 ### Prerequisites
 
-- Rust (stable) and the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/)
-  for your OS
+- Rust — the toolchain is pinned to **stable** by [`rust-toolchain.toml`](rust-toolchain.toml),
+  matching CI, so rustup selects it for you. Plus the
+  [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS.
 - Node.js 18+ and npm
 - `cargo-tauri` CLI: `cargo install tauri-cli --version "^2"`
 
@@ -73,6 +74,16 @@ cargo tauri dev
 
 `cargo tauri dev` starts the Nuxt dev server itself (port **3456**, chosen to avoid
 conflicts) and then launches the desktop shell against it.
+
+If your global `~/.cargo/config.toml` sets nightly-only flags in `build.rustflags`
+(`-Z threads=8` is a common one), every cargo command here fails with *"the option `Z`
+is only accepted on the nightly compiler"* — the stable pin and those flags cannot
+coexist. Cargo merges `rustflags` arrays across config files rather than overriding them,
+so a repo-local config cannot clear it; the environment variable can:
+
+```bash
+RUSTFLAGS="" cargo build --workspace
+```
 
 ### A note on fonts
 
@@ -159,10 +170,18 @@ P2P, and the release pipeline. Known gaps worth calling out up front:
 
 - No auto-update yet — the Tauri updater ships with an empty signing key.
 - Photo upload is unimplemented on every platform.
-- Test coverage is limited to `crates/core`; the adapters, sync engine, P2P layer and
-  plugin runtime are untested.
+- Test coverage is uneven. The sync engine, the database migrations, XMR Bazaar's HTML
+  scraping and Squarespace's mapping layer have tests; the eBay and Amazon adapters, every
+  adapter's live network path, the P2P layer and the vendor plugin runtime do not.
 - `crates/service` (headless sync daemon) and `crates/tui` are tracked in git but excluded
   from the Cargo workspace, so they are not built or tested.
+
+## Security
+
+Found a vulnerability? Please report it privately through this repository's **Security**
+tab rather than opening an issue — [`SECURITY.md`](SECURITY.md) has the details, including
+what counts (credential handling, the vendor plugin sandbox, the P2P layer, and adapters'
+handling of untrusted marketplace responses) and what does not.
 
 ## License
 
