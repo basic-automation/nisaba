@@ -46,8 +46,8 @@ chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 quick-xml = { version = "0.39", features = ["serialize"] }
 axum = "0.8"
-onyums = "0.2.5"
-artiqwest = "0.3.0"
+onyums = "0.3.1"
+artiqwest = "0.4.1"
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"

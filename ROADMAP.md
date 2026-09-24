@@ -24,13 +24,17 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       plus a `npm run generate` frontend build
 - [x] Run `cargo fmt --all` across the workspace — 280 hunks, never formatted; the check
       now passes and no longer blocks the rest of CI
-- [ ] **The workspace does not build on stable Rust.** `onyums 0.2.5` declares
-      `#![feature(addr_parse_ascii)]`, so `cargo build` fails with E0554 on the stable
-      channel — CI's Linux and Windows jobs both die there. In-tree code is stable-clean;
-      the gate is a dependency. onyums went stable at 0.3.0 and is now at 0.5.0, and
-      `crates/p2p` only touches two functions (`onyums::serve`, `onyums::get_onion_name`),
-      so bumping is the fix. Until then the project is nightly-only and the README's build
-      instructions are wrong for anyone on stable.
+- [x] Return the workspace to stable Rust — `onyums 0.2.5` declared
+      `#![feature(addr_parse_ascii)]` and failed E0554 on the stable channel. Bumped to
+      `onyums 0.3.1` (first stable-clean release) with `artiqwest 0.4.1`; both sit on
+      `arti-client 0.43`, and `crates/p2p` needed no code change.
+- [ ] Upgrade to `onyums 0.5.x`. **Blocked on artiqwest**: onyums 0.4+ requires
+      `arti-client 0.46`, artiqwest is still on `0.43` as of 0.4.1, and the two resolve to
+      a single `derive-deftly` whose `~1.6.0` and `~1.11.4` ranges cannot unify. The two
+      crates must move to the same arti generation together, so this unblocks only after
+      artiqwest adopts `arti-client 0.46`. Worth taking then: 0.5's builder returns an
+      `OnionServiceHandle` with the address already known, replacing the 120s polling loop
+      in `start_onion_service` with `handle.onion_address()` + `handle.ready()`.
 - [ ] Clear the clippy backlog behind CI's `-D warnings` gate; still unproven because the
       build fails before clippy runs
 - [ ] `crates/core`'s `turso 0.5` pulls in `aegis 0.9.7`, whose vendored C (`libaegis`)
