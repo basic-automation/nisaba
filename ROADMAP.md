@@ -70,15 +70,17 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 79 tests. `crates/core` 40 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 113 tests. `crates/core` 40 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 17), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
-`crates/platform-squarespace` 15 (`mapping`). The eBay and Amazon adapters, every adapter's
-live network path, the P2P layer and the plugin runtime are still untested.
+`crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
+`crates/platform-amazon` 13 (`mapping`). Every adapter's live network path, the P2P layer
+and the plugin runtime are still untested.
 
-- [ ] Fixture-based tests for each adapter's `mapping.rs`. Squarespace is done
-      (`crates/platform-squarespace/tests/mapping.rs`, 15 tests over recorded response
-      *shapes*): the products/inventory join, unlimited variants, the variant-name title
-      suffix, and `to_full_listing`. eBay and Amazon still have none.
+- [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
+      Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
+      title suffix), eBay 21 (both the Inventory API's JSON and the Trading API's XML,
+      including `quick_xml`'s `@currencyID`/`$text` handling and the `extras` round-trip),
+      Amazon 13 (the SP-API Listings Items arrays).
 - [ ] Capture real (redacted) API/HTML responses for the fixtures. Everything added so far
       is hand-built from documented response shapes, which catches structural regressions
       but not "the platform changed what it actually sends" — the failure mode that matters
@@ -153,6 +155,25 @@ The capability matrix is the queue. Current state per `capabilities()`:
       and Amazon never reach the default impl at all — they are not silently reporting "no
       sales" each cycle. `detect_sales_is_only_called_on_stock_mode_platforms` holds the gate
       in place.
+- [ ] Amazon counts only `fulfillmentAvailability[0]`, so a listing stocked on both
+      merchant-fulfilled and FBA reports one channel's quantity — and Amazon does not
+      guarantee that array's order. Because the sync engine resolves the minimum across
+      platforms, a listing with most of its stock in FBA drags canonical stock down and
+      pushes that number to eBay and Squarespace. Decide whether to sum the channels or
+      filter to a configured one. Pinned by `only_the_first_fulfilment_channel_is_counted`.
+- [ ] Amazon takes `offers[0]` for price with no marketplace filtering, so a seller listed
+      in more than one marketplace gets an arbitrary offer, and `to_listing` drops the
+      currency. Filter on the configured `marketplace_ids`.
+- [ ] Amazon drops ERROR-severity `issues` in every mapping, so a suppressed listing reaches
+      the UI as a normal listing with zero stock and no explanation. Carry them through
+      `extras` and surface them.
+- [ ] eBay's two read paths key listings differently — the Inventory API by SKU, the Trading
+      API by ItemID — so a mapping created from one will not match the other. Decide which
+      is canonical, or store both.
+- [ ] `trading_to_listing` computes `Quantity - QuantitySold` with no floor, so eBay
+      reporting more sold than listed yields a negative quantity in the mapping UI and makes
+      that listing the minimum in any comparison. The sync engine floors canonical stock at
+      zero, so nothing writes it back today.
 - [ ] Rate-limit handling per platform — eBay and Amazon both throttle and the adapters
       currently have no backoff distinct from `max_retries`
 - [ ] Token refresh failure path: what the UI shows when `refresh_auth()` fails mid-sync

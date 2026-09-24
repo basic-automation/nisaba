@@ -171,8 +171,9 @@ P2P, and the release pipeline. Known gaps worth calling out up front:
 - No auto-update yet — the Tauri updater ships with an empty signing key.
 - Photo upload is unimplemented on every platform.
 - Test coverage is uneven. The sync engine, the database migrations, XMR Bazaar's HTML
-  scraping and Squarespace's mapping layer have tests; the eBay and Amazon adapters, every
-  adapter's live network path, the P2P layer and the vendor plugin runtime do not.
+  scraping and all four adapters' mapping layers have tests against recorded response
+  shapes; every adapter's live network path, the P2P layer and the vendor plugin runtime
+  do not.
 - `crates/service` (headless sync daemon) and `crates/tui` are tracked in git but excluded
   from the Cargo workspace, so they are not built or tested.
 
