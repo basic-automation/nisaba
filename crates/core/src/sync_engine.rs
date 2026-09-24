@@ -382,22 +382,27 @@ impl SyncEngine {
                         Ok(()) => {
                             changes_pushed += 1;
 
-                            // Update version_tag to reflect new stock mode state
-                            self.db
-                                .update_snapshot_version_tag(
-                                    &product.id,
-                                    mapping.platform.as_str(),
-                                    desired,
-                                )
-                                .await?;
-
-                            // Ensure snapshot exists
+                            // Create the snapshot row first: `update_snapshot_version_tag`
+                            // is a plain UPDATE, so tagging before the row exists
+                            // silently drops the tag. The next cycle would then read
+                            // `version_tag = NULL`, treat the state as unknown, and
+                            // re-push the stock mode to the live listing — every
+                            // cycle, forever.
                             self.db
                                 .upsert_snapshot(
                                     &product.id,
                                     mapping.platform.as_str(),
                                     new_canonical,
                                     &now,
+                                )
+                                .await?;
+
+                            // Record the stock mode we just pushed.
+                            self.db
+                                .update_snapshot_version_tag(
+                                    &product.id,
+                                    mapping.platform.as_str(),
+                                    desired,
                                 )
                                 .await?;
 
@@ -687,5 +692,885 @@ impl SyncEngine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+    use crate::types::{
+        PlatformCapabilities, PlatformInventoryItem, PlatformListing, Product, SaleDetection,
+        SyncEvent,
+    };
+
+    // ── Fake adapter ──────────────────────────────────────────
+
+    /// One scripted answer to a `fetch_inventory` call. Kept as a cloneable
+    /// enum rather than a `Result<_, SyncError>` because `SyncError` is not
+    /// `Clone` and the tests need to replay the *same* error variant.
+    #[derive(Clone)]
+    enum Poll {
+        Items(Vec<PlatformInventoryItem>),
+        Network(&'static str),
+        Auth(&'static str),
+    }
+
+    impl Poll {
+        fn items(pairs: &[(&str, i64)]) -> Self {
+            Poll::Items(
+                pairs
+                    .iter()
+                    .map(|(id, quantity)| PlatformInventoryItem {
+                        platform_item_id: (*id).to_string(),
+                        quantity: *quantity,
+                    })
+                    .collect(),
+            )
+        }
+
+        fn into_result(self, platform: Platform) -> Result<Vec<PlatformInventoryItem>, SyncError> {
+            match self {
+                Poll::Items(items) => Ok(items),
+                Poll::Network(message) => Err(SyncError::NetworkError {
+                    platform,
+                    message: message.into(),
+                }),
+                Poll::Auth(message) => Err(SyncError::AuthError {
+                    platform,
+                    message: message.into(),
+                }),
+            }
+        }
+    }
+
+    /// A `PlatformAdapter` that answers from canned data and records every
+    /// write it is asked to make. Nothing here touches a network or a real
+    /// marketplace: `set_quantity` only appends to `pushes`.
+    struct FakeAdapter {
+        platform: Platform,
+        capabilities: PlatformCapabilities,
+        /// One entry consumed per poll. The last entry repeats once the queue
+        /// is down to one, so "fails twice then succeeds" and "always fails"
+        /// are both expressible.
+        polls: Mutex<Vec<Poll>>,
+        sales: Mutex<Vec<SaleDetection>>,
+        /// When set, every `set_quantity` fails with this message.
+        push_error: Option<String>,
+        pushes: Mutex<Vec<(String, i64)>>,
+        poll_calls: AtomicUsize,
+        refresh_calls: AtomicUsize,
+        detect_sales_calls: AtomicUsize,
+    }
+
+    impl FakeAdapter {
+        fn new(platform: Platform) -> Self {
+            Self {
+                platform,
+                capabilities: PlatformCapabilities::default(),
+                polls: Mutex::new(vec![Poll::Items(Vec::new())]),
+                sales: Mutex::new(Vec::new()),
+                push_error: None,
+                pushes: Mutex::new(Vec::new()),
+                poll_calls: AtomicUsize::new(0),
+                refresh_calls: AtomicUsize::new(0),
+                detect_sales_calls: AtomicUsize::new(0),
+            }
+        }
+
+        /// Report these quantities on every poll.
+        fn with_quantities(self, pairs: &[(&str, i64)]) -> Self {
+            *self.polls.lock().unwrap() = vec![Poll::items(pairs)];
+            self
+        }
+
+        /// Answer polls from this script, one entry per call.
+        fn with_poll_script(self, script: Vec<Poll>) -> Self {
+            *self.polls.lock().unwrap() = script;
+            self
+        }
+
+        fn with_stock_mode(mut self) -> Self {
+            self.capabilities.has_stock_mode_inventory = true;
+            self
+        }
+
+        fn with_sales(self, sales: Vec<SaleDetection>) -> Self {
+            *self.sales.lock().unwrap() = sales;
+            self
+        }
+
+        fn failing_pushes(mut self, message: &str) -> Self {
+            self.push_error = Some(message.to_string());
+            self
+        }
+
+        fn pushes(&self) -> Vec<(String, i64)> {
+            self.pushes.lock().unwrap().clone()
+        }
+
+        fn arm_sales(&self, sales: Vec<SaleDetection>) {
+            *self.sales.lock().unwrap() = sales;
+        }
+    }
+
+    #[async_trait]
+    impl PlatformAdapter for FakeAdapter {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+
+        async fn fetch_inventory(&self) -> Result<Vec<PlatformInventoryItem>, SyncError> {
+            self.poll_calls.fetch_add(1, Ordering::SeqCst);
+            let next = {
+                let mut queue = self.polls.lock().unwrap();
+                if queue.len() > 1 {
+                    queue.remove(0)
+                } else {
+                    queue.first().cloned().unwrap_or(Poll::Items(Vec::new()))
+                }
+            };
+            next.into_result(self.platform)
+        }
+
+        async fn fetch_all_listings(&self) -> Result<Vec<PlatformListing>, SyncError> {
+            Ok(Vec::new())
+        }
+
+        async fn set_quantity(&self, platform_item_id: &str, qty: i64) -> Result<(), SyncError> {
+            if let Some(message) = &self.push_error {
+                return Err(SyncError::ApiError {
+                    platform: self.platform,
+                    message: message.clone(),
+                });
+            }
+            self.pushes
+                .lock()
+                .unwrap()
+                .push((platform_item_id.to_string(), qty));
+            Ok(())
+        }
+
+        async fn is_authenticated(&self) -> bool {
+            true
+        }
+
+        async fn refresh_auth(&self) -> Result<(), SyncError> {
+            self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            Err(SyncError::AuthError {
+                platform: self.platform,
+                message: "fake adapter cannot refresh".into(),
+            })
+        }
+
+        async fn detect_sales(&self) -> Result<Vec<SaleDetection>, SyncError> {
+            self.detect_sales_calls.fetch_add(1, Ordering::SeqCst);
+            // Sales are reported once and then consumed, which is how a scrape
+            // of a "recent orders" page behaves after the order ages out.
+            Ok(std::mem::take(&mut *self.sales.lock().unwrap()))
+        }
+
+        fn capabilities(&self) -> PlatformCapabilities {
+            self.capabilities.clone()
+        }
+    }
+
+    // ── Harness ───────────────────────────────────────────────
+
+    /// A sync engine wired to a fresh temp-file DB and a set of fake adapters.
+    struct Harness {
+        db: Arc<Db>,
+        engine: SyncEngine,
+        events: mpsc::Receiver<SyncEngineEvent>,
+        adapters: Vec<Arc<FakeAdapter>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        async fn new(fakes: Vec<FakeAdapter>, max_retries: u32) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("sync-engine-test.db");
+            let db = Db::open(path.to_str().unwrap()).await.unwrap();
+            db.migrate().await.unwrap();
+            let db = Arc::new(db);
+
+            let mut map: HashMap<Platform, Arc<dyn PlatformAdapter>> = HashMap::new();
+            let mut handles = Vec::new();
+            for fake in fakes {
+                let fake = Arc::new(fake);
+                map.insert(fake.platform, fake.clone() as Arc<dyn PlatformAdapter>);
+                handles.push(fake);
+            }
+
+            // Buffer generously: `run_cycle` awaits on send, so a full channel
+            // would deadlock the cycle rather than fail the test.
+            let (tx, rx) = mpsc::channel(256);
+            let adapters: SharedAdapters = Arc::new(RwLock::new(map));
+
+            Self {
+                engine: SyncEngine::new(db.clone(), adapters, tx, max_retries),
+                db,
+                events: rx,
+                adapters: handles,
+                _dir: dir,
+            }
+        }
+
+        fn adapter(&self, platform: Platform) -> Arc<FakeAdapter> {
+            self.adapters
+                .iter()
+                .find(|a| a.platform == platform)
+                .expect("adapter not registered in harness")
+                .clone()
+        }
+
+        async fn add_product(&self, id: &str, quantity: i64, mappings: &[(Platform, &str)]) {
+            self.add_product_inner(id, quantity, true, mappings).await;
+        }
+
+        async fn add_untracked_product(
+            &self,
+            id: &str,
+            quantity: i64,
+            mappings: &[(Platform, &str)],
+        ) {
+            self.add_product_inner(id, quantity, false, mappings).await;
+        }
+
+        async fn add_product_inner(
+            &self,
+            id: &str,
+            quantity: i64,
+            is_tracked: bool,
+            mappings: &[(Platform, &str)],
+        ) {
+            self.db
+                .insert_product(&Product {
+                    id: id.to_string(),
+                    canonical_sku: format!("SKU-{id}"),
+                    name: format!("Product {id}"),
+                    quantity,
+                    low_stock_threshold: None,
+                    is_tracked,
+                    has_variants: false,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                })
+                .await
+                .unwrap();
+
+            for (platform, item_id) in mappings {
+                self.db
+                    .insert_mapping(id, platform.as_str(), item_id, None, "v1")
+                    .await
+                    .unwrap();
+            }
+        }
+
+        fn drain_events(&mut self) -> Vec<SyncEngineEvent> {
+            let mut out = Vec::new();
+            while let Ok(event) = self.events.try_recv() {
+                out.push(event);
+            }
+            out
+        }
+
+        async fn quantity(&self, product_id: &str) -> i64 {
+            self.db
+                .get_product(product_id)
+                .await
+                .unwrap()
+                .expect("product missing")
+                .quantity
+        }
+
+        async fn events_of_type(&self, product_id: &str, event_type: &str) -> Vec<SyncEvent> {
+            self.db
+                .list_recent_sync_events(200)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.product_id == product_id && e.event_type == event_type)
+                .collect()
+        }
+    }
+
+    fn sale(item_id: &str, units: i64, order_id: &str) -> SaleDetection {
+        SaleDetection {
+            platform_item_id: item_id.to_string(),
+            units_sold: units,
+            order_id: Some(order_id.to_string()),
+            sold_at: None,
+        }
+    }
+
+    // ── Quantity resolution ───────────────────────────────────
+
+    #[tokio::test]
+    async fn empty_adapter_map_is_a_no_op_cycle() {
+        let mut harness = Harness::new(Vec::new(), 0).await;
+        harness.add_product("p1", 5, &[]).await;
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!((synced, pushed), (0, 0));
+        // The engine returns before emitting, so there is no CycleComplete.
+        assert!(harness.drain_events().is_empty());
+        assert_eq!(harness.quantity("p1").await, 5);
+    }
+
+    #[tokio::test]
+    async fn lowest_stock_wins_when_no_platform_restocked() {
+        // eBay says 3, Squarespace says 7, and neither has a snapshot to
+        // compare against, so nothing counts as a restock: the conservative
+        // minimum (3) becomes canonical and is pushed to Squarespace only.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(synced, 1);
+        assert_eq!(
+            pushed, 1,
+            "only Squarespace is out of step with the resolved 3"
+        );
+        assert_eq!(harness.quantity("p1").await, 3);
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 3)]
+        );
+        assert!(
+            harness.adapter(Platform::Ebay).pushes().is_empty(),
+            "eBay already reported 3, so it must not be written to"
+        );
+
+        let recorded = harness.events_of_type("p1", "quantity_change").await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].target_platform, "squarespace");
+        assert_eq!(
+            (recorded[0].old_quantity, recorded[0].new_quantity),
+            (10, 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restock_raises_canonical_net_of_sales_elsewhere() {
+        // Snapshots say both platforms held 5. This cycle eBay reports 12 (a
+        // restock, +7) and Squarespace reports 3 (two sold, -2). Restock wins,
+        // so canonical = max(12) + decreases(-2) = 10.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 12)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 3)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                5,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        harness
+            .db
+            .upsert_snapshot("p1", "ebay", 5, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+        harness
+            .db
+            .upsert_snapshot("p1", "squarespace", 5, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 10);
+        assert_eq!(
+            harness.adapter(Platform::Ebay).pushes(),
+            vec![("E-1".to_string(), 10)]
+        );
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 10)]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_quantity_never_goes_negative() {
+        // A restock reading smaller than the decreases it is netted against
+        // must floor at 0, never push a negative quantity to a platform.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 1)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 0)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                20,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        harness
+            .db
+            .upsert_snapshot("p1", "ebay", 0, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+        harness
+            .db
+            .upsert_snapshot("p1", "squarespace", 9, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 0);
+        for (item, pushed) in harness.adapter(Platform::Ebay).pushes() {
+            assert!(pushed >= 0, "pushed {pushed} to {item}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agreeing_cycle_pushes_nothing_but_still_records_history() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 4)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 4, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!((synced, pushed), (0, 0));
+        assert!(harness.adapter(Platform::Ebay).pushes().is_empty());
+        let history = harness.db.get_inventory_history("p1", None).await.unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "history is recorded even on a no-change cycle"
+        );
+        assert_eq!(history[0].quantity, 4);
+    }
+
+    #[tokio::test]
+    async fn untracked_products_are_left_alone() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 2)])],
+            0,
+        )
+        .await;
+        harness
+            .add_untracked_product("p1", 9, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!((synced, pushed), (0, 0));
+        assert_eq!(harness.quantity("p1").await, 9);
+        assert!(harness.adapter(Platform::Ebay).pushes().is_empty());
+    }
+
+    // ── Partial failure ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn one_platform_down_does_not_abort_the_cycle() {
+        // Squarespace is unreachable. The cycle must still resolve from eBay's
+        // reading and report the failure as an event rather than returning Err.
+        let mut harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 2)]),
+                FakeAdapter::new(Platform::Squarespace)
+                    .with_poll_script(vec![Poll::Network("connection refused")]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                8,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let (synced, _) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(synced, 1);
+        assert_eq!(harness.quantity("p1").await, 2);
+
+        let events = harness.drain_events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SyncEngineEvent::PlatformError {
+                    platform: Platform::Squarespace,
+                    ..
+                }
+            )),
+            "the unreachable platform must surface a PlatformError"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SyncEngineEvent::CycleComplete { .. })),
+            "the cycle must still complete"
+        );
+
+        // Documenting current behaviour, not endorsing it: the platform whose
+        // poll failed is still written to in the same cycle, with a canonical
+        // quantity resolved without any reading from it. See the "partial
+        // failure semantics" item in ROADMAP.md Phase 4.
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 2)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_is_recorded_and_does_not_abort_the_cycle() {
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 1)]),
+                FakeAdapter::new(Platform::Squarespace)
+                    .with_quantities(&[("S-1", 6)])
+                    .failing_pushes("listing is locked"),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                6,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        // Canonical still moves to the conservative minimum — a failed push
+        // does not roll back the local truth.
+        assert_eq!(harness.quantity("p1").await, 1);
+
+        let errors = harness.events_of_type("p1", "push_error").await;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].target_platform, "squarespace");
+        assert!(errors[0]
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("listing is locked"));
+    }
+
+    // ── Retry and auth ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn poll_retries_then_succeeds() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_poll_script(vec![
+                Poll::Network("timeout"),
+                Poll::Network("timeout"),
+                Poll::items(&[("E-1", 5)]),
+            ])],
+            2,
+        )
+        .await;
+
+        let adapter = harness.adapter(Platform::Ebay);
+        let items = harness
+            .engine
+            .poll_with_retry(adapter.as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].quantity, 5);
+        assert_eq!(adapter.poll_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn poll_gives_up_after_max_retries_and_returns_the_last_error() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay)
+                .with_poll_script(vec![Poll::Network("still down")])],
+            2,
+        )
+        .await;
+
+        let adapter = harness.adapter(Platform::Ebay);
+        let err = harness
+            .engine
+            .poll_with_retry(adapter.as_ref())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("still down"));
+        assert_eq!(
+            adapter.poll_calls.load(Ordering::SeqCst),
+            3,
+            "max_retries = 2 means one attempt plus two retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_auth_error_triggers_a_refresh_and_an_auth_expired_event() {
+        let mut harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay)
+                .with_poll_script(vec![Poll::Auth("token expired")])],
+            0,
+        )
+        .await;
+
+        let adapter = harness.adapter(Platform::Ebay);
+        let err = harness
+            .engine
+            .poll_with_retry(adapter.as_ref())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, SyncError::AuthError { .. }));
+        assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            harness.drain_events().iter().any(|e| matches!(
+                e,
+                SyncEngineEvent::AuthExpired {
+                    platform: Platform::Ebay
+                }
+            )),
+            "a failed refresh must tell the UI the platform needs re-authentication"
+        );
+    }
+
+    // ── Stock-mode platforms ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_stock_mode_sale_decrements_canonical_and_is_deduplicated() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 2, "order-42")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            3,
+            "two units sold on a stock-mode platform must come off canonical"
+        );
+        assert!(
+            harness.db.is_xmr_order_processed("order-42").await.unwrap(),
+            "the order must be marked processed so a later cycle cannot double-count it"
+        );
+
+        // Replay the same order. The DB-level dedup must swallow it.
+        harness
+            .adapter(Platform::XmrBazaar)
+            .arm_sales(vec![sale("X-1", 2, "order-42")]);
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            3,
+            "replaying a processed order must not decrement again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sale_on_an_unmapped_listing_is_skipped() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-UNKNOWN", 3, "order-99")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 5);
+        assert!(
+            !harness.db.is_xmr_order_processed("order-99").await.unwrap(),
+            "an unmapped sale is not consumed, so it can be picked up once the listing is mapped"
+        );
+    }
+
+    #[tokio::test]
+    async fn selling_the_last_unit_flips_a_stock_mode_listing_out_of_stock() {
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 1, "order-1")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 1, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 0);
+        assert_eq!(
+            harness.adapter(Platform::XmrBazaar).pushes(),
+            vec![("X-1".to_string(), 0)],
+            "selling the last unit must flip the listing out of stock"
+        );
+        assert_eq!(
+            harness
+                .events_of_type("p1", "stock_mode_change")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stock_mode_push_is_not_repeated_once_the_state_matches() {
+        // Regression guard: the engine skips a stock-mode push when the
+        // snapshot's version_tag already equals the desired state. That tag
+        // has to actually survive the first push, or every subsequent cycle
+        // re-writes the listing on a live marketplace for no reason.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 1, "order-1")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 1, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        let snapshot = harness
+            .db
+            .get_snapshot("p1", "xmrbazaar")
+            .await
+            .unwrap()
+            .expect("the first push must leave a snapshot behind");
+        assert_eq!(
+            snapshot.version_tag.as_deref(),
+            Some("out_of_stock"),
+            "the pushed stock mode must be persisted on the snapshot"
+        );
+
+        // A second cycle with nothing new to report must be a complete no-op
+        // against the platform.
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.adapter(Platform::XmrBazaar).pushes().len(),
+            1,
+            "the stock mode was already correct, so the second cycle must not push again"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_sales_is_only_called_on_stock_mode_platforms() {
+        // `PlatformAdapter::detect_sales` has a default impl returning an empty
+        // list, and eBay, Squarespace and Amazon all inherit it. That default is
+        // correct precisely because the engine gates the call on
+        // `has_stock_mode_inventory` — it is never reached on a numeric platform,
+        // so those three are not silently reporting "no sales" every cycle.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
+                FakeAdapter::new(Platform::XmrBazaar).with_stock_mode(),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                3,
+                &[(Platform::Ebay, "E-1"), (Platform::XmrBazaar, "X-1")],
+            )
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness
+                .adapter(Platform::Ebay)
+                .detect_sales_calls
+                .load(Ordering::SeqCst),
+            0,
+            "a numeric platform must never be asked to detect sales"
+        );
+        assert_eq!(
+            harness
+                .adapter(Platform::XmrBazaar)
+                .detect_sales_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stock_mode_platforms_do_not_participate_in_quantity_resolution() {
+        // XMR Bazaar has no meaningful numeric quantity. Even when it reports
+        // one, canonical must come from the numeric platforms alone — here
+        // eBay's 4, not XMR's 99.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 4)]),
+                FakeAdapter::new(Platform::XmrBazaar)
+                    .with_stock_mode()
+                    .with_quantities(&[("X-1", 99)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                20,
+                &[(Platform::Ebay, "E-1"), (Platform::XmrBazaar, "X-1")],
+            )
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 4);
     }
 }
