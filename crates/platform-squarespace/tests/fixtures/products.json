@@ -1,0 +1,74 @@
+{
+  "_comment": "GET /1.0/commerce/products — shape only. Ids, names and prices are invented; no real store, key or order data appears here.",
+  "products": [
+    {
+      "id": "prod_single",
+      "name": "Wool Watch Cap",
+      "description": "<p>Ribbed wool cap.</p>",
+      "url": "https://example.test/store/wool-watch-cap",
+      "images": [
+        { "url": "https://images.example.test/cap-front.jpg" },
+        { "url": "https://images.example.test/cap-back.jpg" }
+      ],
+      "variants": [
+        {
+          "id": "var_cap_default",
+          "sku": "CAP-001",
+          "pricing": { "basePrice": { "value": "24.00", "currency": "USD" } },
+          "attributes": {}
+        }
+      ]
+    },
+    {
+      "id": "prod_multi",
+      "name": "Ripstop Field Pants",
+      "description": "<p>Six-pocket ripstop field pants.</p>",
+      "url": "https://example.test/store/ripstop-field-pants",
+      "images": [{ "url": "https://images.example.test/pants.jpg" }],
+      "variants": [
+        {
+          "id": "var_pants_s",
+          "sku": "PANTS-S",
+          "pricing": { "basePrice": { "value": "48.00", "currency": "USD" } },
+          "attributes": { "Size": "S" }
+        },
+        {
+          "id": "var_pants_m",
+          "sku": "PANTS-M",
+          "pricing": { "basePrice": { "value": "48.00", "currency": "USD" } },
+          "attributes": { "Size": "M" }
+        },
+        {
+          "id": "var_pants_l",
+          "sku": "PANTS-L",
+          "pricing": { "basePrice": { "value": "52.50", "currency": "USD" } },
+          "attributes": { "Size": "L" }
+        }
+      ]
+    },
+    {
+      "id": "prod_unlimited",
+      "name": "Gift Card",
+      "description": null,
+      "url": "https://example.test/store/gift-card",
+      "images": null,
+      "variants": [
+        {
+          "id": "var_gift_25",
+          "sku": "GIFT-25",
+          "pricing": { "basePrice": { "value": "25.00", "currency": "USD" } },
+          "attributes": {}
+        }
+      ]
+    },
+    {
+      "id": "prod_no_variants",
+      "name": "Service Booking",
+      "description": null,
+      "url": null,
+      "images": null,
+      "variants": null
+    }
+  ],
+  "pagination": { "nextPageCursor": null, "hasNextPage": false }
+}

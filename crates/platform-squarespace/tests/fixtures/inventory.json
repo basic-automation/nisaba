@@ -1,0 +1,42 @@
+{
+  "_comment": "GET /1.0/commerce/inventory — shape only. `var_pants_l` is deliberately absent: Squarespace does not always return a row for every variant, and the mapping has to decide what that means.",
+  "inventory": [
+    {
+      "variantId": "var_cap_default",
+      "sku": "CAP-001",
+      "isUnlimited": false,
+      "quantity": 12,
+      "productId": "prod_single",
+      "productName": "Wool Watch Cap",
+      "variantName": null
+    },
+    {
+      "variantId": "var_pants_s",
+      "sku": "PANTS-S",
+      "isUnlimited": false,
+      "quantity": 3,
+      "productId": "prod_multi",
+      "productName": "Ripstop Field Pants",
+      "variantName": "Small"
+    },
+    {
+      "variantId": "var_pants_m",
+      "sku": "PANTS-M",
+      "isUnlimited": false,
+      "quantity": 0,
+      "productId": "prod_multi",
+      "productName": "Ripstop Field Pants",
+      "variantName": "Medium"
+    },
+    {
+      "variantId": "var_gift_25",
+      "sku": "GIFT-25",
+      "isUnlimited": true,
+      "quantity": 0,
+      "productId": "prod_unlimited",
+      "productName": "Gift Card",
+      "variantName": null
+    }
+  ],
+  "pagination": { "nextPageCursor": null, "hasNextPage": false }
+}
