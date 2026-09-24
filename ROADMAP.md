@@ -37,11 +37,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       in `start_onion_service` with `handle.onion_address()` + `handle.ready()`.
 - [ ] Clear the clippy backlog behind CI's `-D warnings` gate; still unproven because the
       build fails before clippy runs
-- [ ] `crates/core`'s `turso 0.5` pulls in `aegis 0.9.7`, whose vendored C (`libaegis`)
-      fails to compile on the dev workstation with AVX-512 intrinsics under `-mtune=native`
-      (`_mm512_xor_si512 requires target feature 'avx512f'`). **Still unconfirmed on CI** —
-      the runners never reach `aegis`, because the onyums stable-channel failure above
-      aborts the build first. Recheck once that is fixed.
+- [ ] `aegis 0.9.7` (reached via `turso 0.5`) fails to compile **on the dev workstation
+      only** — its vendored `libaegis` C hits AVX-512 intrinsics under `-mtune=native`
+      (`_mm512_xor_si512 requires target feature 'avx512f'`), and its build script pins
+      clang, so `CC=gcc` does not help. Confirmed to build fine on the CI runners, so this
+      is a local toolchain problem, not a contributor-facing blocker. Worth fixing anyway
+      so the workspace builds on this machine.
 - [ ] Normalize line endings — the tree carries CRLF from its Windows origin, so a clean
       checkout on Linux shows 56 files modified with whole-file diffs. Add a
       `.gitattributes` (`* text=auto eol=lf`) and normalize in one commit while the tree is
