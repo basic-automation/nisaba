@@ -57,31 +57,22 @@ impl P2PManager {
         *company_secret_lock.write().await = Some(secret);
 
         tokio::spawn(async move {
-            // We need the onion address before building state.
-            // onyums::serve blocks forever, but onyums::get_onion_name() returns it
-            // once the service is up. We'll start the service and poll for the name.
-
-            // Build a temporary router first, then rebuild with proper state once we have the address.
-            // Actually, onyums::serve() sets up the service and we can get the name after.
-            // The approach: spawn serve(), then poll get_onion_name().
-
             let db_for_router = db.clone();
             let secret_for_router = secret_clone.clone();
             let our_onion_for_router = our_onion.clone();
             let event_tx_clone = event_tx.clone();
 
-            // We need to build the router with a placeholder, then the state will have
-            // the onion address once onyums makes it available.
-            // Use a lazy approach: store the onion in shared state and update it.
+            // The router's own copy of the onion address stays empty; the address is
+            // published through `our_onion` below, which the manager reads.
             let state = Arc::new(P2PState {
                 db: db_for_router,
                 company_secret: secret_for_router,
-                our_onion: String::new(), // will be available via onyums::get_onion_name()
+                our_onion: String::new(),
             });
 
             let router = build_router(state);
 
-            // Spawn the onion service
+            // `serve()` runs the service for the lifetime of the task.
             let serve_handle = tokio::spawn(async move {
                 if let Err(e) = onyums::serve(router, "nisaba").await {
                     // onyums::serve returns an error on clean shutdown too
@@ -89,7 +80,7 @@ impl P2PManager {
                 }
             });
 
-            // Poll for the onion address to become available
+            // The address only becomes available once the service is up, so poll for it.
             let mut attempts = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -99,7 +90,6 @@ impl P2PManager {
 
                     *our_onion_for_router.write().await = Some(name.clone());
 
-                    // Save to DB
                     if let Err(e) = db.update_company_onion(&name).await {
                         error!("Failed to save onion address to DB: {}", e);
                     }
@@ -119,7 +109,6 @@ impl P2PManager {
                 }
             }
 
-            // Wait for serve to finish (it runs forever)
             let _ = serve_handle.await;
         });
 
