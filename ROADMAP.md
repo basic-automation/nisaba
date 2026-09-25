@@ -255,10 +255,23 @@ The capability matrix is the queue. Current state per `capabilities()`:
       release workflow lands — Tauri documents the setting as removed in v3.
       https://v2.tauri.app/plugin/updater/
 - [ ] `.updater/latest.json` published from a real release workflow
-- [ ] A `release.yml` that builds Windows and Linux bundles on tag and attaches them to the
-      GitHub release
-- [ ] macOS build — the icon set includes `icon.icns` and iOS assets, but no macOS build has
-      ever been run
+- [x] A `release.yml` that builds **Linux, Windows and macOS** bundles and attaches them to
+      the tag's GitHub release — one matrix, `fail-fast: false`, Linux on `ubuntu-22.04` so
+      bundles link against an older glibc, macOS as a `universal-apple-darwin` binary
+      covering Apple Silicon and Intel. `workflow_dispatch` with `publish` off builds all
+      three without publishing, so the matrix can be checked without cutting a release.
+      Owner directive 2026-09-25: every release covers all three platforms, and a release
+      missing one is a failed release rather than a partial one.
+- [ ] Prove the release matrix green. **No macOS or Windows bundle has ever been built for
+      this project**, so each leg is unverified: macOS needs the universal target to link
+      and will be unsigned/unnotarized (Gatekeeper will warn), and Windows needs the WiX/NSIS
+      bundlers to run. Dispatch the workflow with `publish` off and fix what breaks.
+- [ ] `bundle` in `tauri.conf.json` declares no `targets`, so each platform gets the
+      bundler defaults. Decide explicitly what ships per platform (AppImage vs deb vs rpm,
+      msi vs NSIS) rather than inheriting whatever the default set is.
+- [ ] macOS code signing and notarization — without an Apple Developer identity the `.dmg`
+      is unsigned and Gatekeeper blocks it on first open for most users. Decide whether to
+      sign, or document the right-click-Open workaround in the README.
 - [ ] Decide whether `crates/service` (headless sync daemon) and `crates/tui` ship as real
       products; they are tracked in git but excluded from `[workspace] members`, so they are
       not built, not tested and not covered by CI. Either restore them to the workspace and

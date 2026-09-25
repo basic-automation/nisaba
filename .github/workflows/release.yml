@@ -1,0 +1,144 @@
+name: Release
+
+# Builds the desktop bundles for Linux, Windows and macOS.
+#
+# Pushing a `v*` tag builds all three and attaches the bundles to that tag's
+# GitHub release. A manual run builds all three and keeps the bundles as workflow
+# artifacts without touching any release, so the matrix can be verified without
+# publishing anything.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Attach bundles to the release for this ref (leave off for a build-only check)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux (x86_64)
+            os: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            build-args: ''
+            bundle-dir: target/release/bundle
+          # A universal binary covers both Apple Silicon and Intel from one runner.
+          - label: macOS (universal)
+            os: macos-latest
+            rust-target: aarch64-apple-darwin,x86_64-apple-darwin
+            build-args: '--target universal-apple-darwin'
+            bundle-dir: target/universal-apple-darwin/release/bundle
+          - label: Windows (x86_64)
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            build-args: ''
+            bundle-dir: target/release/bundle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-22.04 rather than latest: bundles link against the runner's glibc,
+      # so building on the oldest supported runner keeps them usable on more distros.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # tauri.conf.json's beforeBuildCommand runs `npm run generate`, but the
+      # dependencies have to be present before the Tauri CLI invokes it.
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # Run from the Tauri crate so the CLI finds tauri.conf.json, whose
+      # beforeBuildCommand path (../../frontend) is relative to it.
+      - name: Build bundles
+        working-directory: crates/tauri-app
+        run: cargo tauri build ${{ matrix.build-args }}
+
+      - name: List what was produced
+        shell: bash
+        run: |
+          echo "Bundles under ${{ matrix.bundle-dir }}:"
+          find "${{ matrix.bundle-dir }}" -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.app.tar.gz' \
+               -o -name '*.msi' -o -name '*.exe' -o -name '*.sig' \) \
+            -print || echo "none found"
+
+      - name: Upload bundles as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nisaba-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.bundle-dir }}/deb/*.deb
+            ${{ matrix.bundle-dir }}/rpm/*.rpm
+            ${{ matrix.bundle-dir }}/appimage/*.AppImage
+            ${{ matrix.bundle-dir }}/dmg/*.dmg
+            ${{ matrix.bundle-dir }}/macos/*.app.tar.gz
+            ${{ matrix.bundle-dir }}/msi/*.msi
+            ${{ matrix.bundle-dir }}/nsis/*.exe
+            ${{ matrix.bundle-dir }}/**/*.sig
+
+      # Only on a tag push, or a manual run that explicitly asked to publish.
+      - name: Attach bundles to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mapfile -t files < <(find "${{ matrix.bundle-dir }}" -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.app.tar.gz' \
+               -o -name '*.msi' -o -name '*.exe' -o -name '*.sig' \))
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No bundles found to upload" >&2
+            exit 1
+          fi
+          printf 'uploading: %s\n' "${files[@]}"
+          gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
