@@ -266,9 +266,12 @@ The capability matrix is the queue. Current state per `capabilities()`:
       this project**, so each leg is unverified: macOS needs the universal target to link
       and will be unsigned/unnotarized (Gatekeeper will warn), and Windows needs the WiX/NSIS
       bundlers to run. Dispatch the workflow with `publish` off and fix what breaks.
-- [ ] `bundle` in `tauri.conf.json` declares no `targets`, so each platform gets the
-      bundler defaults. Decide explicitly what ships per platform (AppImage vs deb vs rpm,
-      msi vs NSIS) rather than inheriting whatever the default set is.
+- [x] `bundle` in `tauri.conf.json` had **no `active` flag, which defaults to `false`** —
+      `tauri-utils`' `BundleConfig::active` is `#[serde(default)]` on a `bool`, so
+      `cargo tauri build` produced only the executable and never a single bundle, on any
+      platform. Found by the first release-matrix run: the build step passed and the upload
+      found nothing. Now `"active": true` with an explicit target list
+      (`deb`, `rpm`, `appimage`, `app`, `dmg`, `msi`, `nsis`) instead of bundler defaults.
 - [ ] macOS code signing and notarization — without an Apple Developer identity the `.dmg`
       is unsigned and Gatekeeper blocks it on first open for most users. Decide whether to
       sign, or document the right-click-Open workaround in the README.
