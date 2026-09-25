@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+  A listing edit form in the shape XMR Bazaar serves it.
+
+  Hand-built from the documented field list for /new-listing/selling/sell-product/
+  rather than captured from a live account: it carries no real listing, no real
+  Monero address and no real session. What it does reproduce faithfully is the
+  structure `parse_edit_form` has to survive — a CSRF token under an unusual
+  field name, <select> elements whose value lives on <option selected>, radio
+  groups, checkboxes that are deliberately left unchecked, a file input that
+  cannot be form-urlencoded, and a disabled field.
+-->
+<html lang="en">
+  <head><title>Edit listing</title></head>
+  <body>
+    <nav><form action="/search/" method="get"><input type="text" name="q" value=""></form></nav>
+
+    <form action="/listing/1234/edit/" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="validation" value="tok_abcdef0123456789">
+
+      <label>Title</label>
+      <input type="text" name="title" value="Ripstop Field Pants">
+
+      <label>Category</label>
+      <select name="category">
+        <option value="">Choose a category</option>
+        <option value="art">Art</option>
+        <option value="clothes" selected>Clothes</option>
+        <option value="tools">Tools</option>
+      </select>
+
+      <label>Price</label>
+      <input type="text" name="price" value="48.00">
+
+      <select name="currency">
+        <option value="XMR">XMR</option>
+        <option value="USD" selected>USD ($)</option>
+      </select>
+
+      <label>Description</label>
+      <textarea name="description">Six-pocket ripstop field pants.
+Plain text only — the site renders neither HTML nor markdown.</textarea>
+
+      <label>Tags</label>
+      <input type="text" name="tags" value="pants,ripstop,field">
+
+      <label>Main photo</label>
+      <input type="file" name="photo">
+      <input type="file" name="additional_photo_1">
+
+      <label>Status</label>
+      <select name="status">
+        <option value="active" selected>Active</option>
+        <option value="draft">Draft</option>
+        <option value="out_of_stock">Out of Stock</option>
+      </select>
+
+      <fieldset>
+        <legend>Delivery</legend>
+        <input type="radio" name="delivery" value="physical" checked> Physical
+        <input type="radio" name="delivery" value="digital"> Digital
+      </fieldset>
+
+      <fieldset>
+        <legend>Stock</legend>
+        <input type="radio" name="stock" value="unlimited" checked> Unlimited stock
+        <input type="radio" name="stock" value="one-time"> One-time sale
+      </fieldset>
+
+      <fieldset>
+        <legend>Payment</legend>
+        <input type="radio" name="payment_method" value="direct" checked> Direct payment
+        <input type="radio" name="payment_method" value="escrow"> Escrow (beta)
+      </fieldset>
+
+      <label>Country</label>
+      <input type="text" name="country" value="United States">
+      <label>City</label>
+      <input type="text" name="city" value="">
+
+      <label><input type="checkbox" name="flexible_price" value="1"> Price is flexible</label>
+      <label><input type="checkbox" name="in_person_pickup" value="1"> In-person pickup</label>
+      <label><input type="checkbox" name="domestic_shipping" value="1" checked> Domestic shipping</label>
+      <input type="text" name="domestic_shipping_cost" value="40">
+      <label><input type="checkbox" name="international_shipping" value="1"> International shipping</label>
+      <input type="text" name="international_shipping_cost" value="150">
+      <label><input type="checkbox" name="private_listing" value="1"> Private listing</label>
+      <label><input type="checkbox" name="terms" value="1" checked> I accept the terms</label>
+
+      <label>Monero address</label>
+      <input type="text" name="monero_address" value="4PlaceholderAddressNotARealWallet00000000000000000000000000000000000000000000000000000000000000">
+
+      <label>Seller handle</label>
+      <input type="text" name="seller_handle" value="example-seller" disabled>
+
+      <input type="submit" name="save_draft" value="Save draft">
+      <button type="submit" name="publish" value="publish">Publish</button>
+    </form>
+  </body>
+</html>

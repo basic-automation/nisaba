@@ -1,0 +1,46 @@
+{
+  "_comment": "GET /sell/inventory/v1/inventory_item — shape only. SKUs, titles and image hosts are invented; no real seller, token or listing appears here.",
+  "inventoryItems": [
+    {
+      "sku": "PANTS-RIPSTOP-M",
+      "condition": "NEW",
+      "product": {
+        "title": "Ripstop Field Pants — Medium",
+        "description": "<p>Six-pocket ripstop field pants.</p>",
+        "imageUrls": [
+          "https://images.example.test/pants-front.jpg",
+          "https://images.example.test/pants-back.jpg"
+        ],
+        "aspects": {
+          "Brand": ["Example Outfitters"],
+          "Size": ["M"],
+          "Material": ["Cotton", "Polyester"]
+        }
+      },
+      "availability": {
+        "shipToLocationAvailability": { "quantity": 7 }
+      }
+    },
+    {
+      "sku": "CAP-WOOL",
+      "condition": "USED_EXCELLENT",
+      "product": {
+        "title": "Wool Watch Cap",
+        "description": null,
+        "imageUrls": null,
+        "aspects": null
+      },
+      "availability": {
+        "shipToLocationAvailability": { "quantity": 0 }
+      }
+    },
+    {
+      "sku": "BARE-SKU-ONLY",
+      "condition": null,
+      "product": null,
+      "availability": null
+    }
+  ],
+  "total": 3,
+  "next": null
+}

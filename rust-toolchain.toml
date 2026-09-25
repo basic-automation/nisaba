@@ -1,0 +1,6 @@
+# CI builds on stable (see .github/workflows/ci.yml) and nothing in this tree
+# uses `#![feature(...)]`. Pin stable here so a dev host defaulting to nightly
+# cannot drift away from what CI actually verifies.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

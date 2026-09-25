@@ -1,0 +1,18 @@
+# The tree originated on Windows and carried CRLF into git. Normalize once and
+# keep it that way: everything git considers text is stored and checked out LF,
+# on every platform, so a Windows contributor's PR is not a whole-file rewrite.
+* text=auto eol=lf
+
+# Binary assets — never touch these, and never try to diff them.
+*.png   binary
+*.ico   binary
+*.icns  binary
+*.svg   text eol=lf
+*.woff2 binary
+*.zip   binary
+
+# Generated lockfiles: collapse them by default in GitHub's diff view, but keep
+# them textual — `-diff` would make git itself treat them as binary, and a
+# lockfile change is sometimes exactly what a reviewer needs to read.
+Cargo.lock        linguist-generated
+package-lock.json linguist-generated

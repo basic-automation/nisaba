@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Trading API GetMyeBaySelling response. Shape only: item ids, titles and URLs
+  are invented, and there is no token or seller identity anywhere in it.
+  This is the XML shape `quick_xml::de::from_str` has to survive, including the
+  `@currencyID` attribute and the `$text` body of CurrentPrice.
+-->
+<GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ActiveList>
+    <PaginationResult>
+      <TotalNumberOfEntries>3</TotalNumberOfEntries>
+      <TotalNumberOfPages>1</TotalNumberOfPages>
+    </PaginationResult>
+    <ItemArray>
+      <Item>
+        <ItemID>110512345678</ItemID>
+        <Title>Ripstop Field Pants — Medium</Title>
+        <Description>&lt;p&gt;Six-pocket ripstop field pants.&lt;/p&gt;</Description>
+        <Quantity>10</Quantity>
+        <QuantitySold>3</QuantitySold>
+        <SKU>PANTS-RIPSTOP-M</SKU>
+        <ListingType>FixedPriceItem</ListingType>
+        <ViewItemURL>https://www.ebay.com/itm/110512345678</ViewItemURL>
+        <SellingStatus>
+          <CurrentPrice currencyID="USD">48.00</CurrentPrice>
+        </SellingStatus>
+        <PictureDetails>
+          <GalleryURL>https://images.example.test/pants-gallery.jpg</GalleryURL>
+          <PictureURL>https://images.example.test/pants-front.jpg</PictureURL>
+          <PictureURL>https://images.example.test/pants-back.jpg</PictureURL>
+        </PictureDetails>
+      </Item>
+      <Item>
+        <ItemID>110598765432</ItemID>
+        <Title>Wool Watch Cap</Title>
+        <Quantity>4</Quantity>
+        <QuantitySold>0</QuantitySold>
+        <SKU>CAP-WOOL</SKU>
+        <ListingType>FixedPriceItem</ListingType>
+        <ViewItemURL>https://www.ebay.com/itm/110598765432</ViewItemURL>
+        <SellingStatus>
+          <CurrentPrice currencyID="USD">24.00</CurrentPrice>
+        </SellingStatus>
+        <PictureDetails>
+          <PictureURL>https://images.example.test/cap.jpg</PictureURL>
+        </PictureDetails>
+      </Item>
+      <Item>
+        <ItemID>110511111111</ItemID>
+        <Quantity>2</Quantity>
+        <QuantitySold>5</QuantitySold>
+      </Item>
+    </ItemArray>
+  </ActiveList>
+</GetMyeBaySellingResponse>
