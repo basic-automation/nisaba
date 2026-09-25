@@ -35,8 +35,10 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       artiqwest adopts `arti-client 0.46`. Worth taking then: 0.5's builder returns an
       `OnionServiceHandle` with the address already known, replacing the 120s polling loop
       in `start_onion_service` with `handle.onion_address()` + `handle.ready()`.
-- [ ] Clear the clippy backlog behind CI's `-D warnings` gate; still unproven because the
-      build fails before clippy runs
+- [x] CI green end to end on Linux and Windows — fmt, build, `cargo test --workspace`
+      (20 passed, 0 failed; all in `crates/core`) and `clippy -D warnings`, which turned
+      out to have no backlog at all. The Rust jobs generate the frontend first because
+      `tauri::generate_context!` embeds it at compile time.
 - [ ] `aegis 0.9.7` (reached via `turso 0.5`) fails to compile **on the dev workstation
       only** — its vendored `libaegis` C hits AVX-512 intrinsics under `-mtune=native`
       (`_mm512_xor_si512 requires target feature 'avx512f'`), and its build script pins
