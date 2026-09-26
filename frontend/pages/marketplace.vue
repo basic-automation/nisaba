@@ -236,9 +236,10 @@ function categoryColor(cat: string): string {
               </div>
               <p class="text-xs text-muted/40 line-clamp-2 mb-3">{{ plugin.description }}</p>
 
-              <div v-if="plugin.config_fields.length > 0" class="text-[11px] text-muted/20 mb-4">
+              <div v-if="plugin.config_fields.length > 0" class="text-[11px] text-muted/20 mb-2">
                 Requires: {{ plugin.config_fields.map((f: VendorConfigField) => f.label).join(', ') }}
               </div>
+              <PluginNetworkAccess :plugin="plugin" class="mb-4" />
 
               <div class="mt-auto flex items-center gap-3">
                 <Button variant="solid" color="accent" size="xs" @click="installPlugin(plugin.id)">
@@ -298,7 +299,8 @@ function categoryColor(cat: string): string {
                   <span class="text-[10px] text-muted/30 bg-surface/20 px-2 py-0.5 rounded">v{{ plugin.version }}</span>
                 </div>
               </div>
-              <p class="text-xs text-muted/40 line-clamp-2 mb-4">{{ plugin.description }}</p>
+              <p class="text-xs text-muted/40 line-clamp-2 mb-2">{{ plugin.description }}</p>
+              <PluginNetworkAccess :plugin="plugin" class="mb-4" />
 
               <div class="mt-auto flex items-center gap-3">
                 <Button

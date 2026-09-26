@@ -10,7 +10,7 @@ use crate::types::{
     SyncEvent, VendorListingCache, VendorPluginInstall, VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -219,7 +219,7 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008` (repairing
     ///   the columns migration 007 dropped when it rebuilt `platform_mappings`),
-    ///   `010`, `012` and `015`–`016` are all inline. `migrations/` holds only
+    ///   `010`, `012`, `015`–`016` and `018` are all inline. `migrations/` holds only
     ///   the steps whose whole body is SQL, so its filenames are not, and were
     ///   never meant to be, a complete list.
     /// * **A file's number is not its schema version.** The `NNN_` prefixes and
@@ -667,6 +667,18 @@ impl Db {
                 ))
                 .await?;
                 debug!("Applied migration 017: cached_platform_listings table");
+            }
+
+            if version < 18 {
+                // Cached fetch allowlist per registry plugin (see VendorPluginRow). NULL
+                // means "not computed yet", which is exactly right for every existing row.
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_registry ADD COLUMN allowed_hosts TEXT",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 018: vendor_plugin_registry.allowed_hosts");
             }
 
             // Set the new schema version
@@ -2790,7 +2802,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry ORDER BY display_name",
                 (),
             )
@@ -2812,7 +2825,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry WHERE id = ?1",
                 params![id],
             )
@@ -2834,7 +2848,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry WHERE display_name = ?1 LIMIT 1",
                 params![display_name],
             )
@@ -2853,13 +2868,13 @@ impl Db {
             "INSERT INTO vendor_plugin_registry
                 (id, plugin_file, display_name, description, code, files_json, version,
                  config_fields, config_json, status, submitted_by, approved_by,
-                 category, icon, include_vendor_stock, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 plugin_file = ?2, display_name = ?3, description = ?4, files_json = ?5,
                 version = ?6, config_fields = ?7, config_json = ?8, status = ?9,
                 submitted_by = ?10, approved_by = ?11, category = ?12, icon = ?13,
-                include_vendor_stock = ?14, updated_at = ?16",
+                include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17",
             params![
                 plugin.id.clone(),
                 plugin.plugin_file.clone(),
@@ -2877,7 +2892,24 @@ impl Db {
                 plugin.include_vendor_stock as i64,
                 plugin.created_at.clone(),
                 plugin.updated_at.clone(),
+                plugin.allowed_hosts_json.clone(),
             ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Cache a registry plugin's fetch allowlist, as computed from its files (see
+    /// [`VendorPluginRow::allowed_hosts_json`]).
+    pub async fn set_registry_plugin_allowed_hosts(
+        &self,
+        id: &str,
+        allowed_hosts_json: Option<&str>,
+    ) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE vendor_plugin_registry SET allowed_hosts = ?1 WHERE id = ?2",
+            params![allowed_hosts_json.map(str::to_string), id],
         )
         .await?;
         Ok(())
@@ -3535,6 +3567,7 @@ fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncErro
         include_vendor_stock: row.get::<Option<i64>>(13)?.unwrap_or(0) != 0,
         created_at: row.get::<String>(14)?,
         updated_at: row.get::<String>(15)?,
+        allowed_hosts_json: row.get::<Option<String>>(16)?,
     })
 }
 
@@ -3695,6 +3728,90 @@ mod tests {
                 "platform_mappings is missing `{expected}`; got {columns:?}"
             );
         }
+    }
+
+    fn registry_row(id: &str, allowed_hosts_json: Option<&str>) -> VendorPluginRow {
+        VendorPluginRow {
+            id: id.to_string(),
+            plugin_file: "plugin.zip".to_string(),
+            display_name: format!("Plugin {id}"),
+            description: String::new(),
+            files_json: r#"{"index.ts":""}"#.to_string(),
+            version: "1.0.0".to_string(),
+            config_fields: None,
+            config_json: None,
+            status: "approved".to_string(),
+            submitted_by: None,
+            approved_by: None,
+            category: "vendor".to_string(),
+            icon: None,
+            include_vendor_stock: false,
+            created_at: "2026-09-25 00:00:00".to_string(),
+            updated_at: "2026-09-25 00:00:00".to_string(),
+            allowed_hosts_json: allowed_hosts_json.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_plugins_keep_their_cached_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(column_names(&db, "vendor_plugin_registry")
+            .await
+            .iter()
+            .any(|c| c == "allowed_hosts"));
+
+        // The three states: a declared list, declared-none (JSON null), not computed.
+        db.upsert_registry_plugin(&registry_row("listed", Some(r#"["www.rothco.com"]"#)))
+            .await
+            .unwrap();
+        db.upsert_registry_plugin(&registry_row("open", Some("null")))
+            .await
+            .unwrap();
+        db.upsert_registry_plugin(&registry_row("unknown", None))
+            .await
+            .unwrap();
+
+        async fn cached(db: &Db, id: &str) -> Option<String> {
+            db.get_registry_plugin(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .allowed_hosts_json
+        }
+        assert_eq!(
+            cached(&db, "listed").await.as_deref(),
+            Some(r#"["www.rothco.com"]"#)
+        );
+        assert_eq!(cached(&db, "open").await.as_deref(), Some("null"));
+        assert_eq!(cached(&db, "unknown").await, None);
+
+        // An upsert carrying no allowlist (a row from a peer) clears the cached one, and
+        // the install path's recomputation sets it again.
+        db.upsert_registry_plugin(&registry_row("listed", None))
+            .await
+            .unwrap();
+        assert_eq!(cached(&db, "listed").await, None);
+        db.set_registry_plugin_allowed_hosts("listed", Some(r#"["a.example.com"]"#))
+            .await
+            .unwrap();
+        assert_eq!(
+            cached(&db, "listed").await.as_deref(),
+            Some(r#"["a.example.com"]"#)
+        );
+        let listed = db
+            .list_registry_plugins()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "listed")
+            .unwrap();
+        assert_eq!(
+            listed.allowed_hosts_json.as_deref(),
+            Some(r#"["a.example.com"]"#)
+        );
     }
 
     #[tokio::test]

@@ -344,6 +344,12 @@ pub struct VendorPluginRow {
     pub include_vendor_stock: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// The plugin's declared fetch allowlist as JSON, computed from its files when it was
+    /// imported or installed: `["host", …]`, or `null` when it declares none (so it has
+    /// unrestricted network access). `None` means not yet computed from the current files
+    /// — e.g. a row that arrived from a peer — and must not be shown as either.
+    #[serde(default)]
+    pub allowed_hosts_json: Option<String>,
 }
 
 /// A vendor plugin install (user-local, never syncs).

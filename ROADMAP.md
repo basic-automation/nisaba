@@ -70,7 +70,7 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 171 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 172 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 53 (`runtime` 22,
@@ -237,10 +237,14 @@ The capability matrix is the queue. Current state per `capabilities()`:
       top-level code gets no network at all (it runs at install time). A plugin that
       declares nothing stays unrestricted so existing installs keep working. The Rothco
       plugin now declares `www.rothco.com`. `tests/network.rs` (11).
-- [ ] Surface each plugin's network access at install time — the allowlist, or a clear
-      "unrestricted network access" warning when it declares none. The registry row does not
-      carry it yet, so this needs a column (new migration), `VendorPluginInfo`, and the
-      marketplace/config pages.
+- [x] Surface each plugin's network access at install time. The marketplace cards show
+      the declared hosts, "No network access", or an amber "Unrestricted" warning when a
+      plugin declares none (`PluginNetworkAccess.vue`). The value is a cache on the registry
+      row (migration 18, `vendor_plugin_registry.allowed_hosts`) computed from the plugin's
+      own files at import and recomputed at install — never taken from a P2P peer, whose
+      rows arrive as "checked when installed" — and a plugin whose metadata no longer loads
+      is refused at install. Verified by `npm run generate` and a DB round-trip test; not
+      yet exercised in the running app.
 - [ ] Once the UI surfaces it, decide when an undeclared allowlist stops meaning
       "unrestricted" — e.g. refuse new installs without one, keep existing ones working.
 - [ ] The `marketplace.vue` submit/approve/reject flow implies a plugin registry; decide

@@ -416,6 +416,9 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                 include_vendor_stock: remote_plugin.include_vendor_stock,
                 created_at: remote_plugin.updated_at.clone(), // use updated_at as fallback
                 updated_at: remote_plugin.updated_at.clone(),
+                // Never taken from a peer: the allowlist shown to the user must come from
+                // these files, so it is recomputed locally when the plugin is installed.
+                allowed_hosts_json: None,
             };
             if let Ok(()) = db.upsert_registry_plugin(&row).await {
                 summary.vendor_plugins_updated += 1;

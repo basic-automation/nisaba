@@ -30,6 +30,11 @@ pub struct VendorPluginInfo {
     pub category: String,
     pub icon: Option<String>,
     pub include_vendor_stock: bool,
+    /// `"restricted"` (only `allowed_hosts`), `"unrestricted"` (the plugin declares no
+    /// allowlist), or `"unknown"` (not yet computed from this plugin's files — it will be
+    /// at install).
+    pub network_access: String,
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -310,6 +315,16 @@ fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> Vend
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
+    let (network_access, allowed_hosts) = match p
+        .allowed_hosts_json
+        .as_deref()
+        .map(serde_json::from_str::<Option<Vec<String>>>)
+    {
+        Some(Ok(Some(hosts))) => ("restricted", hosts),
+        Some(Ok(None)) => ("unrestricted", Vec::new()),
+        _ => ("unknown", Vec::new()),
+    };
+
     VendorPluginInfo {
         id: p.id,
         plugin_file: p.plugin_file,
@@ -326,7 +341,14 @@ fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> Vend
         category: p.category,
         icon: p.icon,
         include_vendor_stock: p.include_vendor_stock,
+        network_access: network_access.to_string(),
+        allowed_hosts,
     }
+}
+
+/// The value cached in `VendorPluginRow::allowed_hosts_json` for this metadata.
+fn allowed_hosts_json(metadata: &nisaba_vendor_runtime::PluginMetadata) -> Option<String> {
+    serde_json::to_string(&metadata.allowed_hosts).ok()
 }
 
 /// Parse a files_json string into a HashMap.
@@ -404,6 +426,7 @@ pub async fn submit_vendor_plugin(
     };
 
     let metadata = read_metadata_in_thread(files.clone()).await?;
+    let allowed_hosts_json = allowed_hosts_json(&metadata);
 
     // Extract icon from files or use metadata icon
     let icon = extract_icon(&files).or_else(|| metadata.icon.clone());
@@ -454,6 +477,7 @@ pub async fn submit_vendor_plugin(
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
+            allowed_hosts_json: allowed_hosts_json.clone(),
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -474,6 +498,7 @@ pub async fn submit_vendor_plugin(
             include_vendor_stock: false,
             created_at: now.clone(),
             updated_at: now,
+            allowed_hosts_json,
         }
     };
 
@@ -515,6 +540,7 @@ pub async fn import_vendor_plugin(
     };
 
     let metadata = read_metadata_in_thread(files.clone()).await?;
+    let allowed_hosts_json = allowed_hosts_json(&metadata);
 
     // Extract icon from files or use metadata icon
     let icon = extract_icon(&files).or_else(|| metadata.icon.clone());
@@ -569,6 +595,7 @@ pub async fn import_vendor_plugin(
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
+            allowed_hosts_json: allowed_hosts_json.clone(),
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -589,6 +616,7 @@ pub async fn import_vendor_plugin(
             include_vendor_stock: false,
             created_at: now.clone(),
             updated_at: now,
+            allowed_hosts_json,
         }
     };
 
@@ -759,6 +787,15 @@ pub async fn install_vendor_plugin(
     if plugin.status != "approved" {
         return Err("Can only install approved plugins".to_string());
     }
+
+    // Recompute the network allowlist from the files being installed rather than trusting
+    // the cached value, which may have arrived from a peer or predate these files. A
+    // plugin whose metadata no longer loads is not installed.
+    let files = parse_files_json(&plugin.files_json)?;
+    let metadata = read_metadata_in_thread(files).await?;
+    db.set_registry_plugin_allowed_hosts(&plugin_id, allowed_hosts_json(&metadata).as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
 
     db.install_plugin(&plugin_id)
         .await
