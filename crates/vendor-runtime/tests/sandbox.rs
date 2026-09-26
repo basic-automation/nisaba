@@ -19,7 +19,7 @@ fn outside_dir() -> PathBuf {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+    dir
 }
 
 /// Write a module that holds a secret somewhere a plugin should not be able to import.
@@ -30,8 +30,10 @@ fn plant_secret(dir: &std::path::Path, name: &str) -> (PathBuf, String) {
     (path, secret)
 }
 
+/// A `file://` URL for `path` that is valid on every platform — hand-building one from a
+/// Windows path would put backslashes, i.e. JS escape sequences, into the specifier.
 fn file_url(path: &std::path::Path) -> String {
-    format!("file://{}", path.display())
+    reqwest::Url::from_file_path(path).unwrap().to_string()
 }
 
 /// Run a plugin whose `fetchListings` returns a single listing with the given JS
