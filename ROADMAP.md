@@ -305,6 +305,13 @@ The capability matrix is the queue. Current state per `capabilities()`:
 
 - [x] Tor onion service, peer client/server, encrypted company sync payloads
 - [x] Multi-company data model and company logos
+- [ ] **`[company].enabled` is never read.** `CompanyConfig::enabled` is parsed, but
+      `init_company_context` starts the Tor onion service and periodic P2P sync for every
+      company unconditionally, so `enabled = false` (the default in
+      `config.example.toml`) does not keep an install off Tor. Honouring it would stop P2P
+      for anyone who relies on today's behaviour without setting the flag, so decide
+      first: gate on it (and set it where it matters), or drop the setting. The README no
+      longer claims it works.
 - [ ] Peer trust model — document how a peer is authorized today and what an attacker who
       learns the company secret can do
 - [ ] Key rotation for the company secret, with a migration path for existing peers
@@ -380,6 +387,17 @@ The capability matrix is the queue. Current state per `capabilities()`:
       in-app guide it was made for or remove it
 - [ ] The window is `"decorations": false`; confirm the custom chrome behaves on Linux/Wayland
       and macOS, not just Windows
+- [x] A WebDriver harness that drives the real app: `scripts/ui-smoke.py` plus the
+      `ui_fixture` example that seeds a throwaway install. It runs the app from the
+      fixture directory (the app reads `./config.toml` first) inside `unshare -rn`, so it
+      has no network at all and cannot touch live data, and drives it through
+      tauri-driver + WebKitWebDriver. First green run 2026-09-26 on Hyprland: 4 checks on
+      the marketplace's network-access badges. WebKitGTK needs
+      `WEBKIT_DISABLE_DMABUF_RENDERER=1` there ("Error 71 (Protocol error) dispatching to
+      Wayland display" otherwise).
+- [ ] Grow the UI smoke test beyond the marketplace — the product, listings and vendor
+      pages, and the empty states above — and decide whether it can run in CI (it needs a
+      display; `xvfb-run` on the Linux runner is the obvious route).
 
 ## Cross-cutting
 

@@ -106,6 +106,22 @@ cargo tauri build
 
 This runs `npm run generate` in `frontend/` and bundles the static output into the app.
 
+### UI smoke test (Linux)
+
+[`scripts/ui-smoke.py`](scripts/ui-smoke.py) drives the real desktop app over WebDriver
+and checks what the plugin marketplace renders:
+
+```bash
+cargo install tauri-driver
+cargo build -p nisaba-tauri --bin nisaba-tauri --example ui_fixture
+scripts/ui-smoke.py --target-dir "$(cargo metadata --format-version 1 | jq -r .target_directory)"
+```
+
+It seeds a throwaway install in a temp directory (every platform disabled) and runs the
+app from there inside a network namespace with only loopback up, so it never sees your
+real config or data and cannot reach any network. It needs `WebKitWebDriver` (from
+webkitgtk), a desktop session, and unprivileged user namespaces.
+
 ## Configuration
 
 Config lives outside the repo, at the platform data directory:
@@ -183,8 +199,9 @@ What the sandbox enforces:
 
 ## P2P company sync
 
-When `[company].enabled` is set, an install publishes a Tor onion service and syncs
-catalog state with peers on an interval. Payloads are encrypted with a shared company
+Each company an install belongs to publishes a Tor onion service and syncs catalog state
+with its peers on an interval. (`[company].enabled` in `config.toml` is currently not
+read — the onion service starts for every company regardless; see the roadmap.) Payloads are encrypted with a shared company
 secret (AES-GCM + HKDF); the secret and platform tokens are stored in the OS keyring
 rather than in config. See [`crates/p2p`](crates/p2p/src).
 
