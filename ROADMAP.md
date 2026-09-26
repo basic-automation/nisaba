@@ -70,11 +70,11 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 160 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 171 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 42 (`runtime` 22,
-`sandbox` 9, `limits` 11). Every adapter's live network path and the P2P layer are still
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 53 (`runtime` 22,
+`sandbox` 9, `limits` 11, `network` 11). Every adapter's live network path and the P2P layer are still
 untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
@@ -229,7 +229,20 @@ The capability matrix is the queue. Current state per `capabilities()`:
       front when `Content-Length` declares it and while counting when it does not.
 - [ ] Surface a plugin's limits in the UI, and let the user raise the time limit per plugin
       for a catalog that genuinely takes longer than 30 minutes
-- [ ] Per-plugin allowlist of fetchable hosts, surfaced at install time
+- [x] Per-plugin allowlist of fetchable hosts — enforcement. A plugin declares
+      `allowed_hosts` in its metadata (exact names, or `*.example.com` for subdomains) and
+      `Nisaba.fetch` reaches those hosts only, with every redirect hop held to the same
+      list and at most 10 hops. The list is read in an isolate of its own and applied from
+      Rust before the run's plugin code starts, so top-level code cannot widen it; module
+      top-level code gets no network at all (it runs at install time). A plugin that
+      declares nothing stays unrestricted so existing installs keep working. The Rothco
+      plugin now declares `www.rothco.com`. `tests/network.rs` (11).
+- [ ] Surface each plugin's network access at install time — the allowlist, or a clear
+      "unrestricted network access" warning when it declares none. The registry row does not
+      carry it yet, so this needs a column (new migration), `VendorPluginInfo`, and the
+      marketplace/config pages.
+- [ ] Once the UI surfaces it, decide when an undeclared allowlist stops meaning
+      "unrestricted" — e.g. refuse new installs without one, keep existing ones working.
 - [ ] The `marketplace.vue` submit/approve/reject flow implies a plugin registry; decide
       whether that registry is a real hosted service, a P2P-shared list, or local-only, and
       document the answer

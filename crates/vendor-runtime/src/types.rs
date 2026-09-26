@@ -32,6 +32,11 @@ pub struct PluginMetadata {
     pub category: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// Hosts `Nisaba.fetch` may reach — exact names, or `*.example.com` for subdomains.
+    /// `None` (not declared) means unrestricted network access, which the UI flags;
+    /// `Some(vec![])` means no network at all.
+    #[serde(default)]
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 fn default_category() -> String {

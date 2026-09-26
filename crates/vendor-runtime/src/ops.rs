@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use deno_core::{op2, OpState};
 
@@ -9,6 +10,63 @@ use deno_core::{op2, OpState};
 #[derive(Clone, Copy)]
 pub struct MaxResponseBytes(pub usize);
 
+/// Which hosts `op_nisaba_fetch` may reach during this run. Without a policy in the
+/// `OpState` every fetch is refused.
+#[derive(Debug, Clone)]
+pub enum FetchPolicy {
+    /// No network at all — a metadata read has no business making requests.
+    Deny,
+    /// The plugin declared no `allowed_hosts`, so any host is reachable. Kept for plugins
+    /// written before the allowlist existed; the UI flags them.
+    Unrestricted,
+    /// Only these hosts. An entry is an exact host name (`api.example.com`), or
+    /// `*.example.com` for any subdomain of `example.com` (not the apex itself).
+    AllowList(Arc<Vec<String>>),
+}
+
+impl FetchPolicy {
+    /// Whether a request to `url` — including any redirect hop — is permitted.
+    pub fn allows(&self, url: &reqwest::Url) -> bool {
+        if !matches!(url.scheme(), "http" | "https") {
+            return false;
+        }
+        match self {
+            FetchPolicy::Deny => false,
+            FetchPolicy::Unrestricted => true,
+            FetchPolicy::AllowList(hosts) => {
+                let Some(host) = url.host_str() else {
+                    return false;
+                };
+                let host = host.trim_end_matches('.').to_ascii_lowercase();
+                hosts.iter().any(|entry| {
+                    let entry = entry.trim_end_matches('.').to_ascii_lowercase();
+                    match entry.strip_prefix("*.") {
+                        Some(apex) => host
+                            .strip_suffix(apex)
+                            .is_some_and(|sub| sub.len() > 1 && sub.ends_with('.')),
+                        None => host == entry,
+                    }
+                })
+            }
+        }
+    }
+
+    fn refusal(&self, url: &reqwest::Url) -> String {
+        match self {
+            FetchPolicy::Deny => {
+                "Nisaba.fetch is not available while reading plugin metadata".into()
+            }
+            _ => format!(
+                "Nisaba.fetch to {} is not allowed: it is not in the plugin's allowed_hosts",
+                url.host_str().unwrap_or(url.as_str())
+            ),
+        }
+    }
+}
+
+/// Redirects are followed at most this many hops, each checked against the policy.
+const MAX_REDIRECTS: usize = 10;
+
 /// HTTP fetch via reqwest — the only network access plugins get.
 #[op2]
 #[string]
@@ -17,10 +75,24 @@ pub async fn op_nisaba_fetch(
     #[string] url: String,
     #[string] options_json: String,
 ) -> Result<String, deno_error::JsErrorBox> {
-    let max_body = state
-        .borrow()
-        .try_borrow::<MaxResponseBytes>()
-        .map_or(usize::MAX, |m| m.0);
+    let (max_body, policy) = {
+        let state = state.borrow();
+        (
+            state
+                .try_borrow::<MaxResponseBytes>()
+                .map_or(usize::MAX, |m| m.0),
+            state
+                .try_borrow::<FetchPolicy>()
+                .cloned()
+                .unwrap_or(FetchPolicy::Deny),
+        )
+    };
+
+    let parsed = reqwest::Url::parse(&url)
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: invalid URL: {e}")))?;
+    if !policy.allows(&parsed) {
+        return Err(deno_error::JsErrorBox::generic(policy.refusal(&parsed)));
+    }
 
     #[derive(serde::Deserialize)]
     struct FetchOptions {
@@ -41,11 +113,26 @@ pub async fn op_nisaba_fetch(
         body: None,
     });
 
-    let client = reqwest::Client::new();
+    // Every redirect hop is held to the same policy, so an allowed host cannot bounce
+    // the request somewhere the plugin could not reach directly.
+    let redirect_policy = policy.clone();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if redirect_policy.allows(attempt.url()) {
+                attempt.follow()
+            } else {
+                let refusal = redirect_policy.refusal(attempt.url());
+                attempt.error(format!("redirect refused: {refusal}"))
+            }
+        }))
+        .build()
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: {e}")))?;
     let method =
         reqwest::Method::from_bytes(opts.method.as_bytes()).unwrap_or(reqwest::Method::GET);
 
-    let mut req = client.request(method, &url);
+    let mut req = client.request(method, parsed);
 
     for (k, v) in &opts.headers {
         req = req.header(k.as_str(), v.as_str());
@@ -55,10 +142,17 @@ pub async fn op_nisaba_fetch(
         req = req.body(body);
     }
 
-    let mut resp = req
-        .send()
-        .await
-        .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: {e}")))?;
+    let mut resp = req.send().await.map_err(|e| {
+        // reqwest's Display omits the cause ("error following redirect"), and the cause
+        // is what a plugin author needs — e.g. which redirect the allowlist refused.
+        let mut msg = format!("Fetch error: {e}");
+        let mut source = std::error::Error::source(&e);
+        while let Some(cause) = source {
+            msg.push_str(&format!(": {cause}"));
+            source = cause.source();
+        }
+        deno_error::JsErrorBox::generic(msg)
+    })?;
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
     let headers: std::collections::HashMap<String, String> = resp_headers

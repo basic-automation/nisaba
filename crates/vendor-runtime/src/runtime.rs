@@ -13,7 +13,7 @@ use deno_core::{
 use deno_error::JsErrorBox;
 use tracing::debug;
 
-use crate::ops::{BatchCallback, MaxResponseBytes, OutputBudget, PluginResult};
+use crate::ops::{BatchCallback, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult};
 use crate::types::{PluginMetadata, VendorListing};
 
 /// Custom module loader that transpiles TypeScript on the fly.
@@ -298,6 +298,7 @@ impl VendorRuntime {
             &wrapper_code,
             None,
             &PluginLimits::metadata(),
+            FetchPolicy::Deny,
         )
         .await?;
 
@@ -320,6 +321,16 @@ impl VendorRuntime {
         batch_callback: Option<BatchCallback>,
         limits: &PluginLimits,
     ) -> Result<Vec<VendorListing>> {
+        // The fetch allowlist comes from the plugin's metadata, read in an isolate of its
+        // own and applied from Rust before any of this run's plugin code executes — so
+        // module top-level code cannot get in first and widen it.
+        let meta_wrapper = root.join(format!("_wrapper_{}.js", nonce()));
+        let metadata = Self::read_metadata_in(root, index_path, &meta_wrapper).await?;
+        let fetch_policy = match metadata.allowed_hosts {
+            None => FetchPolicy::Unrestricted,
+            Some(hosts) => FetchPolicy::AllowList(Arc::new(hosts)),
+        };
+
         let plugin_url = ModuleSpecifier::from_file_path(index_path)
             .map_err(|_| anyhow!("Invalid plugin path"))?;
 
@@ -336,8 +347,15 @@ impl VendorRuntime {
         );
 
         let wrapper_path = root.join(format!("_run_{}.js", nonce()));
-        let runtime =
-            Self::run_wrapper(root, &wrapper_path, &wrapper_code, batch_callback, limits).await?;
+        let runtime = Self::run_wrapper(
+            root,
+            &wrapper_path,
+            &wrapper_code,
+            batch_callback,
+            limits,
+            fetch_policy,
+        )
+        .await?;
 
         let op_state = runtime.op_state();
         let state = op_state.borrow();
@@ -361,6 +379,7 @@ impl VendorRuntime {
         wrapper_code: &str,
         batch_callback: Option<BatchCallback>,
         limits: &PluginLimits,
+        fetch_policy: FetchPolicy,
     ) -> Result<JsRuntime> {
         tokio::fs::write(wrapper_path, wrapper_code).await?;
 
@@ -401,6 +420,7 @@ impl VendorRuntime {
                 remaining: limits.max_output_bytes,
             });
             op_state.put(MaxResponseBytes(limits.max_response_bytes));
+            op_state.put(fetch_policy);
             if let Some(cb) = batch_callback {
                 op_state.put(cb);
             }

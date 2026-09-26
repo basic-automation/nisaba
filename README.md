@@ -141,6 +141,7 @@ export const metadata = {
   config_fields: [
     { key: 'api_token', label: 'API Token (Bearer)', required: true, secret: true },
   ],
+  allowed_hosts: ['www.rothco.com'],
 }
 
 export async function fetchListings(
@@ -159,8 +160,11 @@ What the sandbox enforces:
   outside its directory are refused, and a plugin's file names must be plain relative
   paths, so installing one cannot write outside the directory it is unpacked into.
 - **Host APIs** — only `Nisaba`. The `Deno` global is removed before plugin code runs.
-- **Network** — `Nisaba.fetch` is the only way out, and it can currently reach any host;
-  a per-plugin host allowlist is on the roadmap.
+- **Network** — `Nisaba.fetch` is the only way out. A plugin lists the hosts it needs in
+  its metadata as `allowed_hosts: ['api.example.com', '*.cdn.example.com']`, and fetches
+  (and redirects) anywhere else are refused; `[]` means no network at all. A plugin that
+  declares no list can still reach any host — declare one. Code at a module's top level
+  runs when the plugin is installed and has no network access.
 - **Resources** — each `fetchListings` run gets 30 minutes of wall-clock time, a 1 GiB
   heap, 256 MiB of listing output (every `emitBatch` plus the return value) and 64 MiB
   per `Nisaba.fetch` response body; a metadata read gets 10 seconds, 128 MiB, and 1 MiB
