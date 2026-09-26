@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use deno_core::{
-    JsRuntime, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse, ModuleSource,
+    v8, JsRuntime, ModuleLoadOptions, ModuleLoadReferrer, ModuleLoadResponse, ModuleSource,
     ModuleSourceCode, ModuleSpecifier, ModuleType, RuntimeOptions,
 };
 use deno_error::JsErrorBox;
 use tracing::debug;
 
-use crate::ops::{BatchCallback, PluginResult};
+use crate::ops::{BatchCallback, OutputBudget, PluginResult};
 use crate::types::{PluginMetadata, VendorListing};
 
 /// Custom module loader that transpiles TypeScript on the fly.
@@ -107,6 +110,47 @@ impl deno_core::ModuleLoader for TsModuleLoader {
     }
 }
 
+/// Resource limits for a single plugin run. A plugin is third-party code: without these
+/// a busy loop hangs its thread forever, and a runaway allocation hits V8's fatal
+/// out-of-memory handler, which aborts the whole app.
+#[derive(Debug, Clone)]
+pub struct PluginLimits {
+    /// Wall-clock budget for the whole run, busy or waiting.
+    pub timeout: Duration,
+    /// Ceiling on the plugin's V8 heap.
+    pub max_heap_bytes: usize,
+    /// Ceiling on the listing JSON handed to the host, summed over every `emitBatch` and
+    /// the final result.
+    pub max_output_bytes: usize,
+}
+
+impl Default for PluginLimits {
+    /// Limits for `fetchListings`: generous enough for a full supplier catalog pulled
+    /// page by page with rate-limit sleeps.
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30 * 60),
+            max_heap_bytes: 1024 * 1024 * 1024,
+            max_output_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+impl PluginLimits {
+    /// Limits for a metadata read, which should do nothing but evaluate the module.
+    pub fn metadata() -> Self {
+        Self {
+            timeout: Duration::from_secs(10),
+            max_heap_bytes: 128 * 1024 * 1024,
+            max_output_bytes: 1024 * 1024,
+        }
+    }
+}
+
+const STOPPED_NONE: u8 = 0;
+const STOPPED_TIMEOUT: u8 = 1;
+const STOPPED_HEAP: u8 = 2;
+
 /// The vendor plugin runtime — wraps a deno_core JsRuntime.
 ///
 /// Every entry point writes the plugin into a fresh directory of its own under the
@@ -198,14 +242,32 @@ impl VendorRuntime {
         result
     }
 
-    /// Execute a multi-file plugin's fetchListings with the given config.
+    /// Execute a multi-file plugin's fetchListings with the given config, under the
+    /// default [`PluginLimits`].
     pub async fn execute_plugin_from_files(
         files: &HashMap<String, String>,
         config: HashMap<String, String>,
         batch_callback: Option<BatchCallback>,
     ) -> Result<Vec<VendorListing>> {
+        Self::execute_plugin_from_files_with_limits(
+            files,
+            config,
+            batch_callback,
+            PluginLimits::default(),
+        )
+        .await
+    }
+
+    /// Execute a multi-file plugin's fetchListings with the given config and limits.
+    pub async fn execute_plugin_from_files_with_limits(
+        files: &HashMap<String, String>,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: PluginLimits,
+    ) -> Result<Vec<VendorListing>> {
         let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
-        let result = Self::execute_in(&plugin_dir, &index_path, config, batch_callback).await;
+        let result =
+            Self::execute_in(&plugin_dir, &index_path, config, batch_callback, &limits).await;
         let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
         result
     }
@@ -226,7 +288,14 @@ impl VendorRuntime {
             plugin_url
         );
 
-        let runtime = Self::run_wrapper(root, wrapper_path, &wrapper_code, None).await?;
+        let runtime = Self::run_wrapper(
+            root,
+            wrapper_path,
+            &wrapper_code,
+            None,
+            &PluginLimits::metadata(),
+        )
+        .await?;
 
         let op_state = runtime.op_state();
         let state = op_state.borrow();
@@ -245,6 +314,7 @@ impl VendorRuntime {
         index_path: &Path,
         config: HashMap<String, String>,
         batch_callback: Option<BatchCallback>,
+        limits: &PluginLimits,
     ) -> Result<Vec<VendorListing>> {
         let plugin_url = ModuleSpecifier::from_file_path(index_path)
             .map_err(|_| anyhow!("Invalid plugin path"))?;
@@ -262,7 +332,8 @@ impl VendorRuntime {
         );
 
         let wrapper_path = root.join(format!("_run_{}.js", nonce()));
-        let runtime = Self::run_wrapper(root, &wrapper_path, &wrapper_code, batch_callback).await?;
+        let runtime =
+            Self::run_wrapper(root, &wrapper_path, &wrapper_code, batch_callback, limits).await?;
 
         let op_state = runtime.op_state();
         let state = op_state.borrow();
@@ -279,26 +350,83 @@ impl VendorRuntime {
     }
 
     /// Write `wrapper_code` to `wrapper_path` inside `root`, then load and evaluate it to
-    /// completion in a runtime confined to `root`.
+    /// completion in a runtime confined to `root` and bounded by `limits`.
     async fn run_wrapper(
         root: &Path,
         wrapper_path: &Path,
         wrapper_code: &str,
         batch_callback: Option<BatchCallback>,
+        limits: &PluginLimits,
     ) -> Result<JsRuntime> {
         tokio::fs::write(wrapper_path, wrapper_code).await?;
 
         let wrapper_url = ModuleSpecifier::from_file_path(wrapper_path)
             .map_err(|_| anyhow!("Invalid wrapper path"))?;
 
-        let mut runtime = Self::create_runtime(root.to_path_buf());
+        let mut runtime = Self::create_runtime(root.to_path_buf(), limits);
+        let stopped = Arc::new(AtomicU8::new(STOPPED_NONE));
 
-        if let Some(cb) = batch_callback {
-            runtime.op_state().borrow_mut().put(cb);
+        // Near the heap ceiling, stop the plugin rather than letting V8 hit its fatal OOM
+        // handler. The returned limit is the headroom the isolate needs to unwind.
+        let isolate = runtime.v8_isolate().thread_safe_handle();
+        let heap_stop = stopped.clone();
+        runtime.add_near_heap_limit_callback(move |current, _initial| {
+            heap_stop.store(STOPPED_HEAP, Ordering::SeqCst);
+            isolate.terminate_execution();
+            current * 2
+        });
+
+        // A plugin spinning in JS never yields to tokio, so the timer below cannot fire;
+        // a watchdog thread terminates the isolate from outside instead. Dropping
+        // `_watchdog` disconnects the channel and lets the thread exit early.
+        let (_watchdog, disarmed) = mpsc::channel::<()>();
+        let isolate = runtime.v8_isolate().thread_safe_handle();
+        let timeout_stop = stopped.clone();
+        let timeout = limits.timeout;
+        std::thread::spawn(move || {
+            if disarmed.recv_timeout(timeout) == Err(mpsc::RecvTimeoutError::Timeout) {
+                timeout_stop.store(STOPPED_TIMEOUT, Ordering::SeqCst);
+                isolate.terminate_execution();
+            }
+        });
+
+        {
+            let op_state = runtime.op_state();
+            let mut op_state = op_state.borrow_mut();
+            op_state.put(OutputBudget {
+                remaining: limits.max_output_bytes,
+            });
+            if let Some(cb) = batch_callback {
+                op_state.put(cb);
+            }
         }
 
+        // The tokio timeout covers a plugin that is *waiting* (on a long sleep or a slow
+        // fetch), where no JS runs for the watchdog's termination to interrupt.
+        let outcome =
+            tokio::time::timeout(limits.timeout, Self::evaluate(&mut runtime, &wrapper_url)).await;
+
+        let limit_error = |stopped: u8| match stopped {
+            STOPPED_HEAP => Some(anyhow!(
+                "Plugin exceeded its memory limit ({} MiB)",
+                limits.max_heap_bytes / (1024 * 1024)
+            )),
+            STOPPED_TIMEOUT => Some(anyhow!(
+                "Plugin exceeded its time limit ({}s)",
+                limits.timeout.as_secs()
+            )),
+            _ => None,
+        };
+        match outcome {
+            Ok(Ok(())) => Ok(runtime),
+            Ok(Err(e)) => Err(limit_error(stopped.load(Ordering::SeqCst)).unwrap_or(e)),
+            Err(_elapsed) => Err(limit_error(STOPPED_TIMEOUT).expect("timeout has a message")),
+        }
+    }
+
+    async fn evaluate(runtime: &mut JsRuntime, wrapper_url: &ModuleSpecifier) -> Result<()> {
         let mod_id = runtime
-            .load_main_es_module(&wrapper_url)
+            .load_main_es_module(wrapper_url)
             .await
             .map_err(|e| anyhow!("Failed to load plugin module: {e}"))?;
         let receiver = runtime.mod_evaluate(mod_id);
@@ -309,14 +437,14 @@ impl VendorRuntime {
         receiver
             .await
             .map_err(|e| anyhow!("Module evaluation error: {e}"))?;
-
-        Ok(runtime)
+        Ok(())
     }
 
-    fn create_runtime(root: PathBuf) -> JsRuntime {
+    fn create_runtime(root: PathBuf, limits: &PluginLimits) -> JsRuntime {
         JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(TsModuleLoader { root })),
             extensions: vec![crate::nisaba_vendor_ext::init()],
+            create_params: Some(v8::CreateParams::default().heap_limits(0, limits.max_heap_bytes)),
             ..Default::default()
         })
     }

@@ -12,5 +12,5 @@ extension!(
 );
 
 pub use ops::BatchCallback;
-pub use runtime::VendorRuntime;
+pub use runtime::{PluginLimits, VendorRuntime};
 pub use types::{ConfigField, PluginInfo, PluginMetadata, VendorListing};

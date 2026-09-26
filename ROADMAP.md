@@ -70,11 +70,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 149 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 158 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 31 (`runtime` 22, `sandbox` 9). Every
-adapter's live network path and the P2P layer are still untested.
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 40 (`runtime` 22,
+`sandbox` 9, `limits` 9). Every adapter's live network path and the P2P layer are still
+untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -215,8 +216,18 @@ The capability matrix is the queue. Current state per `capabilities()`:
       convention. Right now `plugins/rothco-wholesale` is the only specification.
 - [ ] A `nisaba-plugin-template` starter plugin so a third party can begin without reading
       the Rothco source
-- [ ] Plugin resource limits — a plugin can currently loop forever or emit unbounded batches;
-      add a wall-clock timeout, a memory ceiling and a batch cap
+- [x] Plugin resource limits — `PluginLimits` bounds every run: a wall-clock timeout
+      (a watchdog thread terminates the isolate, since a spinning plugin never yields to
+      tokio's timer), a V8 heap ceiling with a near-limit callback, and an output budget
+      across `emitBatch` and the final result. Defaults are 30 min / 1 GiB / 256 MiB for
+      `fetchListings` and 10 s / 128 MiB / 1 MiB for a metadata read, which runs the
+      module's top-level code at install time. Before this a plugin allocating in a loop
+      hit V8's fatal out-of-memory handler and killed the whole app. `tests/limits.rs` (9).
+- [ ] `Nisaba.fetch` reads every response body fully into Rust memory with no cap — outside
+      the V8 heap, so the heap limit does not see it. Stream the body and refuse past a
+      per-response ceiling.
+- [ ] Surface a plugin's limits in the UI, and let the user raise the time limit per plugin
+      for a catalog that genuinely takes longer than 30 minutes
 - [ ] Per-plugin allowlist of fetchable hosts, surfaced at install time
 - [ ] The `marketplace.vue` submit/approve/reject flow implies a plugin registry; decide
       whether that registry is a real hosted service, a P2P-shared list, or local-only, and

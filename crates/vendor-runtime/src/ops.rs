@@ -90,8 +90,13 @@ pub fn op_nisaba_log(#[string] level: &str, #[string] msg: &str) {
 
 /// Store plugin result from JS into OpState for Rust retrieval.
 #[op2(fast)]
-pub fn op_nisaba_set_result(state: &mut OpState, #[string] json: String) {
+pub fn op_nisaba_set_result(
+    state: &mut OpState,
+    #[string] json: String,
+) -> Result<(), deno_error::JsErrorBox> {
+    OutputBudget::charge(state, json.len())?;
     state.put(PluginResult(json));
+    Ok(())
 }
 
 /// Wrapper to store a plugin result string in OpState.
@@ -100,10 +105,36 @@ pub struct PluginResult(pub String);
 /// Callback for streaming batch results to the host application.
 pub struct BatchCallback(pub Box<dyn Fn(String) + Send + Sync>);
 
+/// How many more bytes of listing JSON a plugin may hand the host, across every
+/// `emitBatch` and its final result. Without a budget in the `OpState` output is unbounded.
+pub struct OutputBudget {
+    pub remaining: usize,
+}
+
+impl OutputBudget {
+    fn charge(state: &mut OpState, bytes: usize) -> Result<(), deno_error::JsErrorBox> {
+        if let Some(budget) = state.try_borrow_mut::<OutputBudget>() {
+            if bytes > budget.remaining {
+                budget.remaining = 0;
+                return Err(deno_error::JsErrorBox::generic(
+                    "Plugin exceeded its output limit",
+                ));
+            }
+            budget.remaining -= bytes;
+        }
+        Ok(())
+    }
+}
+
 /// Emit a batch of listings to the host for progressive UI updates.
 #[op2(fast)]
-pub fn op_nisaba_emit_batch(state: &mut OpState, #[string] json: String) {
+pub fn op_nisaba_emit_batch(
+    state: &mut OpState,
+    #[string] json: String,
+) -> Result<(), deno_error::JsErrorBox> {
+    OutputBudget::charge(state, json.len())?;
     if let Some(cb) = state.try_borrow::<BatchCallback>() {
         (cb.0)(json);
     }
+    Ok(())
 }

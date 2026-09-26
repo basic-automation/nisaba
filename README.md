@@ -153,6 +153,19 @@ fields before it is ever executed. `secret: true` fields are stored encrypted. P
 may be single-file or multi-file; see [`plugins/rothco-wholesale`](plugins/rothco-wholesale)
 for a working example that pages a GraphQL catalog and emits batches of listings.
 
+What the sandbox enforces:
+
+- **Filesystem** — none. A plugin can import only its own files; imports that resolve
+  outside its directory are refused, and a plugin's file names must be plain relative
+  paths, so installing one cannot write outside the directory it is unpacked into.
+- **Host APIs** — only `Nisaba`. The `Deno` global is removed before plugin code runs.
+- **Network** — `Nisaba.fetch` is the only way out, and it can currently reach any host;
+  a per-plugin host allowlist is on the roadmap.
+- **Resources** — each `fetchListings` run gets 30 minutes of wall-clock time, a 1 GiB
+  heap and 256 MiB of listing output (every `emitBatch` plus the return value); a
+  metadata read gets 10 seconds, 128 MiB and 1 MiB. A plugin that exceeds one is stopped
+  with an error naming the limit; it cannot hang or crash the app.
+
 ## P2P company sync
 
 When `[company].enabled` is set, an install publishes a Tor onion service and syncs
@@ -172,9 +185,8 @@ P2P, and the release pipeline. Known gaps worth calling out up front:
 - No auto-update yet — the Tauri updater ships with an empty signing key.
 - Photo upload is unimplemented on every platform.
 - Test coverage is uneven. The sync engine, the database migrations, XMR Bazaar's HTML
-  scraping and all four adapters' mapping layers have tests against recorded response
-  shapes; every adapter's live network path, the P2P layer and the vendor plugin runtime
-  do not.
+  scraping, all four adapters' mapping layers and the vendor plugin runtime and sandbox
+  have tests; every adapter's live network path and the P2P layer do not.
 - `crates/service` (headless sync daemon) and `crates/tui` are tracked in git but excluded
   from the Cargo workspace, so they are not built or tested.
 
