@@ -451,7 +451,7 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                         created_at: local.created_at,
                         updated_at: remote_variant.updated_at.clone(),
                     };
-                    db.update_variant(&variant).await?;
+                    db.upsert_variant_from_peer(&variant).await?;
                     summary.variants_updated += 1;
                     affected_product_ids.insert(remote_variant.product_id.clone());
                 }
@@ -474,7 +474,7 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     created_at: remote_variant.updated_at.clone(),
                     updated_at: remote_variant.updated_at.clone(),
                 };
-                db.insert_variant(&variant).await?;
+                db.upsert_variant_from_peer(&variant).await?;
                 summary.variants_updated += 1;
                 affected_product_ids.insert(remote_variant.product_id.clone());
             }

@@ -70,12 +70,13 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 181 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
+Current state: 186 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
-`sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip importer).
-Every adapter's live network path and the P2P layer are still untested.
+`sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip
+importer), `crates/p2p` 5 (`round_trip`). Every adapter's live network path and the P2P
+layer's Tor transport are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -129,8 +130,12 @@ Every adapter's live network path and the P2P layer are still untested.
         the plugin's only API.
       The tests pin that API (`Nisaba`'s keys and the extension's op list), so widening the
       sandbox has to be a deliberate change to them.
-- [ ] `crates/p2p` round-trip test: `load_full_sync_payload` → encrypt → `merge_remote_payload`
-      over loopback, without Tor
+- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 5): `load_full_sync_payload` →
+      the real wire format (`SyncRequest` JSON) → `merge_remote_payload`, without Tor —
+      every payload section arrives, a repeated sync is a no-op, the newer edit wins both
+      ways, a deleted mapping propagates as a tombstone, and two peers syncing both ways
+      converge. (There is no "encrypt" step to include: payloads carry no application-layer
+      encryption, only Tor's.) The convergence test found a real bug, fixed — see Phase 5.
 - [x] Migration tests: apply every step to an empty DB and assert the resulting schema —
       all 22 expected tables present, the columns `008` restores after `007` rebuilds
       `platform_mappings`, and that a second `migrate()` is a no-op (it runs on every launch).
@@ -312,6 +317,28 @@ The capability matrix is the queue. Current state per `capabilities()`:
 
 - [x] Tor onion service, peer client/server, encrypted company sync payloads
 - [x] Multi-company data model and company logos
+- [x] **Peers never converged, and could overwrite each other's edits.** Merges are
+      last-writer-wins on `updated_at`, but the merge wrote variants with `insert_variant`/
+      `update_variant`, which stamp `now`, and then ran `recalc_product_quantity`, which
+      re-stamped every variant and the product even when nothing changed. So each receiving
+      peer's copy looked newer than the sender's, flowed back on the next sync, and the two
+      rewrote each other every cycle, forever — and a stale copy carrying a fresh stamp could
+      beat a genuine edit (an on-hand stock change) made on the other peer between payload
+      load and merge. Fixed by `Db::upsert_variant_from_peer`, which keeps the edit's
+      timestamp, and by `recalc_product_quantity` writing only rows whose quantity actually
+      changes. `two_peers_converge_after_syncing_both_ways` reproduced it (every round
+      rewrote the product and its variant) and now converges after the first sync.
+- [ ] Dropship stock does not survive P2P. A variant's effective quantity is on-hand plus
+      vendor stock when its source plugin has "include vendor stock" on, but neither the
+      variant's source-plugin link nor `product_vendor_data` is in the payload, so a
+      receiving peer computes on-hand only — the peers disagree about that variant's stock
+      and, having disagreed, re-stamp it on every merge. Sync the link (and the vendor
+      quantity or the cache it comes from), or stop deriving the effective quantity
+      per peer.
+- [ ] The sync payload carries platform auth tokens and plugin configuration protected only
+      by Tor's transport encryption. Decide whether that is enough, or whether sensitive
+      sections should be sealed with a key derived from the company secret as the at-rest
+      company config already is.
 - [ ] **`[company].enabled` is never read.** `CompanyConfig::enabled` is parsed, but
       `init_company_context` starts the Tor onion service and periodic P2P sync for every
       company unconditionally, so `enabled = false` (the default in

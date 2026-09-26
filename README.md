@@ -202,9 +202,14 @@ What the sandbox enforces:
 
 Each company an install belongs to publishes a Tor onion service and syncs catalog state
 with its peers on an interval. (`[company].enabled` in `config.toml` is currently not
-read — the onion service starts for every company regardless; see the roadmap.) Payloads are encrypted with a shared company
-secret (AES-GCM + HKDF); the secret and platform tokens are stored in the OS keyring
-rather than in config. See [`crates/p2p`](crates/p2p/src).
+read — the onion service starts for every company regardless; see the roadmap.)
+
+The sync payload is JSON sent over the onion connection, so it is protected by Tor's
+end-to-end encryption; peers authenticate with the shared company secret, which is kept
+in the OS keyring. There is no additional application-layer encryption of the payload,
+and it includes platform auth tokens and plugin configuration. The company's platform
+configuration is stored AES-GCM-encrypted (key derived from the secret with HKDF). Merges
+are last-writer-wins per row. See [`crates/p2p`](crates/p2p/src).
 
 ## Status
 

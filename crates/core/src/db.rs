@@ -899,6 +899,44 @@ impl Db {
         Ok(())
     }
 
+    /// Write a variant received from a P2P peer, keeping the peer's `updated_at`.
+    ///
+    /// Merges are last-writer-wins on `updated_at`, so the timestamp is the edit's, not
+    /// the merge's: stamping `now` here makes the receiver's copy look newer than the
+    /// sender's, it flows back on the next sync, and the two peers rewrite each other
+    /// forever — while a stale copy with a fresh stamp can beat a genuine edit made on
+    /// the other side. On insert the source-plugin link is taken from `variant`; on
+    /// update the local one is kept (it is not part of the P2P payload).
+    pub async fn upsert_variant_from_peer(
+        &self,
+        variant: &ProductVariant,
+    ) -> Result<(), SyncError> {
+        let attrs_json = serde_json::to_string(&variant.attributes)
+            .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+        self.execute_write(
+            "INSERT INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             ON CONFLICT(id) DO UPDATE SET sku = ?3, name = ?4, attributes_json = ?5, quantity = ?6,
+                on_hand_quantity = ?7, image_url = ?8, sort_order = ?9, updated_at = ?12",
+            params![
+                variant.id.clone(),
+                variant.product_id.clone(),
+                variant.sku.clone(),
+                variant.name.clone(),
+                attrs_json,
+                variant.quantity,
+                variant.on_hand_quantity,
+                variant.image_url.clone(),
+                variant.sort_order as i64,
+                variant.source_plugin_id.clone(),
+                variant.source_vendor_item_id.clone(),
+                variant.updated_at.clone(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_variant_quantity(
         &self,
         variant_id: &str,
@@ -944,7 +982,8 @@ impl Db {
             .query(
                 "SELECT pv.id, pv.on_hand_quantity, pv.source_plugin_id,
                         COALESCE(pvd.quantity, 0) AS vendor_qty,
-                        COALESCE(vpr.include_vendor_stock, 0) AS include_vendor
+                        COALESCE(vpr.include_vendor_stock, 0) AS include_vendor,
+                        pv.quantity
                  FROM product_variants pv
                  LEFT JOIN product_vendor_data pvd
                    ON pvd.variant_id = pv.id AND pvd.plugin_id = pv.source_plugin_id
@@ -955,6 +994,7 @@ impl Db {
             )
             .await?;
 
+        let mut total: i64 = 0;
         let mut updates: Vec<(String, i64)> = Vec::new();
         while let Some(row) = rows.next().await? {
             let variant_id: String = row.get(0)?;
@@ -962,17 +1002,34 @@ impl Db {
             let source_plugin: Option<String> = row.get::<Option<String>>(2)?;
             let vendor_qty: i64 = row.get(3)?;
             let include_vendor: i64 = row.get(4)?;
+            let current: i64 = row.get(5)?;
 
             let effective = if source_plugin.is_some() && include_vendor == 1 {
                 on_hand + vendor_qty
             } else {
                 on_hand
             };
-            updates.push((variant_id, effective));
+            total += effective;
+            // Only rows whose quantity actually changes are written: `updated_at` is the
+            // last-writer-wins clock for P2P merges, and re-stamping unchanged rows makes
+            // them look like fresh edits to every peer.
+            if effective != current {
+                updates.push((variant_id, effective));
+            }
         }
 
-        // Step 2: Update each variant's effective quantity + product total atomically
-        let total: i64 = updates.iter().map(|(_, q)| q).sum();
+        let mut rows = conn
+            .query(
+                "SELECT quantity FROM products WHERE id = ?1",
+                params![product_id],
+            )
+            .await?;
+        let product_current: Option<i64> = match rows.next().await? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        };
+
+        // Step 2: Update the changed variants + product total atomically
         let mut stmts: Vec<(&str, Params)> = Vec::new();
         for (variant_id, quantity) in &updates {
             stmts.push((
@@ -980,12 +1037,15 @@ impl Db {
                 to_params(params![*quantity, variant_id.as_str()]),
             ));
         }
-        stmts.push((
-            "UPDATE products SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
-            to_params(params![total, product_id]),
-        ));
-        self.execute_writes(&stmts).await?;
-
+        if product_current != Some(total) {
+            stmts.push((
+                "UPDATE products SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
+                to_params(params![total, product_id]),
+            ));
+        }
+        if !stmts.is_empty() {
+            self.execute_writes(&stmts).await?;
+        }
         Ok(total)
     }
 

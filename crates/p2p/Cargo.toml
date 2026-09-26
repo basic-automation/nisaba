@@ -19,3 +19,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 http = "1"
 turso = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
