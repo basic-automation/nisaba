@@ -1397,6 +1397,30 @@ impl Db {
         Ok(())
     }
 
+    /// Write a platform auth token received from a P2P peer, keeping the peer's
+    /// `updated_at` — see [`Db::upsert_variant_from_peer`] for why a merge must not stamp
+    /// `now`. For tokens the stale-copy-wins case is an auth failure: a token one peer just
+    /// refreshed can be overwritten by the other peer's re-stamped old one.
+    pub async fn upsert_auth_token_from_peer(
+        &self,
+        platform: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<&str>,
+        cookies: Option<&str>,
+        updated_at: &str,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at, cookies, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(platform) DO UPDATE
+             SET access_token = ?2, refresh_token = ?3, expires_at = ?4, cookies = ?5, updated_at = ?6",
+            params![platform, access_token, refresh_token, expires_at, cookies, updated_at],
+        )
+        .await?;
+        Ok(())
+    }
+
     // ── Inventory History ─────────────────────────────────────
 
     pub async fn record_inventory_history(

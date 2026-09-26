@@ -182,6 +182,10 @@ pub struct MergeSummary {
     pub vendor_plugins_updated: usize,
     #[serde(default)]
     pub variants_updated: usize,
+    /// Remote rows refused because their timestamp was unparseable or too far ahead of
+    /// our clock to be a real edit.
+    #[serde(default)]
+    pub rejected_timestamps: usize,
 }
 
 /// Health check response.

@@ -506,3 +506,126 @@ async fn a_peer_too_old_to_send_the_link_does_not_erase_it() {
     assert_eq!(v.source_plugin_id.as_deref(), Some("plug"));
     assert_eq!(v.source_vendor_item_id.as_deref(), Some("VI-1"));
 }
+
+#[tokio::test]
+async fn rows_with_implausible_timestamps_are_refused() {
+    // Last-writer-wins compares the sender's timestamps as strings: a far-future stamp —
+    // or anything sorting after a digit — would win every later merge, uncorrectably.
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+    for (id, stamp) in [
+        ("future", "9999-12-31 00:00:00".to_string()),
+        ("garbage", "Z".to_string()),
+        (
+            "skewed",
+            // A few minutes ahead is ordinary clock skew and must still be accepted.
+            (chrono::Utc::now() + chrono::Duration::minutes(3))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+        ),
+        ("normal", "2026-09-25 12:00:00".to_string()),
+    ] {
+        let mut p = product(id, id, 1);
+        p.has_variants = false;
+        a.insert_product(&p).await.unwrap();
+        exec(
+            &a,
+            "UPDATE products SET updated_at = ?1 WHERE id = ?2",
+            params![stamp, id],
+        )
+        .await;
+    }
+    exec(
+        &a,
+        "INSERT INTO auth_tokens (platform, access_token, updated_at) VALUES ('ebay', 'hijack', '9999-01-01T00:00:00Z')",
+        (),
+    )
+    .await;
+
+    let summary = merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rejected_timestamps, 3, "{summary:?}");
+    assert_eq!(summary.products_created, 2);
+    assert!(b.get_product("normal").await.unwrap().is_some());
+    assert!(b.get_product("skewed").await.unwrap().is_some());
+    assert!(b.get_product("future").await.unwrap().is_none());
+    assert!(b.get_product("garbage").await.unwrap().is_none());
+    assert!(b.get_auth_token("ebay").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn auth_tokens_keep_their_timestamp_so_peers_stop_trading_them() {
+    // A merge used to stamp a received token `now`, so it flowed straight back, and a
+    // stale copy with a fresh stamp could overwrite a token the other peer had just
+    // refreshed.
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+    seed_peer_a(&a).await;
+    exec(
+        &a,
+        "UPDATE auth_tokens SET updated_at = '2026-09-25 12:00:00'",
+        (),
+    )
+    .await;
+
+    merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    let on_b = b.get_auth_token("ebay").await.unwrap().unwrap();
+    assert_eq!(on_b.updated_at, "2026-09-25 12:00:00");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    merge_remote_payload(
+        &a,
+        &over_the_wire(load_full_sync_payload(&b).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    let on_a = a.get_auth_token("ebay").await.unwrap().unwrap();
+    assert_eq!(
+        on_a.updated_at, "2026-09-25 12:00:00",
+        "the token bounced back re-stamped"
+    );
+
+    // A refresh on A now reaches B and is not undone by B's older copy.
+    a.upsert_auth_token("ebay", "access-refreshed", Some("refresh-a"), None, None)
+        .await
+        .unwrap();
+    merge_remote_payload(
+        &a,
+        &over_the_wire(load_full_sync_payload(&b).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        a.get_auth_token("ebay")
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token,
+        "access-refreshed"
+    );
+    merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        b.get_auth_token("ebay")
+            .await
+            .unwrap()
+            .unwrap()
+            .access_token,
+        "access-refreshed"
+    );
+}

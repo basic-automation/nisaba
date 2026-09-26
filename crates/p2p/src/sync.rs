@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use tracing::{debug, info};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use tracing::{debug, info, warn};
 use turso::params;
 
 use nisaba_core::db::Db;
@@ -11,6 +12,49 @@ use crate::types::{
     CompanyConfigPayload, CompanyLogoPayload, MergeSummary, PlatformSyncMeta, SyncPayload,
     SyncableAuthToken, SyncableMapping, SyncableVariant, SyncableVendorPlugin,
 };
+
+/// How far ahead of our clock a peer's timestamp may be — clock skew — before we refuse
+/// the row it stamps.
+const MAX_CLOCK_SKEW_MINUTES: i64 = 10;
+
+/// Whether a peer-supplied timestamp can be trusted as a last-writer-wins clock.
+///
+/// Merges compare timestamps as strings, so a row stamped far in the future (or with
+/// anything that sorts after a digit, like `"Z"`) would win every later merge and could
+/// never be corrected. Accepts SQLite's `YYYY-MM-DD HH:MM:SS` and RFC 3339, up to
+/// [`MAX_CLOCK_SKEW_MINUTES`] ahead of now.
+fn plausible_timestamp(ts: &str, now: DateTime<Utc>) -> bool {
+    let parsed = DateTime::parse_from_rfc3339(ts)
+        .map(|t| t.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|t| t.and_utc())
+        });
+    parsed.is_some_and(|t| t <= now + chrono::Duration::minutes(MAX_CLOCK_SKEW_MINUTES))
+}
+
+/// Refuse a remote row whose timestamp cannot be trusted, counting and logging it.
+fn implausible(
+    summary: &mut MergeSummary,
+    now: DateTime<Utc>,
+    what: &str,
+    id: &str,
+    ts: &str,
+) -> bool {
+    if plausible_timestamp(ts, now) {
+        return false;
+    }
+    warn!(
+        what,
+        id,
+        timestamp = ts,
+        "Refusing remote row with an implausible timestamp"
+    );
+    summary.rejected_timestamps += 1;
+    true
+}
 
 type MappingKey = (String, String, String);
 type MappingMeta = (i64, Option<String>, String);
@@ -156,6 +200,7 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
 /// Returns a summary of what changed.
 pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<MergeSummary, P2PError> {
     let mut summary = MergeSummary::default();
+    let now = Utc::now();
 
     // ── Products: last-write-wins by updated_at ──────────────
     let local_products = db.list_products().await?;
@@ -163,6 +208,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         local_products.iter().map(|p| (p.id.clone(), p)).collect();
 
     for remote_product in &remote.products {
+        if implausible(
+            &mut summary,
+            now,
+            "product",
+            &remote_product.id,
+            &remote_product.updated_at,
+        ) {
+            continue;
+        }
         match local_map.get(&remote_product.id) {
             Some(local) => {
                 if remote_product.updated_at > local.updated_at {
@@ -230,6 +284,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         .collect();
 
     for remote_mapping in &remote.platform_mappings {
+        if implausible(
+            &mut summary,
+            now,
+            "mapping",
+            &remote_mapping.product_id,
+            &remote_mapping.updated_at,
+        ) {
+            continue;
+        }
         let vkey = remote_mapping.variant_id.clone().unwrap_or_default();
         let key = (
             remote_mapping.product_id.clone(),
@@ -283,6 +346,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
 
     // ── Platform Snapshots: newer last_polled_at wins ─────────
     for remote_snap in &remote.platform_snapshots {
+        if implausible(
+            &mut summary,
+            now,
+            "snapshot",
+            &remote_snap.product_id,
+            &remote_snap.last_polled_at,
+        ) {
+            continue;
+        }
         let local_snap = db
             .get_snapshot(&remote_snap.product_id, remote_snap.platform.as_str())
             .await?;
@@ -329,7 +401,20 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
     }
 
     // ── Platform Sync Meta: newer wins ───────────────────────
-    if let Some(ref remote_at) = remote.platform_sync_meta.last_platform_sync_at {
+    if let Some(remote_at) = remote
+        .platform_sync_meta
+        .last_platform_sync_at
+        .as_ref()
+        .filter(|at| {
+            !implausible(
+                &mut summary,
+                now,
+                "platform sync meta",
+                "last_platform_sync_at",
+                at,
+            )
+        })
+    {
         let local_at = db.get_p2p_meta("last_platform_sync_at").await?;
         let should_update = match &local_at {
             Some(local) => remote_at > local,
@@ -344,7 +429,11 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
     }
 
     // ── Company Config: LWW by updated_at ────────────────────
-    if let Some(ref remote_config) = remote.company_config {
+    if let Some(remote_config) = remote
+        .company_config
+        .as_ref()
+        .filter(|c| !implausible(&mut summary, now, "company config", "", &c.updated_at))
+    {
         let local_config = db.get_company_config().await?;
         let should_update = match &local_config {
             Some((_, local_updated)) => remote_config.updated_at > *local_updated,
@@ -359,18 +448,28 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
 
     // ── Auth Tokens: LWW by updated_at ───────────────────────
     for remote_token in &remote.auth_tokens {
+        if implausible(
+            &mut summary,
+            now,
+            "auth token",
+            &remote_token.platform,
+            &remote_token.updated_at,
+        ) {
+            continue;
+        }
         let local_token = db.get_auth_token(&remote_token.platform).await?;
         let should_update = match &local_token {
             Some(local) => remote_token.updated_at > local.updated_at,
             None => true,
         };
         if should_update {
-            db.upsert_auth_token(
+            db.upsert_auth_token_from_peer(
                 &remote_token.platform,
                 &remote_token.access_token,
                 remote_token.refresh_token.as_deref(),
                 remote_token.expires_at.as_deref(),
                 remote_token.cookies.as_deref(),
+                &remote_token.updated_at,
             )
             .await?;
             debug!(platform = %remote_token.platform, "Updated auth token from remote");
@@ -378,7 +477,11 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
     }
 
     // ── Company Logo: LWW by updated_at ────────────────────
-    if let Some(ref remote_logo) = remote.company_logo {
+    if let Some(remote_logo) = remote
+        .company_logo
+        .as_ref()
+        .filter(|l| !implausible(&mut summary, now, "company logo", "", &l.updated_at))
+    {
         let local_logo = db.get_company_logo().await?;
         let should_update = match &local_logo {
             Some((_, local_updated)) => remote_logo.updated_at > *local_updated,
@@ -393,6 +496,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
 
     // ── Vendor Plugins: LWW by updated_at per plugin id ────
     for remote_plugin in &remote.vendor_plugins {
+        if implausible(
+            &mut summary,
+            now,
+            "vendor plugin",
+            &remote_plugin.id,
+            &remote_plugin.updated_at,
+        ) {
+            continue;
+        }
         let local_plugin = db.get_registry_plugin(&remote_plugin.id).await;
         let should_update = match &local_plugin {
             Ok(Some(local)) => remote_plugin.updated_at > local.updated_at,
@@ -432,6 +544,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
     // ── Product Variants: LWW by updated_at ─────────────────
     let mut affected_product_ids = std::collections::HashSet::new();
     for remote_variant in &remote.product_variants {
+        if implausible(
+            &mut summary,
+            now,
+            "variant",
+            &remote_variant.id,
+            &remote_variant.updated_at,
+        ) {
+            continue;
+        }
         let local_variant = db.get_variant(&remote_variant.id).await?;
         match local_variant {
             Some(local) => {

@@ -229,8 +229,9 @@ is merged. Beyond that, the current protocol trusts what a peer says about itsel
 - Admin-only endpoints (adding, approving and removing peers, changing roles) check the
   *receiving* node's role, not the caller's, so any secret holder can call them on an
   admin's node.
-- `updated_at` comes from the sender, so a row sent with a far-future timestamp wins
-  every later merge.
+- `updated_at` comes from the sender. Rows stamped more than 10 minutes ahead of the
+  receiver's clock, or with an unparseable stamp, are refused; within that window a peer
+  with a fast clock still wins ties.
 - Secret rotation is not implemented yet.
 
 Share the secret only with installs you would give your marketplace credentials to. The

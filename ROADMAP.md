@@ -70,12 +70,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 188 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
+Current state: 191 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
 `sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip
-importer), `crates/p2p` 7 (`round_trip`). Every adapter's live network path and the P2P
+importer), `crates/p2p` 10 (`round_trip` 9, `server` 1). Every adapter's live network path and the P2P
 layer's Tor transport are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
@@ -130,7 +130,7 @@ layer's Tor transport are still untested.
         the plugin's only API.
       The tests pin that API (`Nisaba`'s keys and the extension's op list), so widening the
       sandbox has to be a deliberate change to them.
-- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 7): `load_full_sync_payload` →
+- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 9): `load_full_sync_payload` →
       the real wire format (`SyncRequest` JSON) → `merge_remote_payload`, without Tor —
       every payload section arrives, a repeated sync is a no-op, the newer edit wins both
       ways, a deleted mapping propagates as a tombstone, and two peers syncing both ways
@@ -365,12 +365,19 @@ The capability matrix is the queue. Current state per `capabilities()`:
       an admin's node every secret holder can add, approve and remove peers and change
       roles. Depends on the item above — a caller's role means nothing until the caller is
       authenticated.
-- [ ] Bound peer-supplied timestamps. Last-writer-wins compares the sender's `updated_at`
-      verbatim, so a row sent with `9999-12-31` wins every later merge and can never be
-      corrected. Reject or clamp timestamps too far in the future (and consider a
-      hybrid/logical clock instead of wall time).
-- [ ] Compare the company secret in constant time in `auth_middleware` (`==` on strings
-      today; low impact behind Tor, trivial to fix).
+- [x] Bound peer-supplied timestamps. Last-writer-wins compared the sender's `updated_at`
+      verbatim, so a row stamped `9999-12-31` — or anything sorting after a digit, like
+      `"Z"` — won every later merge and could never be corrected. Every merged section now
+      refuses a row whose timestamp does not parse (SQLite or RFC 3339) or is more than 10
+      minutes ahead of the receiver's clock, and counts it in
+      `MergeSummary::rejected_timestamps`.
+- [ ] Consider a hybrid/logical clock for merges instead of wall time: even bounded,
+      last-writer-wins on wall clocks lets a peer with a fast clock win ties it should lose.
+- [x] Compare the company secret in constant time in `auth_middleware` (was `==`).
+- [x] Auth tokens ping-ponged like variants did: `upsert_auth_token` stamped `now` on
+      receipt, so a received token flowed straight back re-stamped, and a stale copy could
+      overwrite a token the other peer had just refreshed — an auth failure on the next
+      sync. Merges now use `upsert_auth_token_from_peer`, which keeps the edit's timestamp.
 - [ ] Key rotation for the company secret, with a migration path for existing peers.
       `/api/rotate-secret` exists but is a stub that only acknowledges the request.
 - [x] Conflict resolution for P2P merges was `merge_remote_payload`'s implicit policy. It is
