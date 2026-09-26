@@ -359,6 +359,10 @@ pub struct VendorPluginInstall {
     pub installed: bool,
     pub enabled: bool,
     pub installed_at: String,
+    /// This machine's wall-clock limit for one run of the plugin, in minutes. `None`
+    /// means the runtime default.
+    #[serde(default)]
+    pub timeout_minutes: Option<i64>,
 }
 
 /// Flags indicating which capabilities a platform adapter supports.

@@ -129,6 +129,7 @@ enabled = false
         .unwrap();
     }
     db.install_plugin("offline").await.unwrap();
+    db.set_plugin_timeout("offline", Some(120)).await.unwrap();
 
     println!("{}", dir.display());
 }

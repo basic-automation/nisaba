@@ -194,8 +194,9 @@ What the sandbox enforces:
 - **Resources** — each `fetchListings` run gets 30 minutes of wall-clock time, a 1 GiB
   heap, 256 MiB of listing output (every `emitBatch` plus the return value) and 64 MiB
   per `Nisaba.fetch` response body; a metadata read gets 10 seconds, 128 MiB, and 1 MiB
-  for each of the other two. A plugin that exceeds one is stopped
-  with an error naming the limit; it cannot hang or crash the app.
+  for each of the other two. A plugin that exceeds one is stopped with an error naming
+  the limit; it cannot hang or crash the app. The time limit can be raised per plugin (up
+  to 12 hours) on its card under Marketplace → Installed.
 
 ## P2P company sync
 

@@ -10,7 +10,7 @@ use crate::types::{
     SyncEvent, VendorListingCache, VendorPluginInstall, VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 18;
+const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -219,7 +219,7 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008` (repairing
     ///   the columns migration 007 dropped when it rebuilt `platform_mappings`),
-    ///   `010`, `012`, `015`–`016` and `018` are all inline. `migrations/` holds only
+    ///   `010`, `012`, `015`–`016` and `018`–`019` are all inline. `migrations/` holds only
     ///   the steps whose whole body is SQL, so its filenames are not, and were
     ///   never meant to be, a complete list.
     /// * **A file's number is not its schema version.** The `NNN_` prefixes and
@@ -679,6 +679,17 @@ impl Db {
                     )
                     .await;
                 debug!("Applied migration 018: vendor_plugin_registry.allowed_hosts");
+            }
+
+            if version < 19 {
+                // Per-install plugin time limit (local, never synced). NULL = default.
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_installs ADD COLUMN timeout_minutes INTEGER",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 019: vendor_plugin_installs.timeout_minutes");
             }
 
             // Set the new schema version
@@ -2957,7 +2968,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT plugin_id, installed, enabled, installed_at
+                "SELECT plugin_id, installed, enabled, installed_at, timeout_minutes
                  FROM vendor_plugin_installs ORDER BY installed_at",
                 (),
             )
@@ -2970,6 +2981,7 @@ impl Db {
                 installed: row.get::<bool>(1)?,
                 enabled: row.get::<bool>(2)?,
                 installed_at: row.get::<String>(3)?,
+                timeout_minutes: row.get::<Option<i64>>(4)?,
             });
         }
         Ok(installs)
@@ -2990,6 +3002,20 @@ impl Db {
         self.execute_write(
             "DELETE FROM vendor_plugin_installs WHERE plugin_id = ?1",
             params![plugin_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set this machine's time limit for a plugin (`None` restores the default).
+    pub async fn set_plugin_timeout(
+        &self,
+        plugin_id: &str,
+        timeout_minutes: Option<i64>,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "UPDATE vendor_plugin_installs SET timeout_minutes = ?1 WHERE plugin_id = ?2",
+            params![timeout_minutes, plugin_id],
         )
         .await?;
         Ok(())
@@ -3812,6 +3838,31 @@ mod tests {
             listed.allowed_hosts_json.as_deref(),
             Some(r#"["a.example.com"]"#)
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_installs_keep_a_per_machine_time_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installs.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        async fn timeout(db: &Db) -> Option<i64> {
+            db.list_installed_plugins().await.unwrap()[0].timeout_minutes
+        }
+
+        db.install_plugin("p").await.unwrap();
+        assert_eq!(timeout(&db).await, None);
+
+        db.set_plugin_timeout("p", Some(120)).await.unwrap();
+        assert_eq!(timeout(&db).await, Some(120));
+
+        // Reinstalling (e.g. after an update) keeps the user's choice.
+        db.install_plugin("p").await.unwrap();
+        assert_eq!(timeout(&db).await, Some(120));
+
+        db.set_plugin_timeout("p", None).await.unwrap();
+        assert_eq!(timeout(&db).await, None);
     }
 
     #[tokio::test]

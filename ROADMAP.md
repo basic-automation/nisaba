@@ -70,7 +70,7 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 180 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
+Current state: 181 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
@@ -245,8 +245,15 @@ The capability matrix is the queue. Current state per `capabilities()`:
       the V8 heap, so the heap limit never saw it. The body is now streamed and refused
       past `PluginLimits::max_response_bytes` (64 MiB; 1 MiB during a metadata read), up
       front when `Content-Length` declares it and while counting when it does not.
-- [ ] Surface a plugin's limits in the UI, and let the user raise the time limit per plugin
-      for a catalog that genuinely takes longer than 30 minutes
+- [x] Let the user raise a plugin's time limit, for a catalog that genuinely takes longer
+      than 30 minutes (a rate-limited API backing off, say). It is per machine — a column on
+      the local `vendor_plugin_installs` table (migration 19), never synced — chosen on the
+      installed plugin's card (15 min – 12 h), and applied by all three execution paths
+      (manual fetch, background sync, auto sync). Verified in the running app by the UI
+      smoke test, which changes it and reads it back after leaving the page, and by a
+      direct read of the fixture database.
+- [ ] Show the other limits (heap, output, response size) in the plugin's details, and
+      decide whether any of them should be user-adjustable too
 - [x] Per-plugin allowlist of fetchable hosts — enforcement. A plugin declares
       `allowed_hosts` in its metadata (exact names, or `*.example.com` for subdomains) and
       `Nisaba.fetch` reaches those hosts only, with every redirect hop held to the same
@@ -391,8 +398,8 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `ui_fixture` example that seeds a throwaway install. It runs the app from the
       fixture directory (the app reads `./config.toml` first) inside `unshare -rn`, so it
       has no network at all and cannot touch live data, and drives it through
-      tauri-driver + WebKitWebDriver. First green run 2026-09-26 on Hyprland: 4 checks on
-      the marketplace's network-access badges. WebKitGTK needs
+      tauri-driver + WebKitWebDriver. First green run 2026-09-26 on Hyprland: 6 checks on
+      the marketplace's network-access badges and the per-plugin time limit. WebKitGTK needs
       `WEBKIT_DISABLE_DMABUF_RENDERER=1` there ("Error 71 (Protocol error) dispatching to
       Wayland display" otherwise).
 - [ ] Grow the UI smoke test beyond the marketplace — the product, listings and vendor

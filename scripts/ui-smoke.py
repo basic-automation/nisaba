@@ -168,6 +168,41 @@ def smoke(app, fixture, workdir, screenshot):
                     f.write(base64.b64decode(png))
                 print(f"screenshot: {path}")
 
+        # The installed plugin's time limit: the fixture's 2 h renders, and changing it
+        # through the <select> round-trips through set_vendor_plugin_timeout.
+        selected = "const s = document.querySelector('#timeout-offline'); return s ? s.selectedOptions[0].textContent.trim() : null;"
+        checks += 1
+        shown = run_js(session, selected)
+        print(f"{'ok  ' if shown == '2 h' else 'FAIL'} [Installed] time limit shows {shown!r}")
+        if shown != "2 h":
+            failures.append("time limit (initial)")
+        run_js(
+            session,
+            "const s = document.querySelector('#timeout-offline'); s.value = '60';"
+            "s.dispatchEvent(new Event('change'));",
+        )
+        # A failed save would leave the DOM showing "1 h" anyway (the bound prop never
+        # changed, so Vue never re-renders it), so leave the page and come back: the
+        # value shown then was read back from the database.
+        time.sleep(1)
+        router = "document.querySelector('#__nuxt').__vue_app__.config.globalProperties.$router"
+        run_js(session, f"{router}.push('/')")
+        wait_for("leaving the marketplace", lambda: run_js(session, "return location.pathname") == "/")
+        run_js(session, f"{router}.push('/marketplace')")
+        wait_for("the marketplace again", lambda: "Installed" in run_js(session, "return document.body.innerText"))
+        run_js(
+            session,
+            "const b = [...document.querySelectorAll('button')]"
+            ".find(e => e.textContent.trim() === 'Installed'); if (b) b.click();",
+        )
+        checks += 1
+        try:
+            wait_for("the saved time limit", lambda: run_js(session, selected) == "1 h", timeout=15)
+            print("ok   [Installed] time limit saved as '1 h' (re-read after navigating away)")
+        except TimeoutError as e:
+            print(f"FAIL [Installed] time limit change: {e}")
+            failures.append("time limit (change)")
+
         if failures:
             raise SystemExit(f"{len(failures)} card(s) wrong: {', '.join(failures)}")
         print(f"ui-smoke: {checks} checks passed")

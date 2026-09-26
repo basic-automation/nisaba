@@ -79,6 +79,12 @@ export function useVendors() {
     await fetchPlugins()
   }
 
+  /** This machine's time limit for one run of the plugin; `null` restores the default. */
+  async function setPluginTimeout(pluginId: string, minutes: number | null) {
+    await invoke('set_vendor_plugin_timeout', { pluginId, minutes })
+    await fetchPlugins()
+  }
+
   // Execution (direct — blocking, also writes to cache as side-effect)
   async function fetchVendorListings(pluginId: string) {
     listingLoading.value[pluginId] = true
@@ -162,6 +168,7 @@ export function useVendors() {
     removeRegistryPlugin,
     installPlugin,
     uninstallPlugin,
+    setPluginTimeout,
     fetchVendorListings,
     loadCachedListings,
     fetchSyncStatus,

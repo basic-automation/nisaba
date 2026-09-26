@@ -6,7 +6,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use nisaba_core::db::Db;
 use nisaba_core::types::{VendorListingCache, VendorPluginRow};
-use nisaba_vendor_runtime::{BatchCallback, VendorRuntime};
+use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
@@ -35,6 +35,9 @@ pub struct VendorPluginInfo {
     /// at install).
     pub network_access: String,
     pub allowed_hosts: Vec<String>,
+    /// This machine's time limit for one run, in minutes, and whether it is the default.
+    pub timeout_minutes: u32,
+    pub timeout_is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,21 +348,48 @@ async fn read_metadata_in_thread(
     .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// The longest time limit a user may give a plugin, in minutes.
+const MAX_PLUGIN_TIMEOUT_MINUTES: u32 = 12 * 60;
+
+/// The runtime limits for a plugin on this machine: the defaults, with the user's
+/// per-install time limit applied if they set one.
+async fn plugin_limits(db: &Db, plugin_id: &str) -> PluginLimits {
+    let mut limits = PluginLimits::default();
+    let custom = db
+        .list_installed_plugins()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.plugin_id == plugin_id)
+        .and_then(|i| i.timeout_minutes);
+    if let Some(minutes) = custom {
+        let minutes = minutes.clamp(1, MAX_PLUGIN_TIMEOUT_MINUTES as i64) as u64;
+        limits.timeout = std::time::Duration::from_secs(minutes * 60);
+    }
+    limits
+}
+
+fn default_timeout_minutes() -> u32 {
+    (PluginLimits::default().timeout.as_secs() / 60) as u32
+}
+
 /// Run VendorRuntime::execute_plugin_from_files in a thread that owns a LocalSet.
 async fn execute_plugin_in_thread(
     files: HashMap<String, String>,
     config: HashMap<String, String>,
     batch_callback: Option<BatchCallback>,
+    limits: PluginLimits,
 ) -> Result<Vec<nisaba_vendor_runtime::VendorListing>, String> {
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(VendorRuntime::execute_plugin_from_files(
+        rt.block_on(VendorRuntime::execute_plugin_from_files_with_limits(
             &files,
             config,
             batch_callback,
+            limits,
         ))
         .map_err(|e| format!("Plugin execution failed: {e}"))
     })
@@ -368,6 +398,15 @@ async fn execute_plugin_in_thread(
 }
 
 fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> VendorPluginInfo {
+    build_plugin_info_with_timeout(p, installed, enabled, None)
+}
+
+fn build_plugin_info_with_timeout(
+    p: VendorPluginRow,
+    installed: bool,
+    enabled: bool,
+    timeout_minutes: Option<i64>,
+) -> VendorPluginInfo {
     let config_fields: Vec<serde_json::Value> = p
         .config_fields
         .as_deref()
@@ -402,6 +441,10 @@ fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> Vend
         include_vendor_stock: p.include_vendor_stock,
         network_access: network_access.to_string(),
         allowed_hosts,
+        timeout_minutes: timeout_minutes
+            .map(|m| m.clamp(1, MAX_PLUGIN_TIMEOUT_MINUTES as i64) as u32)
+            .unwrap_or_else(default_timeout_minutes),
+        timeout_is_default: timeout_minutes.is_none(),
     }
 }
 
@@ -431,16 +474,19 @@ pub async fn list_registry_plugins(
         .map_err(|e| e.to_string())?;
     let installs = db.list_installed_plugins().await.unwrap_or_default();
 
-    let install_map: HashMap<String, (bool, bool)> = installs
+    let install_map: HashMap<String, (bool, bool, Option<i64>)> = installs
         .into_iter()
-        .map(|i| (i.plugin_id, (i.installed, i.enabled)))
+        .map(|i| (i.plugin_id, (i.installed, i.enabled, i.timeout_minutes)))
         .collect();
 
     let infos = plugins
         .into_iter()
         .map(|p| {
-            let (installed, enabled) = install_map.get(&p.id).copied().unwrap_or((false, false));
-            build_plugin_info(p, installed, enabled)
+            let (installed, enabled, timeout) = install_map
+                .get(&p.id)
+                .copied()
+                .unwrap_or((false, false, None));
+            build_plugin_info_with_timeout(p, installed, enabled, timeout)
         })
         .collect();
 
@@ -870,6 +916,26 @@ pub async fn install_vendor_plugin(
         .map_err(|e| e.to_string())
 }
 
+/// Set this machine's time limit for an installed plugin; `None` restores the default.
+#[tauri::command]
+pub async fn set_vendor_plugin_timeout(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    minutes: Option<u32>,
+) -> Result<(), String> {
+    if let Some(m) = minutes {
+        if !(1..=MAX_PLUGIN_TIMEOUT_MINUTES).contains(&m) {
+            return Err(format!(
+                "A plugin time limit must be between 1 and {MAX_PLUGIN_TIMEOUT_MINUTES} minutes"
+            ));
+        }
+    }
+    let db = state.active_db().await?;
+    db.set_plugin_timeout(&plugin_id, minutes.map(i64::from))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn uninstall_vendor_plugin(
     state: State<'_, AppState>,
@@ -916,7 +982,8 @@ pub async fn fetch_vendor_listings(
         .unwrap_or_default();
 
     let files = parse_files_json(&plugin.files_json)?;
-    let result = execute_plugin_in_thread(files, config, None).await?;
+    let limits = plugin_limits(&db, &plugin_id).await;
+    let result = execute_plugin_in_thread(files, config, None, limits).await?;
 
     // Save to cache as side-effect
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1039,8 +1106,9 @@ pub async fn sync_vendor_listings(
     let pid = plugin_id.clone();
     let app_handle = app.clone();
     let db_spawn = db.clone();
+    let limits = plugin_limits(&db, &plugin_id).await;
     tokio::spawn(async move {
-        let result = execute_plugin_in_thread(files, config, Some(batch_callback)).await;
+        let result = execute_plugin_in_thread(files, config, Some(batch_callback), limits).await;
 
         match result {
             Ok(vendor_listings) => {
@@ -1443,7 +1511,8 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
 
     tracing::info!(plugin = %plugin.display_name, version = %plugin.version, "Auto vendor sync starting");
 
-    match execute_plugin_in_thread(files, config, None).await {
+    let limits = plugin_limits(&db, &plugin_id).await;
+    match execute_plugin_in_thread(files, config, None, limits).await {
         Ok(vendor_listings) => {
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let cache_rows: Vec<VendorListingCache> = vendor_listings
