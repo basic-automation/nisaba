@@ -375,3 +375,134 @@ async fn two_peers_converge_after_syncing_both_ways() {
         "peers never converge; per-round summaries: {rounds:#?}"
     );
 }
+
+/// A vendor plugin row with "include vendor stock" on, as both peers' registries hold it.
+async fn dropship_setup(db: &Db, vendor_qty: Option<i64>) {
+    exec(
+        db,
+        "UPDATE vendor_plugin_registry SET include_vendor_stock = 1 WHERE id = 'plug'",
+        (),
+    )
+    .await;
+    // What this peer's own vendor sync fetched for the item, if it has run.
+    if let Some(qty) = vendor_qty {
+        exec(
+            db,
+            "INSERT INTO product_vendor_data (product_id, variant_id, plugin_id, vendor_item_id, title, quantity)
+             VALUES ('p1', 'v1', 'plug', 'VI-1', 'Canteen', ?1)",
+            params![qty],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_dropship_variant_keeps_its_vendor_stock_on_the_other_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+    seed_peer_a(&a).await;
+    // v1 is sourced from the plugin: 3 on hand + 4 at the vendor = 7.
+    exec(
+        &a,
+        "UPDATE product_variants SET source_plugin_id = 'plug', source_vendor_item_id = 'VI-1' WHERE id = 'v1'",
+        (),
+    )
+    .await;
+    dropship_setup(&a, Some(4)).await;
+    a.recalc_product_quantity("p1").await.unwrap();
+    assert_eq!(a.get_variant("v1").await.unwrap().unwrap().quantity, 7);
+    exec(
+        &a,
+        "UPDATE products SET updated_at = '2026-09-25 12:00:00'",
+        (),
+    )
+    .await;
+    exec(
+        &a,
+        "UPDATE product_variants SET updated_at = '2026-09-25 12:00:00'",
+        (),
+    )
+    .await;
+
+    // B receives the catalog (and the plugin row) first, then its own vendor sync runs.
+    merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    let v = b.get_variant("v1").await.unwrap().unwrap();
+    assert_eq!(
+        (
+            v.source_plugin_id.as_deref(),
+            v.source_vendor_item_id.as_deref()
+        ),
+        (Some("plug"), Some("VI-1")),
+        "the source link must travel, or B's vendor sync cannot attach vendor stock"
+    );
+    dropship_setup(&b, Some(4)).await;
+    b.recalc_product_quantity("p1").await.unwrap();
+    assert_eq!(b.get_variant("v1").await.unwrap().unwrap().quantity, 7);
+    assert_eq!(b.get_product("p1").await.unwrap().unwrap().quantity, 7);
+
+    // …and from there the peers agree, so syncing both ways changes nothing.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let to_a = merge_remote_payload(
+        &a,
+        &over_the_wire(load_full_sync_payload(&b).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    let to_b = merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.get_variant("v1").await.unwrap().unwrap().quantity, 7);
+    assert!(is_noop(&to_b), "A -> B after agreeing: {to_b:?}");
+    // B's recalc stamped the variant it corrected, so A takes that newer copy once.
+    assert!(
+        to_a.variants_updated <= 1 && to_a.products_updated <= 1,
+        "{to_a:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_peer_too_old_to_send_the_link_does_not_erase_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+    seed_peer_a(&a).await;
+    merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    exec(
+        &b,
+        "UPDATE product_variants SET source_plugin_id = 'plug', source_vendor_item_id = 'VI-1',
+         updated_at = '2000-01-01 00:00:00' WHERE id = 'v1'",
+        (),
+    )
+    .await;
+
+    // An old peer's payload has no link fields at all.
+    let mut payload = serde_json::to_value(load_full_sync_payload(&a).await.unwrap()).unwrap();
+    for v in payload["product_variants"].as_array_mut().unwrap() {
+        let v = v.as_object_mut().unwrap();
+        v.remove("source_plugin_id");
+        v.remove("source_vendor_item_id");
+    }
+    let old: SyncPayload = serde_json::from_value(payload).unwrap();
+    let summary = merge_remote_payload(&b, &old).await.unwrap();
+    assert_eq!(
+        summary.variants_updated, 1,
+        "the newer remote edit still applies"
+    );
+    let v = b.get_variant("v1").await.unwrap().unwrap();
+    assert_eq!(v.source_plugin_id.as_deref(), Some("plug"));
+    assert_eq!(v.source_vendor_item_id.as_deref(), Some("VI-1"));
+}

@@ -70,12 +70,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 186 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
+Current state: 188 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
 `sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip
-importer), `crates/p2p` 5 (`round_trip`). Every adapter's live network path and the P2P
+importer), `crates/p2p` 7 (`round_trip`). Every adapter's live network path and the P2P
 layer's Tor transport are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
@@ -130,7 +130,7 @@ layer's Tor transport are still untested.
         the plugin's only API.
       The tests pin that API (`Nisaba`'s keys and the extension's op list), so widening the
       sandbox has to be a deliberate change to them.
-- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 5): `load_full_sync_payload` →
+- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 7): `load_full_sync_payload` →
       the real wire format (`SyncRequest` JSON) → `merge_remote_payload`, without Tor —
       every payload section arrives, a repeated sync is a no-op, the newer edit wins both
       ways, a deleted mapping propagates as a tombstone, and two peers syncing both ways
@@ -328,13 +328,18 @@ The capability matrix is the queue. Current state per `capabilities()`:
       timestamp, and by `recalc_product_quantity` writing only rows whose quantity actually
       changes. `two_peers_converge_after_syncing_both_ways` reproduced it (every round
       rewrote the product and its variant) and now converges after the first sync.
-- [ ] Dropship stock does not survive P2P. A variant's effective quantity is on-hand plus
-      vendor stock when its source plugin has "include vendor stock" on, but neither the
-      variant's source-plugin link nor `product_vendor_data` is in the payload, so a
-      receiving peer computes on-hand only — the peers disagree about that variant's stock
-      and, having disagreed, re-stamp it on every merge. Sync the link (and the vendor
-      quantity or the cache it comes from), or stop deriving the effective quantity
-      per peer.
+- [x] Dropship stock did not survive P2P. A variant's effective quantity is on-hand plus
+      vendor stock when its source plugin has "include vendor stock" on, but the variant's
+      source-plugin link was not in the payload (and the merge wrote `None`), so a
+      receiving peer could never attach vendor stock to it and counted on-hand only. The
+      link now travels (`SyncableVariant::source_plugin_id`/`source_vendor_item_id`,
+      defaulted so older peers still parse, and a peer that sends none does not erase a
+      local link); each peer's own vendor sync supplies the vendor quantity, and peers
+      holding the same plugin data agree and converge.
+- [ ] Vendor stock is still per peer: a peer that has not installed and synced the source
+      plugin counts that variant's on-hand stock only, and the peers disagree until it
+      does. Decide whether to sync `product_vendor_data` itself, or require every peer that
+      runs platform sync to have the company's vendor plugins installed.
 - [ ] The sync payload carries platform auth tokens and plugin configuration protected only
       by Tor's transport encryption. Decide whether that is enough, or whether sensitive
       sections should be sealed with a key derived from the company secret as the at-rest

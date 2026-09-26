@@ -69,6 +69,8 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
                 image_url: v.image_url,
                 sort_order: v.sort_order,
                 updated_at: v.updated_at,
+                source_plugin_id: v.source_plugin_id,
+                source_vendor_item_id: v.source_vendor_item_id,
             }
         })
         .collect();
@@ -446,8 +448,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                         on_hand_quantity: remote_variant.on_hand_quantity,
                         image_url: remote_variant.image_url.clone(),
                         sort_order: remote_variant.sort_order,
-                        source_plugin_id: local.source_plugin_id.clone(),
-                        source_vendor_item_id: local.source_vendor_item_id.clone(),
+                        // The winning edit's link; an older peer sends none, so keep ours.
+                        source_plugin_id: remote_variant
+                            .source_plugin_id
+                            .clone()
+                            .or(local.source_plugin_id.clone()),
+                        source_vendor_item_id: remote_variant
+                            .source_vendor_item_id
+                            .clone()
+                            .or(local.source_vendor_item_id.clone()),
                         created_at: local.created_at,
                         updated_at: remote_variant.updated_at.clone(),
                     };
@@ -469,8 +478,8 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     on_hand_quantity: remote_variant.on_hand_quantity,
                     image_url: remote_variant.image_url.clone(),
                     sort_order: remote_variant.sort_order,
-                    source_plugin_id: None,
-                    source_vendor_item_id: None,
+                    source_plugin_id: remote_variant.source_plugin_id.clone(),
+                    source_vendor_item_id: remote_variant.source_vendor_item_id.clone(),
                     created_at: remote_variant.updated_at.clone(),
                     updated_at: remote_variant.updated_at.clone(),
                 };

@@ -905,8 +905,8 @@ impl Db {
     /// the merge's: stamping `now` here makes the receiver's copy look newer than the
     /// sender's, it flows back on the next sync, and the two peers rewrite each other
     /// forever — while a stale copy with a fresh stamp can beat a genuine edit made on
-    /// the other side. On insert the source-plugin link is taken from `variant`; on
-    /// update the local one is kept (it is not part of the P2P payload).
+    /// the other side. The source-plugin link is written when `variant` carries one; a
+    /// `None` (from a peer too old to send it) leaves the local link alone.
     pub async fn upsert_variant_from_peer(
         &self,
         variant: &ProductVariant,
@@ -917,7 +917,10 @@ impl Db {
             "INSERT INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
              ON CONFLICT(id) DO UPDATE SET sku = ?3, name = ?4, attributes_json = ?5, quantity = ?6,
-                on_hand_quantity = ?7, image_url = ?8, sort_order = ?9, updated_at = ?12",
+                on_hand_quantity = ?7, image_url = ?8, sort_order = ?9,
+                source_plugin_id = COALESCE(?10, source_plugin_id),
+                source_vendor_item_id = COALESCE(?11, source_vendor_item_id),
+                updated_at = ?12",
             params![
                 variant.id.clone(),
                 variant.product_id.clone(),
