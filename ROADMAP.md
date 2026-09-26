@@ -70,12 +70,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 172 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
+Current state: 175 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 53 (`runtime` 22,
-`sandbox` 9, `limits` 11, `network` 11). Every adapter's live network path and the P2P layer are still
-untested.
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
+`sandbox` 9, `limits` 11, `network` 11, `template` 3). Every adapter's live network path
+and the P2P layer are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -211,11 +211,18 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [x] Multi-file plugins with TypeScript transpile
 - [x] Rothco Wholesale plugin on the GraphQL v2 API, with SKU variants, tiered pricing,
       UPC and weight
-- [ ] Document the plugin contract as a real reference — the `metadata` shape, every
-      `config_field` option, the `VendorListing` schema `emitBatch` expects, and the error
-      convention. Right now `plugins/rothco-wholesale` is the only specification.
-- [ ] A `nisaba-plugin-template` starter plugin so a third party can begin without reading
-      the Rothco source
+- [x] Document the plugin contract as a real reference, and a starter plugin so a third
+      party can begin without reading the Rothco source — both are `plugins/template`: a
+      working plugin whose comments document the `Nisaba` API, every `metadata` and
+      `config_fields` option, the `VendorListing` schema (variants, recognised `extras`
+      keys), paging, batching, 429/5xx retries, and throw-versus-skip. It is kept honest by
+      `tests/template.rs` (3), which runs it against a fake supplier API on loopback.
+- [ ] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
+      writes the whole config map — API tokens included — to
+      `vendor_plugin_registry.config_json` in the unencrypted database, and that column is
+      part of the P2P sync payload. The README claimed they were encrypted; it no longer
+      does. Move secret fields to the OS keyring like the company secret, and decide how a
+      peer that needs the token to run the plugin obtains it.
 - [x] Plugin resource limits — `PluginLimits` bounds every run: a wall-clock timeout
       (a watchdog thread terminates the isolate, since a spinning plugin never yields to
       tokio's timer), a V8 heap ceiling with a near-limit callback, and an output budget
@@ -354,7 +361,7 @@ The capability matrix is the queue. Current state per `capabilities()`:
       it now points at the app's Products pages
 - [ ] Secret handling audit — `keyring` is a dependency, but confirm nothing (tokens, the
       company secret, plugin `secret: true` fields) is ever written to `config.toml`, logged,
-      or included in an export
+      or included in an export. Plugin secrets already fail this — see Phase 3.
 - [ ] `export_import.rs` produces `ExportData`; document exactly what it contains and make
       sure secrets are excluded
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults

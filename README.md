@@ -43,7 +43,8 @@ crates/
   service/  tui/        Not currently workspace members
 frontend/               Nuxt 3 SPA (Tailwind + shadcn-vue)
 plugins/
-  rothco-wholesale/     Example/first-party vendor plugin (GraphQL v2 API)
+  rothco-wholesale/     First-party vendor plugin (GraphQL v2 API)
+  template/             Starter plugin and contract reference for third parties
 migrations/             SQL migrations, applied in order
 config.example.toml     Template for the runtime config
 ```
@@ -150,9 +151,17 @@ export async function fetchListings(
 ```
 
 Metadata is read without running `fetchListings`, so the app can show a plugin's config
-fields before it is ever executed. `secret: true` fields are stored encrypted. Plugins
-may be single-file or multi-file; see [`plugins/rothco-wholesale`](plugins/rothco-wholesale)
-for a working example that pages a GraphQL catalog and emits batches of listings.
+fields before it is ever executed. `secret: true` masks a field's input; the values
+themselves are currently stored unencrypted in the app's database and shared with the
+company's P2P peers (moving them to the OS keyring is on the roadmap). Plugins may be
+single-file or multi-file.
+
+**Writing a plugin:** start from [`plugins/template`](plugins/template/index.ts). It is a
+working plugin whose comments are the contract reference — the `Nisaba` API, every
+`metadata` and `config_fields` option, the listing schema (including variants and the
+`extras` keys the app recognises), paging, batching, rate-limit retries, and when to
+throw versus log and skip. [`plugins/rothco-wholesale`](plugins/rothco-wholesale) is a
+real-world example that pages a GraphQL catalog.
 
 What the sandbox enforces:
 
