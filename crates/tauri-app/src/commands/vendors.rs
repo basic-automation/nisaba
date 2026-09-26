@@ -6,7 +6,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use nisaba_core::db::Db;
 use nisaba_core::types::{VendorListingCache, VendorPluginRow};
-use nisaba_vendor_runtime::{BatchCallback, VendorRuntime};
+use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
@@ -30,6 +30,14 @@ pub struct VendorPluginInfo {
     pub category: String,
     pub icon: Option<String>,
     pub include_vendor_stock: bool,
+    /// `"restricted"` (only `allowed_hosts`), `"unrestricted"` (the plugin declares no
+    /// allowlist), or `"unknown"` (not yet computed from this plugin's files — it will be
+    /// at install).
+    pub network_access: String,
+    pub allowed_hosts: Vec<String>,
+    /// This machine's time limit for one run, in minutes, and whether it is the default.
+    pub timeout_minutes: u32,
+    pub timeout_is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -199,11 +207,41 @@ fn read_directory_to_files_map(dir_path: &Path) -> Result<HashMap<String, String
     Ok(files)
 }
 
+/// Caps on what a plugin zip may unpack to. A plugin zip is untrusted and is unpacked
+/// into memory before anything else looks at it, so a few kilobytes of zip bomb would
+/// otherwise take the app down at import time.
+struct ZipLimits {
+    max_entries: usize,
+    max_unpacked_bytes: u64,
+}
+
+const PLUGIN_ZIP_LIMITS: ZipLimits = ZipLimits {
+    max_entries: 1_000,
+    max_unpacked_bytes: 64 * 1024 * 1024,
+};
+
+/// The largest plugin `submit_vendor_plugin` will download.
+const MAX_PLUGIN_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+
 /// Extract files from a zip archive, auto-stripping a root folder prefix if present.
 fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, String> {
+    extract_zip_with_limits(bytes, &PLUGIN_ZIP_LIMITS)
+}
+
+fn extract_zip_with_limits(
+    bytes: &[u8],
+    limits: &ZipLimits,
+) -> Result<HashMap<String, String>, String> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip: {e}"))?;
+    if archive.len() > limits.max_entries {
+        return Err(format!(
+            "Plugin zip has {} entries; the limit is {}",
+            archive.len(),
+            limits.max_entries
+        ));
+    }
 
     // Detect common root prefix (e.g. "plugin-v1.0/")
     // Collect all entry names first to avoid borrow issues
@@ -211,22 +249,37 @@ fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, Str
         .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
         .collect();
 
+    // Strip a single root folder shared by every entry. Derived from the names rather
+    // than from a directory entry, which many zip tools do not write.
     let mut prefix = String::new();
-    if let Some(first) = entry_names.first() {
-        if first.ends_with('/') {
-            let candidate = first.clone();
-            if entry_names[1..].iter().all(|n| n.starts_with(&candidate)) {
-                prefix = candidate;
-            }
+    if let Some((root, _)) = entry_names.first().and_then(|n| n.split_once('/')) {
+        let candidate = format!("{root}/");
+        if !root.is_empty() && entry_names.iter().all(|n| n.starts_with(&candidate)) {
+            prefix = candidate;
         }
     }
 
     let mut files = HashMap::new();
+    let mut unpacked: u64 = 0;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("Zip error: {e}"))?;
         if entry.is_dir() {
             continue;
+        }
+        // Absolute paths, `..` components ("zip slip") and backslashes, which are
+        // separators on a Windows peer the plugin may be synced to. The plugin runtime
+        // refuses these too; refusing here gives the user the reason at import.
+        // (`ZipFile::enclosed_name` is not enough: it quietly turns `/abs` into `abs`.)
+        let safe = !entry.name().contains('\\')
+            && Path::new(entry.name())
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !safe {
+            return Err(format!(
+                "Plugin zip entry {:?} has an unsafe path",
+                entry.name()
+            ));
         }
 
         let raw_name = entry.name().to_string();
@@ -240,17 +293,31 @@ fn extract_zip_to_files_map(bytes: &[u8]) -> Result<HashMap<String, String>, Str
             continue;
         }
 
+        if !is_text_file(&name) && !is_binary_file(&name) {
+            continue;
+        }
+
+        // Count what is actually decompressed — the sizes in the zip's headers are
+        // attacker-supplied — and stop one byte past the budget.
+        let budget = limits.max_unpacked_bytes - unpacked;
+        let mut bytes = Vec::new();
+        (&mut entry)
+            .take(budget + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
+        if bytes.len() as u64 > budget {
+            return Err(format!(
+                "Plugin zip unpacks to more than {} MiB",
+                limits.max_unpacked_bytes / (1024 * 1024)
+            ));
+        }
+        unpacked += bytes.len() as u64;
+
         if is_text_file(&name) {
-            let mut content = String::new();
-            entry
-                .read_to_string(&mut content)
+            let content = String::from_utf8(bytes)
                 .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
             files.insert(name, content);
-        } else if is_binary_file(&name) {
-            let mut bytes = Vec::new();
-            entry
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
+        } else {
             let mime = mime_for_ext(&name);
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             files.insert(name, format!("data:{mime};base64,{b64}"));
@@ -281,21 +348,48 @@ async fn read_metadata_in_thread(
     .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// The longest time limit a user may give a plugin, in minutes.
+const MAX_PLUGIN_TIMEOUT_MINUTES: u32 = 12 * 60;
+
+/// The runtime limits for a plugin on this machine: the defaults, with the user's
+/// per-install time limit applied if they set one.
+async fn plugin_limits(db: &Db, plugin_id: &str) -> PluginLimits {
+    let mut limits = PluginLimits::default();
+    let custom = db
+        .list_installed_plugins()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.plugin_id == plugin_id)
+        .and_then(|i| i.timeout_minutes);
+    if let Some(minutes) = custom {
+        let minutes = minutes.clamp(1, MAX_PLUGIN_TIMEOUT_MINUTES as i64) as u64;
+        limits.timeout = std::time::Duration::from_secs(minutes * 60);
+    }
+    limits
+}
+
+fn default_timeout_minutes() -> u32 {
+    (PluginLimits::default().timeout.as_secs() / 60) as u32
+}
+
 /// Run VendorRuntime::execute_plugin_from_files in a thread that owns a LocalSet.
 async fn execute_plugin_in_thread(
     files: HashMap<String, String>,
     config: HashMap<String, String>,
     batch_callback: Option<BatchCallback>,
+    limits: PluginLimits,
 ) -> Result<Vec<nisaba_vendor_runtime::VendorListing>, String> {
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(VendorRuntime::execute_plugin_from_files(
+        rt.block_on(VendorRuntime::execute_plugin_from_files_with_limits(
             &files,
             config,
             batch_callback,
+            limits,
         ))
         .map_err(|e| format!("Plugin execution failed: {e}"))
     })
@@ -304,11 +398,30 @@ async fn execute_plugin_in_thread(
 }
 
 fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> VendorPluginInfo {
+    build_plugin_info_with_timeout(p, installed, enabled, None)
+}
+
+fn build_plugin_info_with_timeout(
+    p: VendorPluginRow,
+    installed: bool,
+    enabled: bool,
+    timeout_minutes: Option<i64>,
+) -> VendorPluginInfo {
     let config_fields: Vec<serde_json::Value> = p
         .config_fields
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+
+    let (network_access, allowed_hosts) = match p
+        .allowed_hosts_json
+        .as_deref()
+        .map(serde_json::from_str::<Option<Vec<String>>>)
+    {
+        Some(Ok(Some(hosts))) => ("restricted", hosts),
+        Some(Ok(None)) => ("unrestricted", Vec::new()),
+        _ => ("unknown", Vec::new()),
+    };
 
     VendorPluginInfo {
         id: p.id,
@@ -326,7 +439,18 @@ fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> Vend
         category: p.category,
         icon: p.icon,
         include_vendor_stock: p.include_vendor_stock,
+        network_access: network_access.to_string(),
+        allowed_hosts,
+        timeout_minutes: timeout_minutes
+            .map(|m| m.clamp(1, MAX_PLUGIN_TIMEOUT_MINUTES as i64) as u32)
+            .unwrap_or_else(default_timeout_minutes),
+        timeout_is_default: timeout_minutes.is_none(),
     }
+}
+
+/// The value cached in `VendorPluginRow::allowed_hosts_json` for this metadata.
+fn allowed_hosts_json(metadata: &nisaba_vendor_runtime::PluginMetadata) -> Option<String> {
+    serde_json::to_string(&metadata.allowed_hosts).ok()
 }
 
 /// Parse a files_json string into a HashMap.
@@ -350,16 +474,19 @@ pub async fn list_registry_plugins(
         .map_err(|e| e.to_string())?;
     let installs = db.list_installed_plugins().await.unwrap_or_default();
 
-    let install_map: HashMap<String, (bool, bool)> = installs
+    let install_map: HashMap<String, (bool, bool, Option<i64>)> = installs
         .into_iter()
-        .map(|i| (i.plugin_id, (i.installed, i.enabled)))
+        .map(|i| (i.plugin_id, (i.installed, i.enabled, i.timeout_minutes)))
         .collect();
 
     let infos = plugins
         .into_iter()
         .map(|p| {
-            let (installed, enabled) = install_map.get(&p.id).copied().unwrap_or((false, false));
-            build_plugin_info(p, installed, enabled)
+            let (installed, enabled, timeout) = install_map
+                .get(&p.id)
+                .copied()
+                .unwrap_or((false, false, None));
+            build_plugin_info_with_timeout(p, installed, enabled, timeout)
         })
         .collect();
 
@@ -387,23 +514,33 @@ pub async fn submit_vendor_plugin(
         .to_string();
     let is_zip = content_type.contains("zip") || url.ends_with(".zip");
 
+    let mut resp = resp;
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read plugin body: {e}"))?
+    {
+        if body.len() + chunk.len() > MAX_PLUGIN_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Plugin download exceeds {} MiB",
+                MAX_PLUGIN_DOWNLOAD_BYTES / (1024 * 1024)
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
     let files = if is_zip {
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("Failed to read plugin body: {e}"))?;
-        extract_zip_to_files_map(&bytes)?
+        extract_zip_to_files_map(&body)?
     } else {
-        let code = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read plugin body: {e}"))?;
+        let code = String::from_utf8_lossy(&body).into_owned();
         let mut map = HashMap::new();
         map.insert("index.ts".to_string(), code);
         map
     };
 
     let metadata = read_metadata_in_thread(files.clone()).await?;
+    let allowed_hosts_json = allowed_hosts_json(&metadata);
 
     // Extract icon from files or use metadata icon
     let icon = extract_icon(&files).or_else(|| metadata.icon.clone());
@@ -454,6 +591,7 @@ pub async fn submit_vendor_plugin(
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
+            allowed_hosts_json: allowed_hosts_json.clone(),
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -474,6 +612,7 @@ pub async fn submit_vendor_plugin(
             include_vendor_stock: false,
             created_at: now.clone(),
             updated_at: now,
+            allowed_hosts_json,
         }
     };
 
@@ -515,6 +654,7 @@ pub async fn import_vendor_plugin(
     };
 
     let metadata = read_metadata_in_thread(files.clone()).await?;
+    let allowed_hosts_json = allowed_hosts_json(&metadata);
 
     // Extract icon from files or use metadata icon
     let icon = extract_icon(&files).or_else(|| metadata.icon.clone());
@@ -569,6 +709,7 @@ pub async fn import_vendor_plugin(
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
+            allowed_hosts_json: allowed_hosts_json.clone(),
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -589,6 +730,7 @@ pub async fn import_vendor_plugin(
             include_vendor_stock: false,
             created_at: now.clone(),
             updated_at: now,
+            allowed_hosts_json,
         }
     };
 
@@ -760,7 +902,36 @@ pub async fn install_vendor_plugin(
         return Err("Can only install approved plugins".to_string());
     }
 
+    // Recompute the network allowlist from the files being installed rather than trusting
+    // the cached value, which may have arrived from a peer or predate these files. A
+    // plugin whose metadata no longer loads is not installed.
+    let files = parse_files_json(&plugin.files_json)?;
+    let metadata = read_metadata_in_thread(files).await?;
+    db.set_registry_plugin_allowed_hosts(&plugin_id, allowed_hosts_json(&metadata).as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
     db.install_plugin(&plugin_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set this machine's time limit for an installed plugin; `None` restores the default.
+#[tauri::command]
+pub async fn set_vendor_plugin_timeout(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    minutes: Option<u32>,
+) -> Result<(), String> {
+    if let Some(m) = minutes {
+        if !(1..=MAX_PLUGIN_TIMEOUT_MINUTES).contains(&m) {
+            return Err(format!(
+                "A plugin time limit must be between 1 and {MAX_PLUGIN_TIMEOUT_MINUTES} minutes"
+            ));
+        }
+    }
+    let db = state.active_db().await?;
+    db.set_plugin_timeout(&plugin_id, minutes.map(i64::from))
         .await
         .map_err(|e| e.to_string())
 }
@@ -811,7 +982,8 @@ pub async fn fetch_vendor_listings(
         .unwrap_or_default();
 
     let files = parse_files_json(&plugin.files_json)?;
-    let result = execute_plugin_in_thread(files, config, None).await?;
+    let limits = plugin_limits(&db, &plugin_id).await;
+    let result = execute_plugin_in_thread(files, config, None, limits).await?;
 
     // Save to cache as side-effect
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -934,8 +1106,9 @@ pub async fn sync_vendor_listings(
     let pid = plugin_id.clone();
     let app_handle = app.clone();
     let db_spawn = db.clone();
+    let limits = plugin_limits(&db, &plugin_id).await;
     tokio::spawn(async move {
-        let result = execute_plugin_in_thread(files, config, Some(batch_callback)).await;
+        let result = execute_plugin_in_thread(files, config, Some(batch_callback), limits).await;
 
         match result {
             Ok(vendor_listings) => {
@@ -1338,7 +1511,8 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
 
     tracing::info!(plugin = %plugin.display_name, version = %plugin.version, "Auto vendor sync starting");
 
-    match execute_plugin_in_thread(files, config, None).await {
+    let limits = plugin_limits(&db, &plugin_id).await;
+    match execute_plugin_in_thread(files, config, None, limits).await {
         Ok(vendor_listings) => {
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let cache_rows: Vec<VendorListingCache> = vendor_listings
@@ -1451,5 +1625,95 @@ pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
 
     for install in active {
         run_vendor_sync_single(db.clone(), install.plugin_id, app.clone()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, content) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    const INDEX: &[u8] = b"export const metadata = { name: 'z', version: '1' };";
+
+    #[test]
+    fn a_normal_plugin_zip_unpacks_with_its_root_folder_stripped() {
+        let bytes = zip_of(&[
+            ("plugin-1.0/index.ts", INDEX),
+            ("plugin-1.0/lib/util.ts", b"export const x = 1;"),
+            ("plugin-1.0/icon.png", b"\x89PNG"),
+            ("plugin-1.0/notes.bin", b"ignored"),
+        ]);
+        let files = extract_zip_to_files_map(&bytes).unwrap();
+        let mut names: Vec<&str> = files.keys().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["icon.png", "index.ts", "lib/util.ts"]);
+        assert!(files["icon.png"].starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn a_root_folder_is_only_stripped_when_every_entry_shares_it() {
+        let bytes = zip_of(&[("index.ts", INDEX), ("lib/util.ts", b"x")]);
+        let files = extract_zip_to_files_map(&bytes).unwrap();
+        assert!(files.contains_key("lib/util.ts"));
+    }
+
+    #[test]
+    fn entries_with_unsafe_paths_are_refused() {
+        for name in [
+            "../escape.ts",
+            "/tmp/absolute.ts",
+            "lib/../../escape.ts",
+            "..\\escape.ts",
+        ] {
+            let bytes = zip_of(&[("index.ts", INDEX), (name, b"x")]);
+            let err = extract_zip_to_files_map(&bytes).unwrap_err();
+            assert!(err.contains("unsafe path"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_zip_bomb_is_refused_by_what_it_decompresses_to() {
+        // 1 MiB of zeros deflates to about a kilobyte.
+        let zeros = vec![0u8; 1024 * 1024];
+        let bytes = zip_of(&[("index.ts", INDEX), ("bomb.ts", &zeros)]);
+        assert!(bytes.len() < 16 * 1024, "fixture is {} bytes", bytes.len());
+
+        let limits = ZipLimits {
+            max_entries: 10,
+            max_unpacked_bytes: 512 * 1024,
+        };
+        let err = extract_zip_with_limits(&bytes, &limits).unwrap_err();
+        assert!(err.contains("unpacks to more than"), "{err}");
+
+        // The same archive is fine under a budget it fits in.
+        let roomy = ZipLimits {
+            max_entries: 10,
+            max_unpacked_bytes: 2 * 1024 * 1024,
+        };
+        assert_eq!(extract_zip_with_limits(&bytes, &roomy).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_zip_with_too_many_entries_is_refused() {
+        let names: Vec<String> = (0..20).map(|i| format!("f{i}.ts")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![("index.ts", INDEX)];
+        entries.extend(names.iter().map(|n| (n.as_str(), b"x" as &[u8])));
+        let limits = ZipLimits {
+            max_entries: 10,
+            max_unpacked_bytes: 1024 * 1024,
+        };
+        let err = extract_zip_with_limits(&zip_of(&entries), &limits).unwrap_err();
+        assert!(err.contains("entries"), "{err}");
     }
 }

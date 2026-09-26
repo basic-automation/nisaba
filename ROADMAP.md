@@ -70,11 +70,13 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 118 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 191 tests. `crates/core` 47 (`config` 2, `conflict` 6, `crypto` 7, `db` 10,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`). Every adapter's live network path, the P2P layer
-and the plugin runtime are still untested.
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
+`sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip
+importer), `crates/p2p` 10 (`round_trip` 9, `server` 1). Every adapter's live network path and the P2P
+layer's Tor transport are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -101,12 +103,39 @@ and the plugin runtime are still untested.
       row existed, so the first stock-mode push never persisted its tag and every later
       cycle re-pushed the stock mode to the live XMR Bazaar listing. Reverting the fix
       reproduces it as `version_tag: None`.
-- [ ] `crates/vendor-runtime` tests: a fixture plugin exercising `Nisaba.fetch`, `emitBatch`,
-      `log`, metadata-only reads, and the transpile path
-- [ ] Sandbox escape tests — assert a plugin cannot reach the filesystem, spawn a process, or
-      hit the network outside `op_nisaba_fetch`
-- [ ] `crates/p2p` round-trip test: `load_full_sync_payload` → encrypt → `merge_remote_payload`
-      over loopback, without Tor
+- [x] `crates/vendor-runtime` tests (`tests/runtime.rs`, 22): metadata reads and their
+      defaults (without calling `fetchListings`), the TypeScript transpile path and its
+      parse errors, config values that look like code arriving as inert strings, `emitBatch`
+      ordering, `Nisaba.fetch` against a loopback server (method, headers, body, non-2xx,
+      connection failure), `sleep`, `log` routing to `tracing`, and how a throwing, stalled
+      or malformed plugin surfaces as an error.
+- [x] Sandbox escape tests — assert a plugin cannot reach the filesystem, spawn a process, or
+      hit the network outside `op_nisaba_fetch` (`crates/vendor-runtime/tests/sandbox.rs`,
+      9). Writing them found **three real escapes**, all fixed:
+      - *Arbitrary file write at install time.* `write_plugin_files` joined each plugin file
+        name onto its temp dir unchecked, and the zip importer passes entry names through
+        raw, so a zip entry named `../…` or an absolute path was written anywhere the user
+        can write — during the metadata read, before the user ever ran the plugin. File
+        names must now be plain relative paths, checked before anything touches the disk.
+      - *Arbitrary module read at run time.* The module loader resolved any `file://`
+        specifier, so `await import("file:///…")` read any JS/TS module on disk and handed
+        its exports to plugin code, one `Nisaba.fetch` away from exfiltration; `../` also
+        reached other plugins' files in the shared temp dir. The loader is now confined to
+        the plugin's own directory (canonicalized, so `..` and symlinks cannot walk out),
+        and every run gets a fresh directory of its own.
+      - *Any plugin could abort the app.* `Deno.core.ops` exposed every deno_core built-in
+        op to plugin code, including `op_panic`, which panics across the V8 boundary where
+        unwinding is impossible — one call `SIGABRT`ed the whole process. The shim now
+        captures the ops it needs and deletes `Deno` from the global scope, so `Nisaba` is
+        the plugin's only API.
+      The tests pin that API (`Nisaba`'s keys and the extension's op list), so widening the
+      sandbox has to be a deliberate change to them.
+- [x] `crates/p2p` round-trip test (`tests/round_trip.rs`, 9): `load_full_sync_payload` →
+      the real wire format (`SyncRequest` JSON) → `merge_remote_payload`, without Tor —
+      every payload section arrives, a repeated sync is a no-op, the newer edit wins both
+      ways, a deleted mapping propagates as a tombstone, and two peers syncing both ways
+      converge. (There is no "encrypt" step to include: payloads carry no application-layer
+      encryption, only Tor's.) The convergence test found a real bug, fixed — see Phase 5.
 - [x] Migration tests: apply every step to an empty DB and assert the resulting schema —
       all 22 expected tables present, the columns `008` restores after `007` rebuilds
       `platform_mappings`, and that a second `migrate()` is a no-op (it runs on every launch).
@@ -187,14 +216,67 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [x] Multi-file plugins with TypeScript transpile
 - [x] Rothco Wholesale plugin on the GraphQL v2 API, with SKU variants, tiered pricing,
       UPC and weight
-- [ ] Document the plugin contract as a real reference — the `metadata` shape, every
-      `config_field` option, the `VendorListing` schema `emitBatch` expects, and the error
-      convention. Right now `plugins/rothco-wholesale` is the only specification.
-- [ ] A `nisaba-plugin-template` starter plugin so a third party can begin without reading
-      the Rothco source
-- [ ] Plugin resource limits — a plugin can currently loop forever or emit unbounded batches;
-      add a wall-clock timeout, a memory ceiling and a batch cap
-- [ ] Per-plugin allowlist of fetchable hosts, surfaced at install time
+- [x] Document the plugin contract as a real reference, and a starter plugin so a third
+      party can begin without reading the Rothco source — both are `plugins/template`: a
+      working plugin whose comments document the `Nisaba` API, every `metadata` and
+      `config_fields` option, the `VendorListing` schema (variants, recognised `extras`
+      keys), paging, batching, 429/5xx retries, and throw-versus-skip. It is kept honest by
+      `tests/template.rs` (3), which runs it against a fake supplier API on loopback.
+- [x] Harden the plugin importer (`extract_zip_to_files_map`). It unpacked every entry
+      into memory with no cap, so a few kilobytes of zip bomb could exhaust memory at import;
+      it now stops at 1,000 entries and 64 MiB of *decompressed* data (counted while
+      reading, since header sizes are attacker-supplied), and plugins submitted by URL are
+      capped at a 64 MiB download. Entry names with a root, `..` or a backslash (a separator
+      on a Windows peer) are refused with a reason — `ZipFile::enclosed_name` alone would
+      not do, since it quietly turns `/abs` into `abs`. The root-folder strip also no longer
+      needs an explicit directory entry, which many zip tools omit; such a plugin used to
+      fail with "must contain an index.ts". Importer tests: 5, the first in `nisaba-tauri`.
+      Nisaba never calls `ZipArchive::extract`, so the symlink zip-slip in the `zip` crate
+      (CVE-2025-29787) does not reach it. https://github.com/advisories/GHSA-94vh-gphv-8pm8
+- [ ] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
+      writes the whole config map — API tokens included — to
+      `vendor_plugin_registry.config_json` in the unencrypted database, and that column is
+      part of the P2P sync payload. The README claimed they were encrypted; it no longer
+      does. Move secret fields to the OS keyring like the company secret, and decide how a
+      peer that needs the token to run the plugin obtains it.
+- [x] Plugin resource limits — `PluginLimits` bounds every run: a wall-clock timeout
+      (a watchdog thread terminates the isolate, since a spinning plugin never yields to
+      tokio's timer), a V8 heap ceiling with a near-limit callback, and an output budget
+      across `emitBatch` and the final result. Defaults are 30 min / 1 GiB / 256 MiB for
+      `fetchListings` and 10 s / 128 MiB / 1 MiB for a metadata read, which runs the
+      module's top-level code at install time. Before this a plugin allocating in a loop
+      hit V8's fatal out-of-memory handler and killed the whole app. `tests/limits.rs` (9).
+- [x] `Nisaba.fetch` read every response body fully into Rust memory with no cap — outside
+      the V8 heap, so the heap limit never saw it. The body is now streamed and refused
+      past `PluginLimits::max_response_bytes` (64 MiB; 1 MiB during a metadata read), up
+      front when `Content-Length` declares it and while counting when it does not.
+- [x] Let the user raise a plugin's time limit, for a catalog that genuinely takes longer
+      than 30 minutes (a rate-limited API backing off, say). It is per machine — a column on
+      the local `vendor_plugin_installs` table (migration 19), never synced — chosen on the
+      installed plugin's card (15 min – 12 h), and applied by all three execution paths
+      (manual fetch, background sync, auto sync). Verified in the running app by the UI
+      smoke test, which changes it and reads it back after leaving the page, and by a
+      direct read of the fixture database.
+- [ ] Show the other limits (heap, output, response size) in the plugin's details, and
+      decide whether any of them should be user-adjustable too
+- [x] Per-plugin allowlist of fetchable hosts — enforcement. A plugin declares
+      `allowed_hosts` in its metadata (exact names, or `*.example.com` for subdomains) and
+      `Nisaba.fetch` reaches those hosts only, with every redirect hop held to the same
+      list and at most 10 hops. The list is read in an isolate of its own and applied from
+      Rust before the run's plugin code starts, so top-level code cannot widen it; module
+      top-level code gets no network at all (it runs at install time). A plugin that
+      declares nothing stays unrestricted so existing installs keep working. The Rothco
+      plugin now declares `www.rothco.com`. `tests/network.rs` (11).
+- [x] Surface each plugin's network access at install time. The marketplace cards show
+      the declared hosts, "No network access", or an amber "Unrestricted" warning when a
+      plugin declares none (`PluginNetworkAccess.vue`). The value is a cache on the registry
+      row (migration 18, `vendor_plugin_registry.allowed_hosts`) computed from the plugin's
+      own files at import and recomputed at install — never taken from a P2P peer, whose
+      rows arrive as "checked when installed" — and a plugin whose metadata no longer loads
+      is refused at install. Verified by `npm run generate` and a DB round-trip test; not
+      yet exercised in the running app.
+- [ ] Once the UI surfaces it, decide when an undeclared allowlist stops meaning
+      "unrestricted" — e.g. refuse new installs without one, keep existing ones working.
 - [ ] The `marketplace.vue` submit/approve/reject flow implies a plugin registry; decide
       whether that registry is a real hosted service, a P2P-shared list, or local-only, and
       document the answer
@@ -235,11 +317,73 @@ The capability matrix is the queue. Current state per `capabilities()`:
 
 - [x] Tor onion service, peer client/server, encrypted company sync payloads
 - [x] Multi-company data model and company logos
-- [ ] Peer trust model — document how a peer is authorized today and what an attacker who
-      learns the company secret can do
-- [ ] Key rotation for the company secret, with a migration path for existing peers
-- [ ] Conflict resolution for P2P merges is `merge_remote_payload`'s implicit policy; make it
-      explicit and testable
+- [x] **Peers never converged, and could overwrite each other's edits.** Merges are
+      last-writer-wins on `updated_at`, but the merge wrote variants with `insert_variant`/
+      `update_variant`, which stamp `now`, and then ran `recalc_product_quantity`, which
+      re-stamped every variant and the product even when nothing changed. So each receiving
+      peer's copy looked newer than the sender's, flowed back on the next sync, and the two
+      rewrote each other every cycle, forever — and a stale copy carrying a fresh stamp could
+      beat a genuine edit (an on-hand stock change) made on the other peer between payload
+      load and merge. Fixed by `Db::upsert_variant_from_peer`, which keeps the edit's
+      timestamp, and by `recalc_product_quantity` writing only rows whose quantity actually
+      changes. `two_peers_converge_after_syncing_both_ways` reproduced it (every round
+      rewrote the product and its variant) and now converges after the first sync.
+- [x] Dropship stock did not survive P2P. A variant's effective quantity is on-hand plus
+      vendor stock when its source plugin has "include vendor stock" on, but the variant's
+      source-plugin link was not in the payload (and the merge wrote `None`), so a
+      receiving peer could never attach vendor stock to it and counted on-hand only. The
+      link now travels (`SyncableVariant::source_plugin_id`/`source_vendor_item_id`,
+      defaulted so older peers still parse, and a peer that sends none does not erase a
+      local link); each peer's own vendor sync supplies the vendor quantity, and peers
+      holding the same plugin data agree and converge.
+- [ ] Vendor stock is still per peer: a peer that has not installed and synced the source
+      plugin counts that variant's on-hand stock only, and the peers disagree until it
+      does. Decide whether to sync `product_vendor_data` itself, or require every peer that
+      runs platform sync to have the company's vendor plugins installed.
+- [ ] The sync payload carries platform auth tokens and plugin configuration protected only
+      by Tor's transport encryption. Decide whether that is enough, or whether sensitive
+      sections should be sealed with a key derived from the company secret as the at-rest
+      company config already is.
+- [ ] **`[company].enabled` is never read.** `CompanyConfig::enabled` is parsed, but
+      `init_company_context` starts the Tor onion service and periodic P2P sync for every
+      company unconditionally, so `enabled = false` (the default in
+      `config.example.toml`) does not keep an install off Tor. Honouring it would stop P2P
+      for anyone who relies on today's behaviour without setting the flag, so decide
+      first: gate on it (and set it where it matters), or drop the setting. The README no
+      longer claims it works.
+- [x] Peer trust model — documented in the README's P2P section, from `server.rs` and
+      `sync.rs`: the company secret is the only credential; a secret holder receives
+      everything (tokens included) and anything it sends is merged. The items below are
+      what that reading found.
+- [ ] Authenticate peers individually. `/api/sync` authorizes by the `sender_peer_id` /
+      `sender_onion` in the request body — self-asserted, so any secret holder can speak as
+      any authorized peer, and a sync under another peer's id rewrites that peer's onion
+      address to the sender's (`update_peer_onion_address`). `/api/address-update` repoints
+      any peer with no check that the caller is that peer. Needs a per-peer credential:
+      Tor onion-service client authorization, or requests signed with a per-peer key.
+- [ ] Enforce roles on the caller. `check_admin` checks the receiving node's own role, so on
+      an admin's node every secret holder can add, approve and remove peers and change
+      roles. Depends on the item above — a caller's role means nothing until the caller is
+      authenticated.
+- [x] Bound peer-supplied timestamps. Last-writer-wins compared the sender's `updated_at`
+      verbatim, so a row stamped `9999-12-31` — or anything sorting after a digit, like
+      `"Z"` — won every later merge and could never be corrected. Every merged section now
+      refuses a row whose timestamp does not parse (SQLite or RFC 3339) or is more than 10
+      minutes ahead of the receiver's clock, and counts it in
+      `MergeSummary::rejected_timestamps`.
+- [ ] Consider a hybrid/logical clock for merges instead of wall time: even bounded,
+      last-writer-wins on wall clocks lets a peer with a fast clock win ties it should lose.
+- [x] Compare the company secret in constant time in `auth_middleware` (was `==`).
+- [x] Auth tokens ping-ponged like variants did: `upsert_auth_token` stamped `now` on
+      receipt, so a received token flowed straight back re-stamped, and a stale copy could
+      overwrite a token the other peer had just refreshed — an auth failure on the next
+      sync. Merges now use `upsert_auth_token_from_peer`, which keeps the edit's timestamp.
+- [ ] Key rotation for the company secret, with a migration path for existing peers.
+      `/api/rotate-secret` exists but is a stub that only acknowledges the request.
+- [x] Conflict resolution for P2P merges was `merge_remote_payload`'s implicit policy. It is
+      now written down per section in the README and pinned by `tests/round_trip.rs`
+      (newer-wins both ways, tombstones, idempotence, two-way convergence) — which is how
+      the convergence bug above was found.
 - [ ] Offline/rejoin behaviour after a peer has been away for longer than the retention window
 - [ ] Bounded payload sizes — a full sync payload currently grows with the whole catalog
 
@@ -254,6 +398,11 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [ ] Pin `createUpdaterArtifacts` to the v2 format rather than `"v1Compatible"` when the
       release workflow lands — Tauri documents the setting as removed in v3.
       https://v2.tauri.app/plugin/updater/
+- [ ] Track the Tauri 3 alphas before they land on a stable line: `v3.0.0-alpha.2`
+      (2026-09-21) renames plugin APIs (`js_init_script` → `initialization_script`,
+      `Plugin::extend_api` → `Plugin::run_invoke_handler`) and removes
+      `Invoke::state`/`state_ref`. Nisaba stays on Tauri 2 until 3 is stable; this is the
+      migration checklist's first entry. https://github.com/tauri-apps/tauri/releases
 - [ ] `.updater/latest.json` published from a real release workflow
 - [x] A `release.yml` that builds **Linux, Windows and macOS** bundles and attaches them to
       the tag's GitHub release — one matrix, `fail-fast: false`, Linux on `ubuntu-22.04` so
@@ -262,10 +411,20 @@ The capability matrix is the queue. Current state per `capabilities()`:
       three without publishing, so the matrix can be checked without cutting a release.
       Owner directive 2026-09-25: every release covers all three platforms, and a release
       missing one is a failed release rather than a partial one.
-- [ ] Prove the release matrix green. **No macOS or Windows bundle has ever been built for
-      this project**, so each leg is unverified: macOS needs the universal target to link
-      and will be unsigned/unnotarized (Gatekeeper will warn), and Windows needs the WiX/NSIS
-      bundlers to run. Dispatch the workflow with `publish` off and fix what breaks.
+- [x] Prove the release matrix green. Build-only dispatch run 36218681088 (2026-09-26, on
+      `master` at `5fd136d`) passed on all three legs and uploaded every bundle: Linux
+      `.deb`/`.rpm`/`.AppImage`, Windows `.msi` and NSIS `.exe`, macOS universal `.dmg` —
+      the first bundles ever built for this project. They are unsigned (no updater key, no
+      Apple identity), so there are no `.sig` files.
+      https://github.com/basic-automation/nisaba/actions/runs/36218681088
+- [ ] The tag-push path of `release.yml` has never run. As first written it could not have
+      worked — each leg ran `gh release upload` against a release nothing created — and it
+      uploaded per leg, so one failed leg would have left a published two-platform
+      release. Now each leg uploads into a *draft* (the first creates it, pre-release for
+      `v0.*`) and a final `publish` job, which only runs when every leg succeeded, checks
+      the draft holds an AppImage, a `.deb`, an `.msi` and a `.dmg` before publishing it.
+      The shell was syntax-checked and the asset check dry-run against the real bundle
+      names; the path itself is unverified until the first `v*` tag.
 - [x] `bundle` in `tauri.conf.json` had **no `active` flag, which defaults to `false`** —
       `tauri-utils`' `BundleConfig::active` is `#[serde(default)]` on a `bool`, so
       `cargo tauri build` produced only the executable and never a single bundle, on any
@@ -295,6 +454,17 @@ The capability matrix is the queue. Current state per `capabilities()`:
       in-app guide it was made for or remove it
 - [ ] The window is `"decorations": false`; confirm the custom chrome behaves on Linux/Wayland
       and macOS, not just Windows
+- [x] A WebDriver harness that drives the real app: `scripts/ui-smoke.py` plus the
+      `ui_fixture` example that seeds a throwaway install. It runs the app from the
+      fixture directory (the app reads `./config.toml` first) inside `unshare -rn`, so it
+      has no network at all and cannot touch live data, and drives it through
+      tauri-driver + WebKitWebDriver. First green run 2026-09-26 on Hyprland: 6 checks on
+      the marketplace's network-access badges and the per-plugin time limit. WebKitGTK needs
+      `WEBKIT_DISABLE_DMABUF_RENDERER=1` there ("Error 71 (Protocol error) dispatching to
+      Wayland display" otherwise).
+- [ ] Grow the UI smoke test beyond the marketplace — the product, listings and vendor
+      pages, and the empty states above — and decide whether it can run in CI (it needs a
+      display; `xvfb-run` on the Linux runner is the obvious route).
 
 ## Cross-cutting
 
@@ -302,12 +472,18 @@ The capability matrix is the queue. Current state per `capabilities()`:
       it now points at the app's Products pages
 - [ ] Secret handling audit — `keyring` is a dependency, but confirm nothing (tokens, the
       company secret, plugin `secret: true` fields) is ever written to `config.toml`, logged,
-      or included in an export
+      or included in an export. Plugin secrets already fail this — see Phase 3.
 - [ ] `export_import.rs` produces `ExportData`; document exactly what it contains and make
       sure secrets are excluded
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults
 - [ ] Dependency freshness pass — `reqwest 0.13`, `deno_core 0.389`, `zip 8` and Nuxt 3.16+
-      all move fast; keep them current and green. `turso` is the exception: 0.5.0 is still
+      all move fast; keep them current and green. `deno_core` is now 0.412 (2026-09-16), 23
+      releases ahead of the tree, and its repo was archived in April 2026 and merged into
+      `denoland/deno` — watch that repo's changelog for breaking changes, not the old one.
+      The upgrade must keep `tests/sandbox.rs` and `tests/limits.rs` green: the op surface,
+      `op_import_sync` and the heap-limit callback are exactly what moves between releases.
+      https://docs.rs/deno_core/latest/deno_core/struct.RuntimeOptions.html
+      https://github.com/denoland/deno_core `turso` is the exception: 0.5.0 is still
       the newest release, and everything published since is `0.8.0-pre.*`, so staying on 0.5
       is correct until a stable 0.8 exists. https://github.com/tursodatabase/turso/releases
 - [ ] A scheduled `cargo update` / `cargo audit` CI job. This run found two dependency

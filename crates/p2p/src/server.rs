@@ -61,13 +61,21 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok());
 
     match secret {
-        Some(s) if s == state.company_secret => next.run(req).await,
+        Some(s) if constant_time_eq(s.as_bytes(), state.company_secret.as_bytes()) => {
+            next.run(req).await
+        }
         _ => (
             StatusCode::UNAUTHORIZED,
             "Invalid or missing company secret",
         )
             .into_response(),
     }
+}
+
+/// Compare two secrets without an early exit on the first differing byte. (The length
+/// still leaks; the secret is a UUID, so its length is not a secret.)
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// GET /api/ping
@@ -434,4 +442,18 @@ pub async fn build_company_info(
         peers,
         logo,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn secret_comparison() {
+        assert!(constant_time_eq(b"3f2a-secret", b"3f2a-secret"));
+        assert!(!constant_time_eq(b"3f2a-secret", b"3f2a-secreT"));
+        assert!(!constant_time_eq(b"3f2a-secret", b"3f2a-secre"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
 }

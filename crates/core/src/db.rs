@@ -10,7 +10,7 @@ use crate::types::{
     SyncEvent, VendorListingCache, VendorPluginInstall, VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -219,7 +219,7 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008` (repairing
     ///   the columns migration 007 dropped when it rebuilt `platform_mappings`),
-    ///   `010`, `012` and `015`–`016` are all inline. `migrations/` holds only
+    ///   `010`, `012`, `015`–`016` and `018`–`019` are all inline. `migrations/` holds only
     ///   the steps whose whole body is SQL, so its filenames are not, and were
     ///   never meant to be, a complete list.
     /// * **A file's number is not its schema version.** The `NNN_` prefixes and
@@ -669,6 +669,29 @@ impl Db {
                 debug!("Applied migration 017: cached_platform_listings table");
             }
 
+            if version < 18 {
+                // Cached fetch allowlist per registry plugin (see VendorPluginRow). NULL
+                // means "not computed yet", which is exactly right for every existing row.
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_registry ADD COLUMN allowed_hosts TEXT",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 018: vendor_plugin_registry.allowed_hosts");
+            }
+
+            if version < 19 {
+                // Per-install plugin time limit (local, never synced). NULL = default.
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_installs ADD COLUMN timeout_minutes INTEGER",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 019: vendor_plugin_installs.timeout_minutes");
+            }
+
             // Set the new schema version
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",
@@ -876,6 +899,47 @@ impl Db {
         Ok(())
     }
 
+    /// Write a variant received from a P2P peer, keeping the peer's `updated_at`.
+    ///
+    /// Merges are last-writer-wins on `updated_at`, so the timestamp is the edit's, not
+    /// the merge's: stamping `now` here makes the receiver's copy look newer than the
+    /// sender's, it flows back on the next sync, and the two peers rewrite each other
+    /// forever — while a stale copy with a fresh stamp can beat a genuine edit made on
+    /// the other side. The source-plugin link is written when `variant` carries one; a
+    /// `None` (from a peer too old to send it) leaves the local link alone.
+    pub async fn upsert_variant_from_peer(
+        &self,
+        variant: &ProductVariant,
+    ) -> Result<(), SyncError> {
+        let attrs_json = serde_json::to_string(&variant.attributes)
+            .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+        self.execute_write(
+            "INSERT INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             ON CONFLICT(id) DO UPDATE SET sku = ?3, name = ?4, attributes_json = ?5, quantity = ?6,
+                on_hand_quantity = ?7, image_url = ?8, sort_order = ?9,
+                source_plugin_id = COALESCE(?10, source_plugin_id),
+                source_vendor_item_id = COALESCE(?11, source_vendor_item_id),
+                updated_at = ?12",
+            params![
+                variant.id.clone(),
+                variant.product_id.clone(),
+                variant.sku.clone(),
+                variant.name.clone(),
+                attrs_json,
+                variant.quantity,
+                variant.on_hand_quantity,
+                variant.image_url.clone(),
+                variant.sort_order as i64,
+                variant.source_plugin_id.clone(),
+                variant.source_vendor_item_id.clone(),
+                variant.updated_at.clone(),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_variant_quantity(
         &self,
         variant_id: &str,
@@ -921,7 +985,8 @@ impl Db {
             .query(
                 "SELECT pv.id, pv.on_hand_quantity, pv.source_plugin_id,
                         COALESCE(pvd.quantity, 0) AS vendor_qty,
-                        COALESCE(vpr.include_vendor_stock, 0) AS include_vendor
+                        COALESCE(vpr.include_vendor_stock, 0) AS include_vendor,
+                        pv.quantity
                  FROM product_variants pv
                  LEFT JOIN product_vendor_data pvd
                    ON pvd.variant_id = pv.id AND pvd.plugin_id = pv.source_plugin_id
@@ -932,6 +997,7 @@ impl Db {
             )
             .await?;
 
+        let mut total: i64 = 0;
         let mut updates: Vec<(String, i64)> = Vec::new();
         while let Some(row) = rows.next().await? {
             let variant_id: String = row.get(0)?;
@@ -939,17 +1005,34 @@ impl Db {
             let source_plugin: Option<String> = row.get::<Option<String>>(2)?;
             let vendor_qty: i64 = row.get(3)?;
             let include_vendor: i64 = row.get(4)?;
+            let current: i64 = row.get(5)?;
 
             let effective = if source_plugin.is_some() && include_vendor == 1 {
                 on_hand + vendor_qty
             } else {
                 on_hand
             };
-            updates.push((variant_id, effective));
+            total += effective;
+            // Only rows whose quantity actually changes are written: `updated_at` is the
+            // last-writer-wins clock for P2P merges, and re-stamping unchanged rows makes
+            // them look like fresh edits to every peer.
+            if effective != current {
+                updates.push((variant_id, effective));
+            }
         }
 
-        // Step 2: Update each variant's effective quantity + product total atomically
-        let total: i64 = updates.iter().map(|(_, q)| q).sum();
+        let mut rows = conn
+            .query(
+                "SELECT quantity FROM products WHERE id = ?1",
+                params![product_id],
+            )
+            .await?;
+        let product_current: Option<i64> = match rows.next().await? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        };
+
+        // Step 2: Update the changed variants + product total atomically
         let mut stmts: Vec<(&str, Params)> = Vec::new();
         for (variant_id, quantity) in &updates {
             stmts.push((
@@ -957,12 +1040,15 @@ impl Db {
                 to_params(params![*quantity, variant_id.as_str()]),
             ));
         }
-        stmts.push((
-            "UPDATE products SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
-            to_params(params![total, product_id]),
-        ));
-        self.execute_writes(&stmts).await?;
-
+        if product_current != Some(total) {
+            stmts.push((
+                "UPDATE products SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
+                to_params(params![total, product_id]),
+            ));
+        }
+        if !stmts.is_empty() {
+            self.execute_writes(&stmts).await?;
+        }
         Ok(total)
     }
 
@@ -1306,6 +1392,30 @@ impl Db {
              ON CONFLICT(platform) DO UPDATE
              SET access_token = ?2, refresh_token = ?3, expires_at = ?4, cookies = ?5, updated_at = datetime('now')",
             params![platform, access_token, refresh_token, expires_at, cookies],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Write a platform auth token received from a P2P peer, keeping the peer's
+    /// `updated_at` — see [`Db::upsert_variant_from_peer`] for why a merge must not stamp
+    /// `now`. For tokens the stale-copy-wins case is an auth failure: a token one peer just
+    /// refreshed can be overwritten by the other peer's re-stamped old one.
+    pub async fn upsert_auth_token_from_peer(
+        &self,
+        platform: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        expires_at: Option<&str>,
+        cookies: Option<&str>,
+        updated_at: &str,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at, cookies, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(platform) DO UPDATE
+             SET access_token = ?2, refresh_token = ?3, expires_at = ?4, cookies = ?5, updated_at = ?6",
+            params![platform, access_token, refresh_token, expires_at, cookies, updated_at],
         )
         .await?;
         Ok(())
@@ -2790,7 +2900,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry ORDER BY display_name",
                 (),
             )
@@ -2812,7 +2923,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry WHERE id = ?1",
                 params![id],
             )
@@ -2834,7 +2946,8 @@ impl Db {
             .query(
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
-                        category, icon, include_vendor_stock, created_at, updated_at
+                        category, icon, include_vendor_stock, created_at, updated_at,
+                        allowed_hosts
                  FROM vendor_plugin_registry WHERE display_name = ?1 LIMIT 1",
                 params![display_name],
             )
@@ -2853,13 +2966,13 @@ impl Db {
             "INSERT INTO vendor_plugin_registry
                 (id, plugin_file, display_name, description, code, files_json, version,
                  config_fields, config_json, status, submitted_by, approved_by,
-                 category, icon, include_vendor_stock, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                 plugin_file = ?2, display_name = ?3, description = ?4, files_json = ?5,
                 version = ?6, config_fields = ?7, config_json = ?8, status = ?9,
                 submitted_by = ?10, approved_by = ?11, category = ?12, icon = ?13,
-                include_vendor_stock = ?14, updated_at = ?16",
+                include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17",
             params![
                 plugin.id.clone(),
                 plugin.plugin_file.clone(),
@@ -2877,7 +2990,24 @@ impl Db {
                 plugin.include_vendor_stock as i64,
                 plugin.created_at.clone(),
                 plugin.updated_at.clone(),
+                plugin.allowed_hosts_json.clone(),
             ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Cache a registry plugin's fetch allowlist, as computed from its files (see
+    /// [`VendorPluginRow::allowed_hosts_json`]).
+    pub async fn set_registry_plugin_allowed_hosts(
+        &self,
+        id: &str,
+        allowed_hosts_json: Option<&str>,
+    ) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE vendor_plugin_registry SET allowed_hosts = ?1 WHERE id = ?2",
+            params![allowed_hosts_json.map(str::to_string), id],
         )
         .await?;
         Ok(())
@@ -2925,7 +3055,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT plugin_id, installed, enabled, installed_at
+                "SELECT plugin_id, installed, enabled, installed_at, timeout_minutes
                  FROM vendor_plugin_installs ORDER BY installed_at",
                 (),
             )
@@ -2938,6 +3068,7 @@ impl Db {
                 installed: row.get::<bool>(1)?,
                 enabled: row.get::<bool>(2)?,
                 installed_at: row.get::<String>(3)?,
+                timeout_minutes: row.get::<Option<i64>>(4)?,
             });
         }
         Ok(installs)
@@ -2958,6 +3089,20 @@ impl Db {
         self.execute_write(
             "DELETE FROM vendor_plugin_installs WHERE plugin_id = ?1",
             params![plugin_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set this machine's time limit for a plugin (`None` restores the default).
+    pub async fn set_plugin_timeout(
+        &self,
+        plugin_id: &str,
+        timeout_minutes: Option<i64>,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "UPDATE vendor_plugin_installs SET timeout_minutes = ?1 WHERE plugin_id = ?2",
+            params![timeout_minutes, plugin_id],
         )
         .await?;
         Ok(())
@@ -3535,6 +3680,7 @@ fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncErro
         include_vendor_stock: row.get::<Option<i64>>(13)?.unwrap_or(0) != 0,
         created_at: row.get::<String>(14)?,
         updated_at: row.get::<String>(15)?,
+        allowed_hosts_json: row.get::<Option<String>>(16)?,
     })
 }
 
@@ -3695,6 +3841,115 @@ mod tests {
                 "platform_mappings is missing `{expected}`; got {columns:?}"
             );
         }
+    }
+
+    fn registry_row(id: &str, allowed_hosts_json: Option<&str>) -> VendorPluginRow {
+        VendorPluginRow {
+            id: id.to_string(),
+            plugin_file: "plugin.zip".to_string(),
+            display_name: format!("Plugin {id}"),
+            description: String::new(),
+            files_json: r#"{"index.ts":""}"#.to_string(),
+            version: "1.0.0".to_string(),
+            config_fields: None,
+            config_json: None,
+            status: "approved".to_string(),
+            submitted_by: None,
+            approved_by: None,
+            category: "vendor".to_string(),
+            icon: None,
+            include_vendor_stock: false,
+            created_at: "2026-09-25 00:00:00".to_string(),
+            updated_at: "2026-09-25 00:00:00".to_string(),
+            allowed_hosts_json: allowed_hosts_json.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_plugins_keep_their_cached_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(column_names(&db, "vendor_plugin_registry")
+            .await
+            .iter()
+            .any(|c| c == "allowed_hosts"));
+
+        // The three states: a declared list, declared-none (JSON null), not computed.
+        db.upsert_registry_plugin(&registry_row("listed", Some(r#"["www.rothco.com"]"#)))
+            .await
+            .unwrap();
+        db.upsert_registry_plugin(&registry_row("open", Some("null")))
+            .await
+            .unwrap();
+        db.upsert_registry_plugin(&registry_row("unknown", None))
+            .await
+            .unwrap();
+
+        async fn cached(db: &Db, id: &str) -> Option<String> {
+            db.get_registry_plugin(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .allowed_hosts_json
+        }
+        assert_eq!(
+            cached(&db, "listed").await.as_deref(),
+            Some(r#"["www.rothco.com"]"#)
+        );
+        assert_eq!(cached(&db, "open").await.as_deref(), Some("null"));
+        assert_eq!(cached(&db, "unknown").await, None);
+
+        // An upsert carrying no allowlist (a row from a peer) clears the cached one, and
+        // the install path's recomputation sets it again.
+        db.upsert_registry_plugin(&registry_row("listed", None))
+            .await
+            .unwrap();
+        assert_eq!(cached(&db, "listed").await, None);
+        db.set_registry_plugin_allowed_hosts("listed", Some(r#"["a.example.com"]"#))
+            .await
+            .unwrap();
+        assert_eq!(
+            cached(&db, "listed").await.as_deref(),
+            Some(r#"["a.example.com"]"#)
+        );
+        let listed = db
+            .list_registry_plugins()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == "listed")
+            .unwrap();
+        assert_eq!(
+            listed.allowed_hosts_json.as_deref(),
+            Some(r#"["a.example.com"]"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_installs_keep_a_per_machine_time_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installs.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        async fn timeout(db: &Db) -> Option<i64> {
+            db.list_installed_plugins().await.unwrap()[0].timeout_minutes
+        }
+
+        db.install_plugin("p").await.unwrap();
+        assert_eq!(timeout(&db).await, None);
+
+        db.set_plugin_timeout("p", Some(120)).await.unwrap();
+        assert_eq!(timeout(&db).await, Some(120));
+
+        // Reinstalling (e.g. after an update) keeps the user's choice.
+        db.install_plugin("p").await.unwrap();
+        assert_eq!(timeout(&db).await, Some(120));
+
+        db.set_plugin_timeout("p", None).await.unwrap();
+        assert_eq!(timeout(&db).await, None);
     }
 
     #[tokio::test]

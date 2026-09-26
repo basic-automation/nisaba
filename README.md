@@ -43,7 +43,8 @@ crates/
   service/  tui/        Not currently workspace members
 frontend/               Nuxt 3 SPA (Tailwind + shadcn-vue)
 plugins/
-  rothco-wholesale/     Example/first-party vendor plugin (GraphQL v2 API)
+  rothco-wholesale/     First-party vendor plugin (GraphQL v2 API)
+  template/             Starter plugin and contract reference for third parties
 migrations/             SQL migrations, applied in order
 config.example.toml     Template for the runtime config
 ```
@@ -105,6 +106,22 @@ cargo tauri build
 
 This runs `npm run generate` in `frontend/` and bundles the static output into the app.
 
+### UI smoke test (Linux)
+
+[`scripts/ui-smoke.py`](scripts/ui-smoke.py) drives the real desktop app over WebDriver
+and checks what the plugin marketplace renders:
+
+```bash
+cargo install tauri-driver
+cargo build -p nisaba-tauri --bin nisaba-tauri --example ui_fixture
+scripts/ui-smoke.py --target-dir "$(cargo metadata --format-version 1 | jq -r .target_directory)"
+```
+
+It seeds a throwaway install in a temp directory (every platform disabled) and runs the
+app from there inside a network namespace with only loopback up, so it never sees your
+real config or data and cannot reach any network. It needs `WebKitWebDriver` (from
+webkitgtk), a desktop session, and unprivileged user namespaces.
+
 ## Configuration
 
 Config lives outside the repo, at the platform data directory:
@@ -129,6 +146,7 @@ A vendor plugin is a TypeScript module executed in a locked-down Deno runtime �
 ambient network or filesystem access, only what Nisaba injects as a `Nisaba` global:
 `Nisaba.fetch`, `Nisaba.sleep`, `Nisaba.log.{trace,debug,info,warn,error}`, and
 `Nisaba.emitBatch` for streaming listings back to the host as they are scraped.
+`console.log` and friends write to the same log as `Nisaba.log`.
 
 A plugin exports two things:
 
@@ -141,6 +159,7 @@ export const metadata = {
   config_fields: [
     { key: 'api_token', label: 'API Token (Bearer)', required: true, secret: true },
   ],
+  allowed_hosts: ['www.rothco.com'],
 }
 
 export async function fetchListings(
@@ -149,16 +168,74 @@ export async function fetchListings(
 ```
 
 Metadata is read without running `fetchListings`, so the app can show a plugin's config
-fields before it is ever executed. `secret: true` fields are stored encrypted. Plugins
-may be single-file or multi-file; see [`plugins/rothco-wholesale`](plugins/rothco-wholesale)
-for a working example that pages a GraphQL catalog and emits batches of listings.
+fields before it is ever executed. `secret: true` masks a field's input; the values
+themselves are currently stored unencrypted in the app's database and shared with the
+company's P2P peers (moving them to the OS keyring is on the roadmap). Plugins may be
+single-file or multi-file.
+
+**Writing a plugin:** start from [`plugins/template`](plugins/template/index.ts). It is a
+working plugin whose comments are the contract reference — the `Nisaba` API, every
+`metadata` and `config_fields` option, the listing schema (including variants and the
+`extras` keys the app recognises), paging, batching, rate-limit retries, and when to
+throw versus log and skip. [`plugins/rothco-wholesale`](plugins/rothco-wholesale) is a
+real-world example that pages a GraphQL catalog.
+
+What the sandbox enforces:
+
+- **Filesystem** — none. A plugin can import only its own files; imports that resolve
+  outside its directory are refused, and a plugin's file names must be plain relative
+  paths, so installing one cannot write outside the directory it is unpacked into.
+- **Host APIs** — only `Nisaba`. The `Deno` global is removed before plugin code runs.
+- **Network** — `Nisaba.fetch` is the only way out. A plugin lists the hosts it needs in
+  its metadata as `allowed_hosts: ['api.example.com', '*.cdn.example.com']`, and fetches
+  (and redirects) anywhere else are refused; `[]` means no network at all. A plugin that
+  declares no list can still reach any host — declare one. Code at a module's top level
+  runs when the plugin is installed and has no network access.
+- **Resources** — each `fetchListings` run gets 30 minutes of wall-clock time, a 1 GiB
+  heap, 256 MiB of listing output (every `emitBatch` plus the return value) and 64 MiB
+  per `Nisaba.fetch` response body; a metadata read gets 10 seconds, 128 MiB, and 1 MiB
+  for each of the other two. A plugin that exceeds one is stopped with an error naming
+  the limit; it cannot hang or crash the app. The time limit can be raised per plugin (up
+  to 12 hours) on its card under Marketplace → Installed.
 
 ## P2P company sync
 
-When `[company].enabled` is set, an install publishes a Tor onion service and syncs
-catalog state with peers on an interval. Payloads are encrypted with a shared company
-secret (AES-GCM + HKDF); the secret and platform tokens are stored in the OS keyring
-rather than in config. See [`crates/p2p`](crates/p2p/src).
+Each company an install belongs to publishes a Tor onion service and syncs catalog state
+with its peers on an interval. (`[company].enabled` in `config.toml` is currently not
+read — the onion service starts for every company regardless; see the roadmap.)
+
+The sync payload is JSON sent over the onion connection, so it is protected by Tor's
+end-to-end encryption; peers authenticate with the shared company secret, which is kept
+in the OS keyring. There is no additional application-layer encryption of the payload,
+and it includes platform auth tokens and plugin configuration. The company's platform
+configuration is stored AES-GCM-encrypted (key derived from the secret with HKDF). See
+[`crates/p2p`](crates/p2p/src).
+
+**Merge policy.** Each section of the payload merges independently: products, variants,
+mappings, auth tokens, the company config and logo, and registry plugins are
+last-writer-wins on `updated_at`; a deleted mapping is a tombstone that propagates;
+platform snapshots keep the newer `last_polled_at`; processed XMR orders are a union.
+Peers that hold the same data converge — a repeated sync changes nothing
+([`crates/p2p/tests/round_trip.rs`](crates/p2p/tests/round_trip.rs)).
+
+**Trust model — read this before adding a peer.** The company secret is the only
+credential. Anyone who holds it is, in effect, a full member: they receive the whole
+payload (platform auth tokens and plugin configuration included), and whatever they send
+is merged. Beyond that, the current protocol trusts what a peer says about itself:
+
+- A peer's identity is the `sender_peer_id`/`sender_onion` it puts in its own request,
+  so a secret holder can speak as any authorized peer — and doing so updates that
+  peer's recorded onion address. `/api/address-update` can repoint any peer.
+- Admin-only endpoints (adding, approving and removing peers, changing roles) check the
+  *receiving* node's role, not the caller's, so any secret holder can call them on an
+  admin's node.
+- `updated_at` comes from the sender. Rows stamped more than 10 minutes ahead of the
+  receiver's clock, or with an unparseable stamp, are refused; within that window a peer
+  with a fast clock still wins ties.
+- Secret rotation is not implemented yet.
+
+Share the secret only with installs you would give your marketplace credentials to. The
+fixes are on the roadmap (Phase 5).
 
 ## Status
 
@@ -172,9 +249,8 @@ P2P, and the release pipeline. Known gaps worth calling out up front:
 - No auto-update yet — the Tauri updater ships with an empty signing key.
 - Photo upload is unimplemented on every platform.
 - Test coverage is uneven. The sync engine, the database migrations, XMR Bazaar's HTML
-  scraping and all four adapters' mapping layers have tests against recorded response
-  shapes; every adapter's live network path, the P2P layer and the vendor plugin runtime
-  do not.
+  scraping, all four adapters' mapping layers and the vendor plugin runtime and sandbox
+  have tests; every adapter's live network path and the P2P layer do not.
 - `crates/service` (headless sync daemon) and `crates/tui` are tracked in git but excluded
   from the Cargo workspace, so they are not built or tested.
 

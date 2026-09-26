@@ -11,6 +11,6 @@ extension!(
     esm = [dir "src", "runtime_js.js"],
 );
 
-pub use ops::BatchCallback;
-pub use runtime::VendorRuntime;
+pub use ops::{BatchCallback, FetchPolicy};
+pub use runtime::{PluginLimits, VendorRuntime};
 pub use types::{ConfigField, PluginInfo, PluginMetadata, VendorListing};

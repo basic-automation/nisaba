@@ -79,6 +79,14 @@ pub struct SyncableVariant {
     pub image_url: Option<String>,
     pub sort_order: i32,
     pub updated_at: String,
+    /// The vendor plugin and item a dropship variant is sourced from. A variant's
+    /// effective quantity includes that plugin's vendor stock, which each peer fetches with
+    /// its own vendor sync — without the link a receiving peer cannot attach it and counts
+    /// on-hand stock only. Absent from peers older than this field.
+    #[serde(default)]
+    pub source_plugin_id: Option<String>,
+    #[serde(default)]
+    pub source_vendor_item_id: Option<String>,
 }
 
 /// Coordination metadata for round-robin platform sync.
@@ -174,6 +182,10 @@ pub struct MergeSummary {
     pub vendor_plugins_updated: usize,
     #[serde(default)]
     pub variants_updated: usize,
+    /// Remote rows refused because their timestamp was unparseable or too far ahead of
+    /// our clock to be a real edit.
+    #[serde(default)]
+    pub rejected_timestamps: usize,
 }
 
 /// Health check response.

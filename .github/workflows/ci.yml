@@ -71,6 +71,64 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Drives the real app over WebDriver (scripts/ui-smoke.py). ubuntu-22.04 rather than
+  # latest: the harness isolates the app in an unprivileged network namespace, which
+  # 24.04's AppArmor policy forbids by default.
+  ui-smoke:
+    name: UI smoke (WebDriver)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            build-essential \
+            libssl-dev \
+            webkit2gtk-driver \
+            xvfb
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui-smoke
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run generate
+
+      - name: Build the app and the fixture seeder
+        run: cargo build -p nisaba-tauri --bin nisaba-tauri --example ui_fixture --locked
+
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      - name: Run the UI smoke test
+        run: xvfb-run -a python3 scripts/ui-smoke.py --target-dir target --screenshot ui-smoke/marketplace.png
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-smoke-screenshots
+          path: ui-smoke/
+          if-no-files-found: ignore
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
