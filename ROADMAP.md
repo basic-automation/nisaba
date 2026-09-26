@@ -70,10 +70,10 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 127 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 149 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 9 (`sandbox`). Every
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 31 (`runtime` 22, `sandbox` 9). Every
 adapter's live network path and the P2P layer are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
@@ -101,8 +101,12 @@ adapter's live network path and the P2P layer are still untested.
       row existed, so the first stock-mode push never persisted its tag and every later
       cycle re-pushed the stock mode to the live XMR Bazaar listing. Reverting the fix
       reproduces it as `version_tag: None`.
-- [ ] `crates/vendor-runtime` tests: a fixture plugin exercising `Nisaba.fetch`, `emitBatch`,
-      `log`, metadata-only reads, and the transpile path
+- [x] `crates/vendor-runtime` tests (`tests/runtime.rs`, 22): metadata reads and their
+      defaults (without calling `fetchListings`), the TypeScript transpile path and its
+      parse errors, config values that look like code arriving as inert strings, `emitBatch`
+      ordering, `Nisaba.fetch` against a loopback server (method, headers, body, non-2xx,
+      connection failure), `sleep`, `log` routing to `tracing`, and how a throwing, stalled
+      or malformed plugin surfaces as an error.
 - [x] Sandbox escape tests — assert a plugin cannot reach the filesystem, spawn a process, or
       hit the network outside `op_nisaba_fetch` (`crates/vendor-runtime/tests/sandbox.rs`,
       9). Writing them found **three real escapes**, all fixed:
