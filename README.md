@@ -208,8 +208,33 @@ The sync payload is JSON sent over the onion connection, so it is protected by T
 end-to-end encryption; peers authenticate with the shared company secret, which is kept
 in the OS keyring. There is no additional application-layer encryption of the payload,
 and it includes platform auth tokens and plugin configuration. The company's platform
-configuration is stored AES-GCM-encrypted (key derived from the secret with HKDF). Merges
-are last-writer-wins per row. See [`crates/p2p`](crates/p2p/src).
+configuration is stored AES-GCM-encrypted (key derived from the secret with HKDF). See
+[`crates/p2p`](crates/p2p/src).
+
+**Merge policy.** Each section of the payload merges independently: products, variants,
+mappings, auth tokens, the company config and logo, and registry plugins are
+last-writer-wins on `updated_at`; a deleted mapping is a tombstone that propagates;
+platform snapshots keep the newer `last_polled_at`; processed XMR orders are a union.
+Peers that hold the same data converge — a repeated sync changes nothing
+([`crates/p2p/tests/round_trip.rs`](crates/p2p/tests/round_trip.rs)).
+
+**Trust model — read this before adding a peer.** The company secret is the only
+credential. Anyone who holds it is, in effect, a full member: they receive the whole
+payload (platform auth tokens and plugin configuration included), and whatever they send
+is merged. Beyond that, the current protocol trusts what a peer says about itself:
+
+- A peer's identity is the `sender_peer_id`/`sender_onion` it puts in its own request,
+  so a secret holder can speak as any authorized peer — and doing so updates that
+  peer's recorded onion address. `/api/address-update` can repoint any peer.
+- Admin-only endpoints (adding, approving and removing peers, changing roles) check the
+  *receiving* node's role, not the caller's, so any secret holder can call them on an
+  admin's node.
+- `updated_at` comes from the sender, so a row sent with a far-future timestamp wins
+  every later merge.
+- Secret rotation is not implemented yet.
+
+Share the secret only with installs you would give your marketplace credentials to. The
+fixes are on the roadmap (Phase 5).
 
 ## Status
 

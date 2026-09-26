@@ -351,11 +351,32 @@ The capability matrix is the queue. Current state per `capabilities()`:
       for anyone who relies on today's behaviour without setting the flag, so decide
       first: gate on it (and set it where it matters), or drop the setting. The README no
       longer claims it works.
-- [ ] Peer trust model — document how a peer is authorized today and what an attacker who
-      learns the company secret can do
-- [ ] Key rotation for the company secret, with a migration path for existing peers
-- [ ] Conflict resolution for P2P merges is `merge_remote_payload`'s implicit policy; make it
-      explicit and testable
+- [x] Peer trust model — documented in the README's P2P section, from `server.rs` and
+      `sync.rs`: the company secret is the only credential; a secret holder receives
+      everything (tokens included) and anything it sends is merged. The items below are
+      what that reading found.
+- [ ] Authenticate peers individually. `/api/sync` authorizes by the `sender_peer_id` /
+      `sender_onion` in the request body — self-asserted, so any secret holder can speak as
+      any authorized peer, and a sync under another peer's id rewrites that peer's onion
+      address to the sender's (`update_peer_onion_address`). `/api/address-update` repoints
+      any peer with no check that the caller is that peer. Needs a per-peer credential:
+      Tor onion-service client authorization, or requests signed with a per-peer key.
+- [ ] Enforce roles on the caller. `check_admin` checks the receiving node's own role, so on
+      an admin's node every secret holder can add, approve and remove peers and change
+      roles. Depends on the item above — a caller's role means nothing until the caller is
+      authenticated.
+- [ ] Bound peer-supplied timestamps. Last-writer-wins compares the sender's `updated_at`
+      verbatim, so a row sent with `9999-12-31` wins every later merge and can never be
+      corrected. Reject or clamp timestamps too far in the future (and consider a
+      hybrid/logical clock instead of wall time).
+- [ ] Compare the company secret in constant time in `auth_middleware` (`==` on strings
+      today; low impact behind Tor, trivial to fix).
+- [ ] Key rotation for the company secret, with a migration path for existing peers.
+      `/api/rotate-secret` exists but is a stub that only acknowledges the request.
+- [x] Conflict resolution for P2P merges was `merge_remote_payload`'s implicit policy. It is
+      now written down per section in the README and pinned by `tests/round_trip.rs`
+      (newer-wins both ways, tombstones, idempotence, two-way convergence) — which is how
+      the convergence bug above was found.
 - [ ] Offline/rejoin behaviour after a peer has been away for longer than the retention window
 - [ ] Bounded payload sizes — a full sync payload currently grows with the whole catalog
 
