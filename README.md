@@ -162,8 +162,9 @@ What the sandbox enforces:
 - **Network** — `Nisaba.fetch` is the only way out, and it can currently reach any host;
   a per-plugin host allowlist is on the roadmap.
 - **Resources** — each `fetchListings` run gets 30 minutes of wall-clock time, a 1 GiB
-  heap and 256 MiB of listing output (every `emitBatch` plus the return value); a
-  metadata read gets 10 seconds, 128 MiB and 1 MiB. A plugin that exceeds one is stopped
+  heap, 256 MiB of listing output (every `emitBatch` plus the return value) and 64 MiB
+  per `Nisaba.fetch` response body; a metadata read gets 10 seconds, 128 MiB, and 1 MiB
+  for each of the other two. A plugin that exceeds one is stopped
   with an error naming the limit; it cannot hang or crash the app.
 
 ## P2P company sync

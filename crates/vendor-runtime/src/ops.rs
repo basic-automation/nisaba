@@ -1,12 +1,27 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use deno_core::{op2, OpState};
+
+/// The largest response body `op_nisaba_fetch` will read, in bytes. Bodies are buffered
+/// in Rust — outside the V8 heap and its limit — so they need a ceiling of their own.
+/// Without one in the `OpState`, bodies are unbounded.
+#[derive(Clone, Copy)]
+pub struct MaxResponseBytes(pub usize);
 
 /// HTTP fetch via reqwest — the only network access plugins get.
 #[op2]
 #[string]
 pub async fn op_nisaba_fetch(
+    state: Rc<RefCell<OpState>>,
     #[string] url: String,
     #[string] options_json: String,
 ) -> Result<String, deno_error::JsErrorBox> {
+    let max_body = state
+        .borrow()
+        .try_borrow::<MaxResponseBytes>()
+        .map_or(usize::MAX, |m| m.0);
+
     #[derive(serde::Deserialize)]
     struct FetchOptions {
         #[serde(default = "default_method")]
@@ -40,7 +55,7 @@ pub async fn op_nisaba_fetch(
         req = req.body(body);
     }
 
-    let resp = req
+    let mut resp = req
         .send()
         .await
         .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: {e}")))?;
@@ -54,10 +69,31 @@ pub async fn op_nisaba_fetch(
             },
         )
         .collect();
-    let body: String = resp
-        .text()
+    let too_large = || {
+        deno_error::JsErrorBox::generic(format!(
+            "Response body exceeds the plugin limit of {max_body} bytes"
+        ))
+    };
+    // Refuse up front when the server declares the size, and count while streaming for
+    // when it does not (or lies).
+    if resp
+        .content_length()
+        .is_some_and(|len| len > max_body as u64)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| deno_error::JsErrorBox::generic(format!("Body read error: {e}")))?;
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("Body read error: {e}")))?
+    {
+        if bytes.len() + chunk.len() > max_body {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
 
     let result = serde_json::json!({
         "status": status,

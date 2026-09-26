@@ -13,7 +13,7 @@ use deno_core::{
 use deno_error::JsErrorBox;
 use tracing::debug;
 
-use crate::ops::{BatchCallback, OutputBudget, PluginResult};
+use crate::ops::{BatchCallback, MaxResponseBytes, OutputBudget, PluginResult};
 use crate::types::{PluginMetadata, VendorListing};
 
 /// Custom module loader that transpiles TypeScript on the fly.
@@ -122,6 +122,8 @@ pub struct PluginLimits {
     /// Ceiling on the listing JSON handed to the host, summed over every `emitBatch` and
     /// the final result.
     pub max_output_bytes: usize,
+    /// Ceiling on any single `Nisaba.fetch` response body.
+    pub max_response_bytes: usize,
 }
 
 impl Default for PluginLimits {
@@ -132,6 +134,7 @@ impl Default for PluginLimits {
             timeout: Duration::from_secs(30 * 60),
             max_heap_bytes: 1024 * 1024 * 1024,
             max_output_bytes: 256 * 1024 * 1024,
+            max_response_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -143,6 +146,7 @@ impl PluginLimits {
             timeout: Duration::from_secs(10),
             max_heap_bytes: 128 * 1024 * 1024,
             max_output_bytes: 1024 * 1024,
+            max_response_bytes: 1024 * 1024,
         }
     }
 }
@@ -396,6 +400,7 @@ impl VendorRuntime {
             op_state.put(OutputBudget {
                 remaining: limits.max_output_bytes,
             });
+            op_state.put(MaxResponseBytes(limits.max_response_bytes));
             if let Some(cb) = batch_callback {
                 op_state.put(cb);
             }

@@ -70,11 +70,11 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 158 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 160 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 40 (`runtime` 22,
-`sandbox` 9, `limits` 9). Every adapter's live network path and the P2P layer are still
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 42 (`runtime` 22,
+`sandbox` 9, `limits` 11). Every adapter's live network path and the P2P layer are still
 untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
@@ -223,9 +223,10 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `fetchListings` and 10 s / 128 MiB / 1 MiB for a metadata read, which runs the
       module's top-level code at install time. Before this a plugin allocating in a loop
       hit V8's fatal out-of-memory handler and killed the whole app. `tests/limits.rs` (9).
-- [ ] `Nisaba.fetch` reads every response body fully into Rust memory with no cap — outside
-      the V8 heap, so the heap limit does not see it. Stream the body and refuse past a
-      per-response ceiling.
+- [x] `Nisaba.fetch` read every response body fully into Rust memory with no cap — outside
+      the V8 heap, so the heap limit never saw it. The body is now streamed and refused
+      past `PluginLimits::max_response_bytes` (64 MiB; 1 MiB during a metadata read), up
+      front when `Content-Length` declares it and while counting when it does not.
 - [ ] Surface a plugin's limits in the UI, and let the user raise the time limit per plugin
       for a catalog that genuinely takes longer than 30 minutes
 - [ ] Per-plugin allowlist of fetchable hosts, surfaced at install time

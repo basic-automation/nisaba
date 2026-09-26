@@ -2,6 +2,8 @@
 //! floods the host with output is stopped with an error — and the host survives it.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,7 @@ fn tight() -> PluginLimits {
         timeout: Duration::from_millis(500),
         max_heap_bytes: 64 * 1024 * 1024,
         max_output_bytes: 4 * 1024,
+        max_response_bytes: 16 * 1024,
     }
 }
 
@@ -187,4 +190,68 @@ async fn a_metadata_read_cannot_hang_plugin_install() {
         elapsed >= PluginLimits::metadata().timeout && elapsed < Duration::from_secs(30),
         "{elapsed:?}"
     );
+}
+
+/// Answer one request on loopback with a `size`-byte body, optionally without declaring
+/// its length (so the client has to count while streaming).
+fn serve_body(size: usize, declare_length: bool) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let head = if declare_length {
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {size}\r\nconnection: close\r\n\r\n")
+        } else {
+            "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_string()
+        };
+        let _ = stream.write_all(head.as_bytes());
+        // The client may hang up once it has seen enough; that is the point.
+        let _ = stream.write_all(&vec![b'x'; size]);
+    });
+    url
+}
+
+async fn fetch_size(url: &str) -> anyhow::Result<Vec<VendorListing>> {
+    run(
+        &format!(
+            r#"try {{ const r = await Nisaba.fetch("{url}");
+                     return [{{ vendor_item_id: "len", title: String(r.text().length) }}]; }}
+               catch (e) {{ return [{{ vendor_item_id: "err", title: e.message }}]; }}"#
+        ),
+        tight(),
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_response_body_within_the_ceiling_is_delivered_whole() {
+    let listings = fetch_size(&serve_body(16 * 1024, true)).await.unwrap();
+    assert_eq!(
+        (
+            listings[0].vendor_item_id.as_str(),
+            listings[0].title.as_str()
+        ),
+        ("len", "16384")
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_response_body_is_refused() {
+    for declare_length in [true, false] {
+        let listings = fetch_size(&serve_body(16 * 1024 + 1, declare_length))
+            .await
+            .unwrap();
+        assert_eq!(
+            listings[0].vendor_item_id, "err",
+            "declared: {declare_length}"
+        );
+        assert!(
+            listings[0].title.contains("exceeds the plugin limit"),
+            "{}",
+            listings[0].title
+        );
+    }
 }
