@@ -70,12 +70,12 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 175 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
+Current state: 180 tests. `crates/core` 46 (`config` 2, `conflict` 6, `crypto` 7, `db` 9,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
 `crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 56 (`runtime` 22,
-`sandbox` 9, `limits` 11, `network` 11, `template` 3). Every adapter's live network path
-and the P2P layer are still untested.
+`sandbox` 9, `limits` 11, `network` 11, `template` 3), `crates/tauri-app` 5 (zip importer).
+Every adapter's live network path and the P2P layer are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -217,6 +217,17 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `config_fields` option, the `VendorListing` schema (variants, recognised `extras`
       keys), paging, batching, 429/5xx retries, and throw-versus-skip. It is kept honest by
       `tests/template.rs` (3), which runs it against a fake supplier API on loopback.
+- [x] Harden the plugin importer (`extract_zip_to_files_map`). It unpacked every entry
+      into memory with no cap, so a few kilobytes of zip bomb could exhaust memory at import;
+      it now stops at 1,000 entries and 64 MiB of *decompressed* data (counted while
+      reading, since header sizes are attacker-supplied), and plugins submitted by URL are
+      capped at a 64 MiB download. Entry names with a root, `..` or a backslash (a separator
+      on a Windows peer) are refused with a reason — `ZipFile::enclosed_name` alone would
+      not do, since it quietly turns `/abs` into `abs`. The root-folder strip also no longer
+      needs an explicit directory entry, which many zip tools omit; such a plugin used to
+      fail with "must contain an index.ts". Importer tests: 5, the first in `nisaba-tauri`.
+      Nisaba never calls `ZipArchive::extract`, so the symlink zip-slip in the `zip` crate
+      (CVE-2025-29787) does not reach it. https://github.com/advisories/GHSA-94vh-gphv-8pm8
 - [ ] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
       writes the whole config map — API tokens included — to
       `vendor_plugin_registry.config_json` in the unencrypted database, and that column is
@@ -313,6 +324,11 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [ ] Pin `createUpdaterArtifacts` to the v2 format rather than `"v1Compatible"` when the
       release workflow lands — Tauri documents the setting as removed in v3.
       https://v2.tauri.app/plugin/updater/
+- [ ] Track the Tauri 3 alphas before they land on a stable line: `v3.0.0-alpha.2`
+      (2026-09-21) renames plugin APIs (`js_init_script` → `initialization_script`,
+      `Plugin::extend_api` → `Plugin::run_invoke_handler`) and removes
+      `Invoke::state`/`state_ref`. Nisaba stays on Tauri 2 until 3 is stable; this is the
+      migration checklist's first entry. https://github.com/tauri-apps/tauri/releases
 - [ ] `.updater/latest.json` published from a real release workflow
 - [x] A `release.yml` that builds **Linux, Windows and macOS** bundles and attaches them to
       the tag's GitHub release — one matrix, `fail-fast: false`, Linux on `ubuntu-22.04` so
@@ -321,10 +337,20 @@ The capability matrix is the queue. Current state per `capabilities()`:
       three without publishing, so the matrix can be checked without cutting a release.
       Owner directive 2026-09-25: every release covers all three platforms, and a release
       missing one is a failed release rather than a partial one.
-- [ ] Prove the release matrix green. **No macOS or Windows bundle has ever been built for
-      this project**, so each leg is unverified: macOS needs the universal target to link
-      and will be unsigned/unnotarized (Gatekeeper will warn), and Windows needs the WiX/NSIS
-      bundlers to run. Dispatch the workflow with `publish` off and fix what breaks.
+- [x] Prove the release matrix green. Build-only dispatch run 36218681088 (2026-09-26, on
+      `master` at `5fd136d`) passed on all three legs and uploaded every bundle: Linux
+      `.deb`/`.rpm`/`.AppImage`, Windows `.msi` and NSIS `.exe`, macOS universal `.dmg` —
+      the first bundles ever built for this project. They are unsigned (no updater key, no
+      Apple identity), so there are no `.sig` files.
+      https://github.com/basic-automation/nisaba/actions/runs/36218681088
+- [ ] The tag-push path of `release.yml` has never run. As first written it could not have
+      worked — each leg ran `gh release upload` against a release nothing created — and it
+      uploaded per leg, so one failed leg would have left a published two-platform
+      release. Now each leg uploads into a *draft* (the first creates it, pre-release for
+      `v0.*`) and a final `publish` job, which only runs when every leg succeeded, checks
+      the draft holds an AppImage, a `.deb`, an `.msi` and a `.dmg` before publishing it.
+      The shell was syntax-checked and the asset check dry-run against the real bundle
+      names; the path itself is unverified until the first `v*` tag.
 - [x] `bundle` in `tauri.conf.json` had **no `active` flag, which defaults to `false`** —
       `tauri-utils`' `BundleConfig::active` is `#[serde(default)]` on a `bool`, so
       `cargo tauri build` produced only the executable and never a single bundle, on any
@@ -366,7 +392,13 @@ The capability matrix is the queue. Current state per `capabilities()`:
       sure secrets are excluded
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults
 - [ ] Dependency freshness pass — `reqwest 0.13`, `deno_core 0.389`, `zip 8` and Nuxt 3.16+
-      all move fast; keep them current and green. `turso` is the exception: 0.5.0 is still
+      all move fast; keep them current and green. `deno_core` is now 0.412 (2026-09-16), 23
+      releases ahead of the tree, and its repo was archived in April 2026 and merged into
+      `denoland/deno` — watch that repo's changelog for breaking changes, not the old one.
+      The upgrade must keep `tests/sandbox.rs` and `tests/limits.rs` green: the op surface,
+      `op_import_sync` and the heap-limit callback are exactly what moves between releases.
+      https://docs.rs/deno_core/latest/deno_core/struct.RuntimeOptions.html
+      https://github.com/denoland/deno_core `turso` is the exception: 0.5.0 is still
       the newest release, and everything published since is `0.8.0-pre.*`, so staying on 0.5
       is correct until a stable 0.8 exists. https://github.com/tursodatabase/turso/releases
 - [ ] A scheduled `cargo update` / `cargo audit` CI job. This run found two dependency
