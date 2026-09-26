@@ -236,6 +236,8 @@ def main():
         if not os.path.exists(path):
             raise SystemExit(f"missing {path}; build it first (see the docstring)")
     workdir = args.workdir or tempfile.mkdtemp(prefix="nisaba-ui-smoke-")
+    if args.screenshot:
+        os.makedirs(os.path.dirname(os.path.abspath(args.screenshot)), exist_ok=True)
     smoke(app, fixture, workdir, args.screenshot and os.path.abspath(args.screenshot))
 
 
