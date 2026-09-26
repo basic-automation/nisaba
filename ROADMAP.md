@@ -70,11 +70,11 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ## Phase 1 — Test and verification foundation
 
-Current state: 118 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
+Current state: 127 tests. `crates/core` 45 (`config` 2, `conflict` 6, `crypto` 7, `db` 8,
 `sync_engine` 22), `crates/platform-xmrbazaar` 24 (`edit_form` 15, `sales_page` 9),
 `crates/platform-ebay` 21 (`mapping`), `crates/platform-squarespace` 15 (`mapping`),
-`crates/platform-amazon` 13 (`mapping`). Every adapter's live network path, the P2P layer
-and the plugin runtime are still untested.
+`crates/platform-amazon` 13 (`mapping`), `crates/vendor-runtime` 9 (`sandbox`). Every
+adapter's live network path and the P2P layer are still untested.
 
 - [x] Fixture-based tests for each adapter's `mapping.rs`, over recorded response *shapes*:
       Squarespace 15 (the products/inventory join, unlimited variants, the variant-name
@@ -103,8 +103,27 @@ and the plugin runtime are still untested.
       reproduces it as `version_tag: None`.
 - [ ] `crates/vendor-runtime` tests: a fixture plugin exercising `Nisaba.fetch`, `emitBatch`,
       `log`, metadata-only reads, and the transpile path
-- [ ] Sandbox escape tests — assert a plugin cannot reach the filesystem, spawn a process, or
-      hit the network outside `op_nisaba_fetch`
+- [x] Sandbox escape tests — assert a plugin cannot reach the filesystem, spawn a process, or
+      hit the network outside `op_nisaba_fetch` (`crates/vendor-runtime/tests/sandbox.rs`,
+      9). Writing them found **three real escapes**, all fixed:
+      - *Arbitrary file write at install time.* `write_plugin_files` joined each plugin file
+        name onto its temp dir unchecked, and the zip importer passes entry names through
+        raw, so a zip entry named `../…` or an absolute path was written anywhere the user
+        can write — during the metadata read, before the user ever ran the plugin. File
+        names must now be plain relative paths, checked before anything touches the disk.
+      - *Arbitrary module read at run time.* The module loader resolved any `file://`
+        specifier, so `await import("file:///…")` read any JS/TS module on disk and handed
+        its exports to plugin code, one `Nisaba.fetch` away from exfiltration; `../` also
+        reached other plugins' files in the shared temp dir. The loader is now confined to
+        the plugin's own directory (canonicalized, so `..` and symlinks cannot walk out),
+        and every run gets a fresh directory of its own.
+      - *Any plugin could abort the app.* `Deno.core.ops` exposed every deno_core built-in
+        op to plugin code, including `op_panic`, which panics across the V8 boundary where
+        unwinding is impossible — one call `SIGABRT`ed the whole process. The shim now
+        captures the ops it needs and deletes `Deno` from the global scope, so `Nisaba` is
+        the plugin's only API.
+      The tests pin that API (`Nisaba`'s keys and the extension's op list), so widening the
+      sandbox has to be a deliberate change to them.
 - [ ] `crates/p2p` round-trip test: `load_full_sync_payload` → encrypt → `merge_remote_payload`
       over loopback, without Tor
 - [x] Migration tests: apply every step to an empty DB and assert the resulting schema —
