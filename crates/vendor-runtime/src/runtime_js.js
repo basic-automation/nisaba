@@ -65,6 +65,36 @@
     },
   };
 
+  // Plugin authors reach for console.log; deno_core's console prints to the host
+  // process's stdout, which nobody sees in the desktop app. Route it into the same log as
+  // Nisaba.log instead.
+  const formatArgs = (args) =>
+    args
+      .map((arg) => {
+        if (typeof arg === "string") return arg;
+        try {
+          const json = JSON.stringify(arg);
+          if (json !== undefined) return json;
+        } catch {
+          // cyclic, or a BigInt - fall through
+        }
+        try {
+          return String(arg);
+        } catch {
+          return "[unprintable]";
+        }
+      })
+      .join(" ");
+  const logAt = (level) => (...args) => ops.op_nisaba_log(level, formatArgs(args));
+  globalThis.console = {
+    log: logAt("info"),
+    info: logAt("info"),
+    debug: logAt("debug"),
+    trace: logAt("trace"),
+    warn: logAt("warn"),
+    error: logAt("error"),
+  };
+
   // How the host's wrapper module hands the plugin's result back to Rust. Reachable by
   // plugin code too, which gains nothing: it can already choose what it returns.
   Object.defineProperty(globalThis, "__nisabaSetResult", {

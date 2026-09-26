@@ -552,6 +552,9 @@ fn log_routes_to_tracing_under_the_vendor_plugin_target() {
             Nisaba.log.trace("t-msg"); Nisaba.log.debug("d-msg"); Nisaba.log.info("i-msg");
             Nisaba.log.warn("w-msg"); Nisaba.log.error("e-msg");
             Nisaba.log.info({ not: "a string" }); Nisaba.log.info(undefined);
+            console.log("c-log", { n: 1 }, [2]); console.warn("c-warn");
+            console.error("c-error"); console.debug("c-debug");
+            const cyclic = {}; cyclic.self = cyclic; console.info("c-cyclic", cyclic, 10n);
             return [];
         "#))
             .unwrap();
@@ -566,6 +569,12 @@ fn log_routes_to_tracing_under_the_vendor_plugin_target() {
         ("ERROR", "e-msg"),
         ("INFO", "[object Object]"),
         ("INFO", "undefined"),
+        // console.* lands in the same place, arguments joined and objects as JSON.
+        ("INFO", r#"c-log {"n":1} [2]"#),
+        ("WARN", "c-warn"),
+        ("ERROR", "c-error"),
+        ("DEBUG", "c-debug"),
+        ("INFO", "c-cyclic [object Object] 10"),
     ] {
         assert!(
             out.lines()

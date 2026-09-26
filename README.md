@@ -130,6 +130,7 @@ A vendor plugin is a TypeScript module executed in a locked-down Deno runtime â€
 ambient network or filesystem access, only what Nisaba injects as a `Nisaba` global:
 `Nisaba.fetch`, `Nisaba.sleep`, `Nisaba.log.{trace,debug,info,warn,error}`, and
 `Nisaba.emitBatch` for streaming listings back to the host as they are scraped.
+`console.log` and friends write to the same log as `Nisaba.log`.
 
 A plugin exports two things:
 

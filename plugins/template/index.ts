@@ -31,7 +31,8 @@ declare const Nisaba: {
   /** Hand listings to the app as they are built, so the UI can show progress on a long
    *  import. Batches are for display; the array `fetchListings` returns is the result. */
   emitBatch(listings: VendorListing[]): void
-  /** Lines in the app's log under the `vendor_plugin` target. */
+  /** Lines in the app's log under the `vendor_plugin` target. `console.log` and friends
+   *  write there too. */
   log: Record<'trace' | 'debug' | 'info' | 'warn' | 'error', (msg: unknown) => void>
 }
 
