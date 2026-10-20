@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use tracing::{debug, info};
 use turso::params::Params;
 use turso::{params, Builder, Connection, Database, Error as TursoError};
@@ -28,8 +30,39 @@ fn is_retryable(e: &TursoError) -> bool {
         || matches!(e, TursoError::Error(msg) if msg.contains("conflict") || msg.contains("database is locked"))
 }
 
+/// Whether two paths name the same database file.
+///
+/// Both paths are canonicalized, so `./nisaba.db` and its absolute form (or a
+/// symlink to it) compare equal. A path that can't be resolved — usually one
+/// that doesn't exist — is compared as written.
+pub fn is_same_db_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Delete a company's database file after the company has left the registry.
+///
+/// Companies migrated from the single-company layout are registered with the
+/// app database's own path, because their data lives in it. Deleting that file
+/// would take the company registry and every other company's registration with
+/// it, so when `company_db` is the app database nothing is deleted and this
+/// returns `Ok(false)`. A file that is already gone counts as deleted.
+pub fn remove_company_db_file(company_db: &Path, app_db: &Path) -> std::io::Result<bool> {
+    if is_same_db_file(company_db, app_db) {
+        return Ok(false);
+    }
+    match std::fs::remove_file(company_db) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 pub struct Db {
     db: Database,
+    path: String,
 }
 
 impl Db {
@@ -69,9 +102,17 @@ impl Db {
             }
         };
 
-        let me = Self { db };
+        let me = Self {
+            db,
+            path: path.to_string(),
+        };
         me.apply_db_pragmas().await?;
         Ok(me)
+    }
+
+    /// The path this database was opened with, as given to [`Db::open`].
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     /// Set database-level pragmas (only needs to run once per database file).
@@ -4124,5 +4165,78 @@ mod tests {
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].quantity, 10);
         assert_eq!(history[2].quantity, 5);
+    }
+
+    // ── Leaving a company ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn leaving_a_company_registered_with_the_app_db_keeps_the_app_db() {
+        // A legacy-migrated company is registered with the app DB's own path.
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        let app_db = Db::open(app_path.to_str().unwrap()).await.unwrap();
+        app_db.migrate().await.unwrap();
+        app_db
+            .register_company(
+                "legacy",
+                "Legacy",
+                "admin",
+                "hash",
+                app_path.to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        app_db
+            .register_company("other", "Other", "member", "hash", "elsewhere.db")
+            .await
+            .unwrap();
+
+        // What `leave_company` does: look up the path, unregister, delete.
+        let registry = app_db.list_registered_companies().await.unwrap();
+        let legacy = registry.iter().find(|e| e.id == "legacy").unwrap();
+        app_db.unregister_company("legacy").await.unwrap();
+        let deleted =
+            remove_company_db_file(Path::new(&legacy.db_path), Path::new(app_db.path())).unwrap();
+
+        assert!(!deleted);
+        assert!(app_path.exists());
+        let remaining = app_db.list_registered_companies().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "other");
+    }
+
+    #[test]
+    fn the_app_db_is_recognised_under_another_spelling_of_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        std::fs::write(&app_path, b"app").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let alias = dir.path().join("sub").join("..").join("nisaba.db");
+
+        assert!(!remove_company_db_file(&alias, &app_path).unwrap());
+        assert!(app_path.exists());
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.db");
+            std::os::unix::fs::symlink(&app_path, &link).unwrap();
+            assert!(!remove_company_db_file(&link, &app_path).unwrap());
+            assert!(app_path.exists());
+        }
+    }
+
+    #[test]
+    fn leaving_a_company_with_its_own_db_deletes_only_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        let company_path = dir.path().join("company.db");
+        std::fs::write(&app_path, b"app").unwrap();
+        std::fs::write(&company_path, b"company").unwrap();
+
+        assert!(remove_company_db_file(&company_path, &app_path).unwrap());
+        assert!(!company_path.exists());
+        assert!(app_path.exists());
+        // Already gone counts as deleted.
+        assert!(remove_company_db_file(&company_path, &app_path).unwrap());
     }
 }
