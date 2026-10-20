@@ -180,6 +180,16 @@ pub struct Db {
     path: String,
 }
 
+/// An XMR Bazaar order consumed by a sync cycle: the sale it carried has been
+/// applied to canonical stock, so the order may be marked processed.
+#[derive(Debug, Clone)]
+pub struct ConsumedXmrOrder {
+    pub order_id: String,
+    pub product_id: Option<String>,
+    pub listing_id: String,
+    pub quantity: i64,
+}
+
 impl Db {
     /// Open (or create) a local database at the given path.
     ///
@@ -2448,6 +2458,80 @@ impl Db {
         )
         .await?;
         Ok(())
+    }
+
+    /// Update a product's canonical quantity and mark the XMR orders whose
+    /// sales that write applied as processed, all in a single transaction.
+    ///
+    /// The order marks and the stock write share one `BEGIN IMMEDIATE ...
+    /// COMMIT`: either both land or neither does. Marking an order processed
+    /// in an earlier, separate write is what used to lose sales — a cycle
+    /// that failed between the mark and the quantity update left the order
+    /// consumed while the stock was never decremented, so the next cycle
+    /// skipped the sale. Pass `None` for `new_quantity` when the sale was
+    /// folded into the resolution without changing the quantity (e.g. stock
+    /// was already at zero): the orders are still consumed, in their own
+    /// transaction, so they cannot be re-applied by the next cycle.
+    pub async fn apply_stock_and_consume_xmr_sales(
+        &self,
+        product_id: &str,
+        new_quantity: Option<i64>,
+        sales: &[ConsumedXmrOrder],
+    ) -> Result<(), SyncError> {
+        let mut stmts: Vec<(&str, Params)> = Vec::with_capacity(sales.len() + 1);
+        if let Some(quantity) = new_quantity {
+            stmts.push((
+                "UPDATE products SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
+                to_params(params![quantity, product_id]),
+            ));
+        }
+        for sale in sales {
+            stmts.push((
+                "INSERT OR IGNORE INTO xmr_processed_orders (order_id, product_id, listing_id, quantity)
+                 VALUES (?1, ?2, ?3, ?4)",
+                to_params(params![
+                    sale.order_id.as_str(),
+                    sale.product_id.as_deref(),
+                    sale.listing_id.as_str(),
+                    sale.quantity
+                ]),
+            ));
+        }
+        self.execute_writes(&stmts).await
+    }
+
+    /// Variant-group sibling of [`Db::apply_stock_and_consume_xmr_sales`]:
+    /// update a variant's canonical quantity and mark the XMR orders whose
+    /// sales that write applied as processed, all in a single transaction.
+    /// Pass `None` for `new_quantity` when the sale was folded into the
+    /// resolution without changing the quantity: the orders are still
+    /// consumed, in their own transaction.
+    pub async fn apply_variant_stock_and_consume_xmr_sales(
+        &self,
+        variant_id: &str,
+        new_quantity: Option<i64>,
+        sales: &[ConsumedXmrOrder],
+    ) -> Result<(), SyncError> {
+        let mut stmts: Vec<(&str, Params)> = Vec::with_capacity(sales.len() + 1);
+        if let Some(quantity) = new_quantity {
+            stmts.push((
+                "UPDATE product_variants SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
+                to_params(params![quantity, variant_id]),
+            ));
+        }
+        for sale in sales {
+            stmts.push((
+                "INSERT OR IGNORE INTO xmr_processed_orders (order_id, product_id, listing_id, quantity)
+                 VALUES (?1, ?2, ?3, ?4)",
+                to_params(params![
+                    sale.order_id.as_str(),
+                    sale.product_id.as_deref(),
+                    sale.listing_id.as_str(),
+                    sale.quantity
+                ]),
+            ));
+        }
+        self.execute_writes(&stmts).await
     }
 
     pub async fn update_snapshot_version_tag(
