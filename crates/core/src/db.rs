@@ -15,7 +15,7 @@ use crate::types::{
     VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 20;
+const CURRENT_SCHEMA_VERSION: i64 = 21;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -513,7 +513,7 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008`
     ///   (repairing the columns migration 007 dropped when it rebuilt
-    ///   `platform_mappings`), `010`, `012`, `014`–`016` and `018`–`019` are
+    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019` and `021` are
     ///   all inline. The inline step is the single authority for these
     ///   numbers: an orphan `.sql` file with an inline step's number must not
     ///   exist (three such orphans were deleted by N-3.2).
@@ -967,6 +967,36 @@ impl Db {
                 )
                 .await?;
                 debug!("Applied migration 020: stock_ledger table + opening backfill");
+            }
+            21 => {
+                // Variant-aware snapshots: one row per (product, platform,
+                // variant) so restock detection and push decisions are keyed
+                // per variant listing instead of per product. The old
+                // (product, platform) rows are kept as the product-level
+                // (variant_id = '') rows, so products without variant mappings
+                // behave exactly as before.
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS platform_snapshots_v2 (
+                        id                  INTEGER PRIMARY KEY,
+                        product_id          TEXT NOT NULL REFERENCES products(id),
+                        platform            TEXT NOT NULL,
+                        variant_id          TEXT NOT NULL DEFAULT '',
+                        last_known_quantity INTEGER NOT NULL,
+                        last_polled_at      TEXT NOT NULL,
+                        last_pushed_at      TEXT,
+                        version_tag         TEXT
+                    );
+                    INSERT OR IGNORE INTO platform_snapshots_v2
+                        (id, product_id, platform, variant_id, last_known_quantity, last_polled_at, last_pushed_at, version_tag)
+                        SELECT id, product_id, platform, '', last_known_quantity, last_polled_at, last_pushed_at, version_tag
+                        FROM platform_snapshots;
+                    DROP TABLE platform_snapshots;
+                    ALTER TABLE platform_snapshots_v2 RENAME TO platform_snapshots;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_product_platform_variant
+                        ON platform_snapshots(product_id, platform, variant_id);",
+                )
+                .await?;
+                debug!("Applied migration 021: variant-aware platform_snapshots");
             }
             _ => {}
         }
@@ -1682,26 +1712,29 @@ impl Db {
         &self,
         product_id: &str,
         platform: &str,
+        variant_id: Option<&str>,
     ) -> Result<Option<PlatformSnapshot>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, last_known_quantity, last_polled_at, last_pushed_at, version_tag
-                 FROM platform_snapshots WHERE product_id = ?1 AND platform = ?2",
-                params![product_id, platform],
+                "SELECT id, product_id, platform, variant_id, last_known_quantity, last_polled_at, last_pushed_at, version_tag
+                 FROM platform_snapshots WHERE product_id = ?1 AND platform = ?2 AND variant_id = ?3",
+                params![product_id, platform, variant_id.unwrap_or("")],
             )
             .await?;
 
         if let Some(row) = rows.next().await? {
+            let stored_variant: String = row.get::<String>(3)?;
             Ok(Some(PlatformSnapshot {
                 id: row.get::<i64>(0)?,
                 product_id: row.get::<String>(1)?,
                 platform: Platform::from_str_loose(&row.get::<String>(2)?)
                     .unwrap_or(Platform::Ebay),
-                last_known_quantity: row.get::<i64>(3)?,
-                last_polled_at: row.get::<String>(4)?,
-                last_pushed_at: row.get::<Option<String>>(5)?,
-                version_tag: row.get::<Option<String>>(6)?,
+                variant_id: (!stored_variant.is_empty()).then_some(stored_variant),
+                last_known_quantity: row.get::<i64>(4)?,
+                last_polled_at: row.get::<String>(5)?,
+                last_pushed_at: row.get::<Option<String>>(6)?,
+                version_tag: row.get::<Option<String>>(7)?,
             }))
         } else {
             Ok(None)
@@ -1712,15 +1745,22 @@ impl Db {
         &self,
         product_id: &str,
         platform: &str,
+        variant_id: Option<&str>,
         quantity: i64,
         polled_at: &str,
     ) -> Result<(), SyncError> {
         self.execute_write(
-            "INSERT INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(product_id, platform) DO UPDATE
-             SET last_known_quantity = ?3, last_polled_at = ?4",
-            params![product_id, platform, quantity, polled_at],
+            "INSERT INTO platform_snapshots (product_id, platform, variant_id, last_known_quantity, last_polled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(product_id, platform, variant_id) DO UPDATE
+             SET last_known_quantity = ?4, last_polled_at = ?5",
+            params![
+                product_id,
+                platform,
+                variant_id.unwrap_or(""),
+                quantity,
+                polled_at
+            ],
         )
         .await?;
         Ok(())
@@ -1730,14 +1770,21 @@ impl Db {
         &self,
         product_id: &str,
         platform: &str,
+        variant_id: Option<&str>,
         quantity: i64,
         pushed_at: &str,
     ) -> Result<(), SyncError> {
         self.execute_write(
             "UPDATE platform_snapshots
              SET last_known_quantity = ?1, last_pushed_at = ?2
-             WHERE product_id = ?3 AND platform = ?4",
-            params![quantity, pushed_at, product_id, platform],
+             WHERE product_id = ?3 AND platform = ?4 AND variant_id = ?5",
+            params![
+                quantity,
+                pushed_at,
+                product_id,
+                platform,
+                variant_id.unwrap_or("")
+            ],
         )
         .await?;
         Ok(())
@@ -2395,12 +2442,13 @@ impl Db {
         &self,
         product_id: &str,
         platform: &str,
+        variant_id: Option<&str>,
         version_tag: &str,
     ) -> Result<(), SyncError> {
         self.execute_write(
             "UPDATE platform_snapshots SET version_tag = ?1
-             WHERE product_id = ?2 AND platform = ?3",
-            params![version_tag, product_id, platform],
+             WHERE product_id = ?2 AND platform = ?3 AND variant_id = ?4",
+            params![version_tag, product_id, platform, variant_id.unwrap_or("")],
         )
         .await?;
         Ok(())
@@ -2447,7 +2495,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, last_known_quantity, last_polled_at, last_pushed_at, version_tag
+                "SELECT id, product_id, platform, variant_id, last_known_quantity, last_polled_at, last_pushed_at, version_tag
                  FROM platform_snapshots",
                 (),
             )
@@ -2455,15 +2503,17 @@ impl Db {
 
         let mut snapshots = Vec::new();
         while let Some(row) = rows.next().await? {
+            let stored_variant: String = row.get::<String>(3)?;
             snapshots.push(PlatformSnapshot {
                 id: row.get::<i64>(0)?,
                 product_id: row.get::<String>(1)?,
                 platform: Platform::from_str_loose(&row.get::<String>(2)?)
                     .unwrap_or(Platform::Ebay),
-                last_known_quantity: row.get::<i64>(3)?,
-                last_polled_at: row.get::<String>(4)?,
-                last_pushed_at: row.get::<Option<String>>(5)?,
-                version_tag: row.get::<Option<String>>(6)?,
+                variant_id: (!stored_variant.is_empty()).then_some(stored_variant),
+                last_known_quantity: row.get::<i64>(4)?,
+                last_polled_at: row.get::<String>(5)?,
+                last_pushed_at: row.get::<Option<String>>(6)?,
+                version_tag: row.get::<Option<String>>(7)?,
             });
         }
         Ok(snapshots)
@@ -5121,7 +5171,7 @@ mod tests {
         db.insert_mapping("p-del", "ebay", "ITEM-1", Some("SKU-v-del"), "v-del")
             .await
             .unwrap();
-        db.upsert_snapshot("p-del", "ebay", 3, "2026-10-20 00:00:00")
+        db.upsert_snapshot("p-del", "ebay", None, 3, "2026-10-20 00:00:00")
             .await
             .unwrap();
         db.record_inventory_history("p-del", 3, "cycle-1")
@@ -5331,19 +5381,105 @@ mod tests {
         };
         db.insert_product(&product).await.unwrap();
 
-        db.upsert_snapshot("p1", "ebay", 10, "2025-01-01 00:00:00")
+        db.upsert_snapshot("p1", "ebay", None, 10, "2025-01-01 00:00:00")
             .await
             .unwrap();
 
-        let snap = db.get_snapshot("p1", "ebay").await.unwrap().unwrap();
+        let snap = db.get_snapshot("p1", "ebay", None).await.unwrap().unwrap();
         assert_eq!(snap.last_known_quantity, 10);
 
         // Update via upsert
-        db.upsert_snapshot("p1", "ebay", 8, "2025-01-01 00:05:00")
+        db.upsert_snapshot("p1", "ebay", None, 8, "2025-01-01 00:05:00")
             .await
             .unwrap();
-        let snap = db.get_snapshot("p1", "ebay").await.unwrap().unwrap();
+        let snap = db.get_snapshot("p1", "ebay", None).await.unwrap().unwrap();
         assert_eq!(snap.last_known_quantity, 8);
+    }
+
+    #[tokio::test]
+    async fn test_snapshots_are_keyed_per_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        let product = Product {
+            id: "p1".to_string(),
+            canonical_sku: "SKU-P1".to_string(),
+            name: "Product 1".to_string(),
+            quantity: 10,
+            low_stock_threshold: None,
+            is_tracked: true,
+            has_variants: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.insert_product(&product).await.unwrap();
+
+        // Two variants on the same platform must hold independent snapshots.
+        db.upsert_snapshot("p1", "ebay", Some("va"), 3, "2025-01-01 00:00:00")
+            .await
+            .unwrap();
+        db.upsert_snapshot("p1", "ebay", Some("vb"), 7, "2025-01-01 00:00:00")
+            .await
+            .unwrap();
+        db.upsert_snapshot("p1", "ebay", None, 10, "2025-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        let sa = db
+            .get_snapshot("p1", "ebay", Some("va"))
+            .await
+            .unwrap()
+            .unwrap();
+        let sb = db
+            .get_snapshot("p1", "ebay", Some("vb"))
+            .await
+            .unwrap()
+            .unwrap();
+        let sn = db.get_snapshot("p1", "ebay", None).await.unwrap().unwrap();
+        assert_eq!(sa.last_known_quantity, 3);
+        assert_eq!(sa.variant_id.as_deref(), Some("va"));
+        assert_eq!(sb.last_known_quantity, 7);
+        assert_eq!(sb.variant_id.as_deref(), Some("vb"));
+        assert_eq!(sn.last_known_quantity, 10);
+        assert_eq!(sn.variant_id, None);
+
+        // Updating one variant's snapshot must not touch the others.
+        db.upsert_snapshot("p1", "ebay", Some("va"), 2, "2025-01-01 00:05:00")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_snapshot("p1", "ebay", Some("va"))
+                .await
+                .unwrap()
+                .unwrap()
+                .last_known_quantity,
+            2
+        );
+        assert_eq!(
+            db.get_snapshot("p1", "ebay", Some("vb"))
+                .await
+                .unwrap()
+                .unwrap()
+                .last_known_quantity,
+            7
+        );
+        assert_eq!(
+            db.get_snapshot("p1", "ebay", None)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_known_quantity,
+            10
+        );
+
+        // The p2p export path carries the variant id through.
+        let all = db.list_all_snapshots().await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().any(|s| s.variant_id.as_deref() == Some("va")));
+        assert!(all.iter().any(|s| s.variant_id.as_deref() == Some("vb")));
+        assert!(all.iter().any(|s| s.variant_id.is_none()));
     }
 
     #[tokio::test]
