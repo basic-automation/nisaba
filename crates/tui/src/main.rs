@@ -573,7 +573,6 @@ fn handle_logs_key(app: &mut App, key: crossterm::event::KeyEvent) {
 fn apply_config_field(config: &mut AppConfig, key: &str, value: &str) {
     match key {
         "general.sync_schedule" => config.general.sync_schedule = value.to_string(),
-        "general.log_level" => config.general.log_level = value.to_string(),
         "general.max_retries" => {
             if let Ok(v) = value.parse() {
                 config.general.max_retries = v;
