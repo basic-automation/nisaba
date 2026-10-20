@@ -420,7 +420,7 @@ anything on the platform (see "Writes that report success without writing" below
 - [ ] A fifth adapter would prove the trait is actually general. Superseded: the next
       adapter is WooCommerce, then Shopify, built as marketplace plugins (Phase 3,
       *Plugin kinds after 1.0*; *Services and integrations*).
-- [ ] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
+- [x] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
       callback accepts a `code` from any page the auth window reaches (~279–283). Add and
       check `state`.
 - [ ] Four `SyncError` variants are never constructed: `RateLimited`, `EbayRevisionLimit`,

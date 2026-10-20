@@ -118,14 +118,21 @@ async fn run_ebay_auth(config: &AppConfig, db: Arc<Db>) -> Result<()> {
     println!("1. Open this URL in your browser:\n");
     println!("   {}\n", adapter.authorization_url());
     println!("2. Authorize the application");
-    println!("3. You'll be redirected to a URL containing a 'code' parameter");
+    println!("3. You'll be redirected to a URL containing 'code' and 'state' parameters");
     println!("4. Paste the authorization code below:\n");
 
     let mut code = String::new();
     std::io::stdin().read_line(&mut code)?;
     let code = code.trim();
 
-    adapter.complete_auth(code).await?;
+    println!("5. Paste the 'state' value from the same redirect URL (it must match");
+    println!("   the one issued with the authorize URL above):\n");
+
+    let mut returned_state = String::new();
+    std::io::stdin().read_line(&mut returned_state)?;
+    let returned_state = returned_state.trim();
+
+    adapter.complete_auth(code, Some(returned_state)).await?;
     println!("\neBay authentication complete! Tokens saved to database.");
 
     Ok(())

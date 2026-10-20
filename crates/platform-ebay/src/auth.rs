@@ -1,5 +1,8 @@
+use std::sync::Mutex;
+
 use nisaba_core::error::SyncError;
 use nisaba_core::types::Platform;
+use oauth2::CsrfToken;
 use reqwest::Client;
 use tracing::{debug, info};
 
@@ -17,6 +20,9 @@ pub struct EbayAuth {
     client_secret: String,
     redirect_uri: String,
     is_sandbox: bool,
+    /// `state` issued with the most recent authorize URL, awaiting the
+    /// redirect callback. Consumed single-use by [`EbayAuth::verify_callback_state`].
+    pending_state: Mutex<Option<String>>,
 }
 
 impl EbayAuth {
@@ -31,6 +37,7 @@ impl EbayAuth {
             client_secret,
             redirect_uri,
             is_sandbox: environment != "production",
+            pending_state: Mutex::new(None),
         }
     }
 
@@ -51,14 +58,56 @@ impl EbayAuth {
     }
 
     /// Generate the URL the user must visit for initial OAuth authorization.
+    ///
+    /// Each call issues a fresh, unguessable `state` token (128 bits of
+    /// entropy), stores it as the expected value for this attempt, and
+    /// includes it in the URL. The redirect callback must echo the same
+    /// `state`; see [`EbayAuth::verify_callback_state`].
     pub fn authorization_url(&self) -> String {
+        let state = CsrfToken::new_random();
+        let state_str = state.secret().to_owned();
+        *self
+            .pending_state
+            .lock()
+            .expect("eBay OAuth state lock poisoned") = Some(state_str.clone());
         format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}",
+            "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
             self.auth_url(),
             urlencoding(&self.client_id),
             urlencoding(&self.redirect_uri),
             urlencoding(SCOPES),
+            urlencoding(&state_str),
         )
+    }
+
+    /// Check the `state` value eBay returned on the redirect callback against
+    /// the value stored when the authorize URL was issued for this attempt.
+    ///
+    /// The stored value is consumed single-use — it is taken on every call,
+    /// match or not — so a captured callback URL cannot be replayed against a
+    /// later attempt. Returns `Ok` only when a state was issued and the
+    /// returned value equals it (constant-time comparison).
+    pub fn verify_callback_state(&self, returned: Option<&str>) -> Result<(), SyncError> {
+        let expected = self
+            .pending_state
+            .lock()
+            .expect("eBay OAuth state lock poisoned")
+            .take();
+        let matches = match (expected.as_deref(), returned) {
+            (Some(expected), Some(returned)) => {
+                constant_time_eq(expected.as_bytes(), returned.as_bytes())
+            }
+            _ => false,
+        };
+        if matches {
+            Ok(())
+        } else {
+            Err(SyncError::AuthError {
+                platform: Platform::Ebay,
+                message: "eBay OAuth state mismatch: the authorization response did not match the issued request"
+                    .to_string(),
+            })
+        }
     }
 
     /// Exchange an authorization code for an access + refresh token.
@@ -158,4 +207,93 @@ fn urlencoding(s: &str) -> String {
             _ => format!("%{:02X}", b),
         })
         .collect()
+}
+
+/// Compare two byte strings without short-circuiting, so the comparison
+/// time does not leak how much of the state value an attacker guessed.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_auth() -> EbayAuth {
+        EbayAuth::new(
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            "https://example.com/callback".to_string(),
+            "sandbox",
+        )
+    }
+
+    /// Extract the `state` query parameter from an authorize URL.
+    fn state_param(url: &str) -> Option<String> {
+        url.split('?')
+            .nth(1)?
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| *key == "state")
+            .map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn authorize_url_carries_state_stored_for_the_attempt() {
+        let auth = test_auth();
+        let url = auth.authorization_url();
+        let issued = state_param(&url).expect("authorize URL must carry a state parameter");
+        assert!(!issued.is_empty(), "state must not be empty");
+        // The callback carrying the issued state verifies against the stored attempt.
+        assert!(auth.verify_callback_state(Some(&issued)).is_ok());
+    }
+
+    #[test]
+    fn state_is_unguessable_across_attempts() {
+        let auth = test_auth();
+        let first = state_param(&auth.authorization_url()).expect("state param");
+        let second = state_param(&auth.authorization_url()).expect("state param");
+        assert_ne!(first, second, "each attempt must issue a fresh state");
+        // CsrfToken::new_random carries 128 bits of entropy, base64-encoded.
+        assert!(first.len() >= 22, "state too short for 128-bit entropy");
+    }
+
+    #[test]
+    fn callback_rejects_mismatched_state() {
+        let auth = test_auth();
+        auth.authorization_url();
+        let err = auth
+            .verify_callback_state(Some("attacker-forged-state"))
+            .expect_err("a forged state must be rejected");
+        assert!(
+            err.to_string().contains("state"),
+            "error should mention the state check, got: {err}"
+        );
+    }
+
+    #[test]
+    fn callback_rejects_missing_state() {
+        let auth = test_auth();
+        auth.authorization_url();
+        assert!(auth.verify_callback_state(None).is_err());
+        // And a callback with no issued attempt at all is rejected too.
+        let fresh = test_auth();
+        assert!(fresh.verify_callback_state(Some("anything")).is_err());
+    }
+
+    #[test]
+    fn state_is_single_use() {
+        let auth = test_auth();
+        let issued = state_param(&auth.authorization_url()).expect("state param");
+        assert!(auth.verify_callback_state(Some(&issued)).is_ok());
+        // Replaying the same callback URL must fail.
+        assert!(auth.verify_callback_state(Some(&issued)).is_err());
+    }
 }

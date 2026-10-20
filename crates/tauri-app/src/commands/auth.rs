@@ -54,12 +54,15 @@ pub async fn start_ebay_auth(
 
                 if let Some(code) = extract_code_from_url(url) {
                     handled_nav.store(true, Ordering::SeqCst);
+                    // Bind this code to the authorization attempt we issued:
+                    // eBay must echo the `state` we put in the authorize URL.
+                    let returned_state = extract_state_from_url(url);
                     let adapter = adapter_clone.clone();
                     let app = app_nav.clone();
 
                     tauri::async_runtime::spawn(async move {
                         if let Some(ebay) = adapter.as_any().downcast_ref::<EbayAdapter>() {
-                            match ebay.complete_auth(&code).await {
+                            match ebay.complete_auth(&code, returned_state.as_deref()).await {
                                 Ok(()) => {
                                     info!("eBay OAuth completed via auth window");
                                     let _ = app.emit("ebay-auth-complete", true);
@@ -113,7 +116,11 @@ pub async fn get_ebay_auth_url(state: State<'_, AppState>) -> Result<String, Str
 }
 
 #[tauri::command]
-pub async fn complete_ebay_auth(state: State<'_, AppState>, code: String) -> Result<(), String> {
+pub async fn complete_ebay_auth(
+    state: State<'_, AppState>,
+    code: String,
+    returned_state: Option<String>,
+) -> Result<(), String> {
     let adapters = state.active_adapters().await?;
     let adapters = adapters.read().await;
     let adapter = adapters
@@ -125,7 +132,9 @@ pub async fn complete_ebay_auth(state: State<'_, AppState>, code: String) -> Res
         .downcast_ref::<EbayAdapter>()
         .ok_or("Failed to get eBay adapter")?;
 
-    ebay.complete_auth(&code).await.map_err(|e| e.to_string())
+    ebay.complete_auth(&code, returned_state.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -279,6 +288,12 @@ pub async fn get_platform_health(
 fn extract_code_from_url(url: &url::Url) -> Option<String> {
     url.query_pairs()
         .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+}
+
+fn extract_state_from_url(url: &url::Url) -> Option<String> {
+    url.query_pairs()
+        .find(|(key, _)| key == "state")
         .map(|(_, value)| value.into_owned())
 }
 
