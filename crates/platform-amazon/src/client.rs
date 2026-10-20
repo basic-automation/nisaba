@@ -221,7 +221,7 @@ impl AmazonClient {
 
             loop {
                 let mut url = format!(
-                    "{}/listings/{}/items/{}?marketplaceIds={}&includedData=summaries,fulfillmentAvailability,offers&pageSize=20",
+                    "{}/listings/{}/items/{}?marketplaceIds={}&includedData=summaries,fulfillmentAvailability,offers,issues&pageSize=20",
                     self.api_base,
                     LISTINGS_API_VERSION,
                     url_encode(seller_id),
@@ -264,14 +264,18 @@ impl AmazonClient {
                         message: format!("Failed to parse listings response: {e}"),
                     })?;
 
+                // The documented shape nests the token under `pagination`;
+                // `effective_next_token` reads it from there.
+                let next_token = response.effective_next_token();
+
                 for item in response.items {
                     if seen_skus.insert(item.sku.clone()) {
                         all_items.push(item);
                     }
                 }
 
-                match response.next_token {
-                    Some(token) if !token.is_empty() => page_token = Some(token),
+                match next_token {
+                    Some(token) => page_token = Some(token),
                     _ => break,
                 }
             }
