@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 deno_core = { workspace = true }
 deno_ast = { workspace = true }
+nisaba-core = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
