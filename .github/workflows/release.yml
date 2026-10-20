@@ -2,10 +2,13 @@ name: Release
 
 # Builds the desktop bundles for Linux, Windows and macOS.
 #
-# Pushing a `v*` tag builds all three and attaches the bundles to that tag's
-# GitHub release. A manual run builds all three and keeps the bundles as workflow
-# artifacts without touching any release, so the matrix can be verified without
-# publishing anything.
+# Pushing a `v*` tag builds all three, uploads each platform's bundles to a *draft*
+# release for that tag (creating it if needed), and only then — once every leg has
+# succeeded and the draft holds bundles from all three platforms — publishes it. A
+# release missing a platform is a failed release, so it stays a draft.
+#
+# A manual run builds all three and keeps the bundles as workflow artifacts without
+# touching any release, so the matrix can be verified without publishing anything.
 on:
   push:
     tags:
@@ -124,7 +127,7 @@ jobs:
             ${{ matrix.bundle-dir }}/**/*.sig
 
       # Only on a tag push, or a manual run that explicitly asked to publish.
-      - name: Attach bundles to the release
+      - name: Attach bundles to the draft release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
         shell: bash
         env:
@@ -132,6 +135,19 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Only a tag push may create a release; a manual publish needs one to exist.
+            if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+              echo "No release exists for $tag" >&2
+              exit 1
+            fi
+            prerelease=""
+            [[ "$tag" == v0.* ]] && prerelease="--prerelease"
+            # All three legs race to create it; a loser finds the winner's draft.
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              $prerelease --title "Nisaba $tag" --generate-notes \
+              || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          fi
           mapfile -t files < <(find "${{ matrix.bundle-dir }}" -maxdepth 2 -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
                -o -name '*.dmg' -o -name '*.app.tar.gz' \
@@ -142,3 +158,33 @@ jobs:
           fi
           printf 'uploading: %s\n' "${files[@]}"
           gh release upload "$tag" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+
+  # Publish the draft only when every platform built and uploaded. `needs` skips this
+  # job if any leg failed, and the asset check catches a leg that "succeeded" without
+  # uploading anything useful.
+  publish:
+    name: Publish release
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every platform is attached, then publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          printf 'assets:\n%s\n' "$assets"
+          missing=()
+          grep -qE '\.AppImage$' <<<"$assets" || missing+=("Linux AppImage")
+          grep -qE '\.deb$'      <<<"$assets" || missing+=("Linux .deb")
+          grep -qE '\.msi$'      <<<"$assets" || missing+=("Windows .msi")
+          grep -qE '\.dmg$'      <<<"$assets" || missing+=("macOS .dmg")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'missing: %s\n' "${missing[@]}" >&2
+            echo "Leaving $tag as a draft." >&2
+            exit 1
+          fi
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false

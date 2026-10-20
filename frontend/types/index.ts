@@ -285,6 +285,13 @@ export interface VendorPluginInfo {
   category: string
   icon: string | null
   include_vendor_stock: boolean
+  /** What the plugin's `Nisaba.fetch` can reach, computed from its files. */
+  network_access: 'restricted' | 'unrestricted' | 'unknown'
+  /** The declared hosts when `network_access` is `restricted` (empty = no network). */
+  allowed_hosts: string[]
+  /** This machine's time limit for one run, in minutes. */
+  timeout_minutes: number
+  timeout_is_default: boolean
 }
 
 // Vendor sync types

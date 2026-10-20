@@ -31,6 +31,8 @@ export const metadata = {
       placeholder: 'https://www.rothco.com/upload/product/product/',
     },
   ],
+  // Every request goes to the GraphQL endpoint; image URLs are only built, never fetched.
+  allowed_hosts: ['www.rothco.com'],
 }
 
 const GRAPHQL_ENDPOINT = 'https://www.rothco.com/graphql'
