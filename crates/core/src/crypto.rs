@@ -5,6 +5,8 @@ use aes_gcm::{
 use base64::Engine;
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::error::SyncError;
 
@@ -139,6 +141,101 @@ pub fn delete_secret_from_keyring(company_id: &str) -> Result<(), SyncError> {
         Err(e) => Err(SyncError::ConfigError(format!(
             "Failed to delete secret from keyring: {e}"
         ))),
+    }
+}
+
+/// Storage backend for vendor plugin `secret: true` config values.
+///
+/// The production implementation ([`OsKeyringPluginSecrets`]) keeps each value
+/// in the OS keyring under its own entry, so secrets never sit in the
+/// (unencrypted) database or in P2P sync payloads. The trait exists so the
+/// split/merge/migrate logic can be tested without a real keyring (see
+/// [`InMemoryPluginSecrets`]).
+pub trait PluginSecretStore: Send + Sync {
+    /// Store a secret config value for a plugin.
+    fn store(&self, plugin_id: &str, field_key: &str, secret: &str) -> Result<(), SyncError>;
+    /// Load a secret config value; `Ok(None)` when no entry exists.
+    fn load(&self, plugin_id: &str, field_key: &str) -> Result<Option<String>, SyncError>;
+    /// Delete a secret config value; missing entries are not an error.
+    fn delete(&self, plugin_id: &str, field_key: &str) -> Result<(), SyncError>;
+}
+
+/// OS keyring-backed [`PluginSecretStore`]: one keyring entry per plugin field,
+/// under a service name distinct from the company secret's.
+pub struct OsKeyringPluginSecrets;
+
+fn plugin_secret_entry(plugin_id: &str, field_key: &str) -> Result<keyring::Entry, SyncError> {
+    keyring::Entry::new("nisaba-plugin-config", &format!("{plugin_id}:{field_key}"))
+        .map_err(|e| SyncError::ConfigError(format!("Keyring entry error: {e}")))
+}
+
+impl PluginSecretStore for OsKeyringPluginSecrets {
+    fn store(&self, plugin_id: &str, field_key: &str, secret: &str) -> Result<(), SyncError> {
+        plugin_secret_entry(plugin_id, field_key)?
+            .set_password(secret)
+            .map_err(|e| {
+                SyncError::ConfigError(format!("Failed to store plugin secret in keyring: {e}"))
+            })
+    }
+
+    fn load(&self, plugin_id: &str, field_key: &str) -> Result<Option<String>, SyncError> {
+        match plugin_secret_entry(plugin_id, field_key)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(SyncError::ConfigError(format!(
+                "Failed to load plugin secret from keyring: {e}"
+            ))),
+        }
+    }
+
+    fn delete(&self, plugin_id: &str, field_key: &str) -> Result<(), SyncError> {
+        match plugin_secret_entry(plugin_id, field_key)?.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()), // already gone
+            Err(e) => Err(SyncError::ConfigError(format!(
+                "Failed to delete plugin secret from keyring: {e}"
+            ))),
+        }
+    }
+}
+
+/// In-memory [`PluginSecretStore`] for tests and environments without an OS
+/// keyring. Never use in production: it holds secrets in process memory.
+#[derive(Debug, Default)]
+pub struct InMemoryPluginSecrets {
+    entries: Mutex<HashMap<(String, String), String>>,
+}
+
+impl InMemoryPluginSecrets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PluginSecretStore for InMemoryPluginSecrets {
+    fn store(&self, plugin_id: &str, field_key: &str, secret: &str) -> Result<(), SyncError> {
+        self.entries.lock().expect("poisoned").insert(
+            (plugin_id.to_string(), field_key.to_string()),
+            secret.to_string(),
+        );
+        Ok(())
+    }
+
+    fn load(&self, plugin_id: &str, field_key: &str) -> Result<Option<String>, SyncError> {
+        Ok(self
+            .entries
+            .lock()
+            .expect("poisoned")
+            .get(&(plugin_id.to_string(), field_key.to_string()))
+            .cloned())
+    }
+
+    fn delete(&self, plugin_id: &str, field_key: &str) -> Result<(), SyncError> {
+        self.entries
+            .lock()
+            .expect("poisoned")
+            .remove(&(plugin_id.to_string(), field_key.to_string()));
+        Ok(())
     }
 }
 
