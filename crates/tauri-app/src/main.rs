@@ -19,7 +19,7 @@ use nisaba_p2p::types::{P2PCommand, P2PEvent};
 use nisaba_p2p::P2PManager;
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer as _;
@@ -140,12 +140,26 @@ fn main() {
                     if let Ok(Some((id, name, secret, _onion, role))) = app_db.get_company().await {
                         info!("Migrating legacy single-company to multi-company");
 
-                        if let Err(e) = crypto::store_secret_in_keyring(&id, &secret) {
-                            warn!("Failed to store secret in keyring: {e}");
-                        }
-
-                        let secret_hash = crypto::hash_secret(&secret);
-                        let _ = app_db.update_company_secret(&secret_hash).await;
+                        // The company row may hold the only copy of the plaintext
+                        // secret, so it is swapped for the hash only once the
+                        // keyring is confirmed to hold the secret.
+                        let secret_hash = match crypto::move_secret_to_keyring(&id, &secret) {
+                            Ok(Some(hash)) => {
+                                if let Err(e) = app_db.update_company_secret(&hash).await {
+                                    warn!("Failed to replace legacy company secret with its hash: {e}");
+                                }
+                                hash
+                            }
+                            // Already moved on an earlier start: the row holds the hash.
+                            Ok(None) => secret.clone(),
+                            Err(e) => {
+                                error!(
+                                    "Could not move the company secret to the OS keyring, \
+                                     so it stays in the database unhashed: {e}"
+                                );
+                                crypto::hash_secret(&secret)
+                            }
+                        };
 
                         let db_path = config.database.path.clone();
                         let _ = app_db.register_company(&id, &name, &role, &secret_hash, &db_path).await;

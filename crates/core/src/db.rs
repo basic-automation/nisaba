@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tracing::{debug, info};
 use turso::params::Params;
 use turso::{params, Builder, Connection, Database, Error as TursoError};
@@ -28,50 +30,178 @@ fn is_retryable(e: &TursoError) -> bool {
         || matches!(e, TursoError::Error(msg) if msg.contains("conflict") || msg.contains("database is locked"))
 }
 
+/// Suffixes of the files turso keeps beside a database: the logical log, the
+/// write-ahead log and the WAL index.
+const JOURNAL_SUFFIXES: &[&str] = &["-log", "-wal", "-shm"];
+
+/// Open a turso database, recovering once from a panic during open.
+///
+/// turso can panic opening a file whose journal files don't match it (e.g.
+/// incompatible automatic indexes from an older schema). The WAL can hold
+/// committed transactions that were never checkpointed into the main file, so
+/// the journal files are moved into a timestamped backup directory next to the
+/// database — never deleted — before a single retry. If the retry fails too,
+/// that failure is returned.
+async fn open_database<F, Fut>(path: &str, build: F) -> Result<Database, SyncError>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Database, TursoError>> + Send + 'static,
+{
+    if let Some(db) = build_catching_panic(build(path.to_string())).await? {
+        return Ok(db);
+    }
+
+    let backup = move_journal_files_aside(Path::new(path)).map_err(|e| {
+        SyncError::DatabaseError(format!(
+            "turso panicked opening {path} and its journal files could not be moved aside: {e}"
+        ))
+    })?;
+    let moved_to = match &backup {
+        Some(dir) => {
+            tracing::error!(
+                backup = %dir.display(),
+                "turso panicked opening {path}; moved its journal files to {} and retrying. \
+                 Writes still in the WAL are not in the reopened database — keep that \
+                 directory until they have been recovered",
+                dir.display()
+            );
+            format!("after moving its journal files to {}", dir.display())
+        }
+        None => {
+            tracing::error!("turso panicked opening {path}, which has no journal files; retrying");
+            "with no journal files present".to_string()
+        }
+    };
+
+    build_catching_panic(build(path.to_string()))
+        .await?
+        .ok_or_else(|| {
+            SyncError::DatabaseError(format!("turso panicked opening {path} again {moved_to}"))
+        })
+}
+
+/// Run a database build on its own task, so a panic inside turso comes back as
+/// `Ok(None)` instead of unwinding through the caller.
+async fn build_catching_panic<Fut>(build: Fut) -> Result<Option<Database>, SyncError>
+where
+    Fut: std::future::Future<Output = Result<Database, TursoError>> + Send + 'static,
+{
+    match tokio::task::spawn(build).await {
+        Ok(result) => Ok(Some(result?)),
+        Err(join_err) if join_err.is_panic() => Ok(None),
+        Err(join_err) => Err(SyncError::DatabaseError(format!(
+            "Database open task cancelled: {join_err}"
+        ))),
+    }
+}
+
+/// Move a database's journal files into a new `<name>.journal-backup-<UTC
+/// timestamp>` directory beside it, leaving the main file where it is.
+///
+/// Returns the backup directory, or `None` when there were no journal files.
+fn move_journal_files_aside(db_path: &Path) -> std::io::Result<Option<PathBuf>> {
+    let journals: Vec<PathBuf> = JOURNAL_SUFFIXES
+        .iter()
+        .map(|suffix| {
+            let mut name = db_path.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+        .filter(|journal| journal.exists())
+        .collect();
+    if journals.is_empty() {
+        return Ok(None);
+    }
+
+    let parent = match db_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let name = db_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "database".to_string());
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+
+    let mut backup = parent.join(format!("{name}.journal-backup-{stamp}"));
+    let mut attempt = 1;
+    while let Err(e) = std::fs::create_dir(&backup) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e);
+        }
+        backup = parent.join(format!("{name}.journal-backup-{stamp}-{attempt}"));
+        attempt += 1;
+    }
+
+    for journal in journals {
+        // The backup sits in the same directory, so this is a rename on one
+        // filesystem and the bytes are never copied or dropped.
+        let file_name = journal.file_name().unwrap_or_default();
+        std::fs::rename(&journal, backup.join(file_name))?;
+    }
+    Ok(Some(backup))
+}
+
+/// Whether two paths name the same database file.
+///
+/// Both paths are canonicalized, so `./nisaba.db` and its absolute form (or a
+/// symlink to it) compare equal. A path that can't be resolved — usually one
+/// that doesn't exist — is compared as written.
+pub fn is_same_db_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Delete a company's database file after the company has left the registry.
+///
+/// Companies migrated from the single-company layout are registered with the
+/// app database's own path, because their data lives in it. Deleting that file
+/// would take the company registry and every other company's registration with
+/// it, so when `company_db` is the app database nothing is deleted and this
+/// returns `Ok(false)`. A file that is already gone counts as deleted.
+pub fn remove_company_db_file(company_db: &Path, app_db: &Path) -> std::io::Result<bool> {
+    if is_same_db_file(company_db, app_db) {
+        return Ok(false);
+    }
+    match std::fs::remove_file(company_db) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 pub struct Db {
     db: Database,
+    path: String,
 }
 
 impl Db {
     /// Open (or create) a local database at the given path.
     ///
-    /// If turso panics during open (e.g. incompatible automatic indexes from an
-    /// older schema), the corrupted file is deleted and a fresh database is
-    /// created. The caller must run `migrate()` afterwards to re-apply the
-    /// schema, so no data-bearing tables are lost on a brand-new DB.
+    /// If turso panics during open, the journal files are moved to a backup
+    /// directory beside the database and the open is retried once (see
+    /// `open_database`). The main database file is never touched. The caller
+    /// must run `migrate()` afterwards.
     pub async fn open(path: &str) -> Result<Self, SyncError> {
-        let p = path.to_string();
-        let result = tokio::task::spawn(async move { Builder::new_local(&p).build().await }).await;
+        let db = open_database(
+            path,
+            |p| async move { Builder::new_local(&p).build().await },
+        )
+        .await?;
 
-        let db = match result {
-            Ok(Ok(db)) => db,
-            Ok(Err(e)) => return Err(SyncError::DatabaseError(e.to_string())),
-            Err(join_err) => {
-                if join_err.is_panic() {
-                    tracing::warn!(
-                        "turso panicked opening {path} — cleaning journal files and retrying"
-                    );
-                    // Delete stale journal files that may cause the panic,
-                    // but NEVER delete the main database file (contains user data).
-                    for suffix in &["-log", "-wal", "-shm"] {
-                        let journal = format!("{path}{suffix}");
-                        if std::path::Path::new(&journal).exists() {
-                            let _ = std::fs::remove_file(&journal);
-                            tracing::info!("Deleted journal file {journal}");
-                        }
-                    }
-                    Builder::new_local(path).build().await?
-                } else {
-                    return Err(SyncError::DatabaseError(format!(
-                        "Database open task cancelled: {join_err}"
-                    )));
-                }
-            }
+        let me = Self {
+            db,
+            path: path.to_string(),
         };
-
-        let me = Self { db };
         me.apply_db_pragmas().await?;
         Ok(me)
+    }
+
+    /// The path this database was opened with, as given to [`Db::open`].
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     /// Set database-level pragmas (only needs to run once per database file).
@@ -4124,5 +4254,195 @@ mod tests {
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].quantity, 10);
         assert_eq!(history[2].quantity, 5);
+    }
+
+    // ── Leaving a company ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn leaving_a_company_registered_with_the_app_db_keeps_the_app_db() {
+        // A legacy-migrated company is registered with the app DB's own path.
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        let app_db = Db::open(app_path.to_str().unwrap()).await.unwrap();
+        app_db.migrate().await.unwrap();
+        app_db
+            .register_company(
+                "legacy",
+                "Legacy",
+                "admin",
+                "hash",
+                app_path.to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+        app_db
+            .register_company("other", "Other", "member", "hash", "elsewhere.db")
+            .await
+            .unwrap();
+
+        // What `leave_company` does: look up the path, unregister, delete.
+        let registry = app_db.list_registered_companies().await.unwrap();
+        let legacy = registry.iter().find(|e| e.id == "legacy").unwrap();
+        app_db.unregister_company("legacy").await.unwrap();
+        let deleted =
+            remove_company_db_file(Path::new(&legacy.db_path), Path::new(app_db.path())).unwrap();
+
+        assert!(!deleted);
+        assert!(app_path.exists());
+        let remaining = app_db.list_registered_companies().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "other");
+    }
+
+    #[test]
+    fn the_app_db_is_recognised_under_another_spelling_of_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        std::fs::write(&app_path, b"app").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let alias = dir.path().join("sub").join("..").join("nisaba.db");
+
+        assert!(!remove_company_db_file(&alias, &app_path).unwrap());
+        assert!(app_path.exists());
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.db");
+            std::os::unix::fs::symlink(&app_path, &link).unwrap();
+            assert!(!remove_company_db_file(&link, &app_path).unwrap());
+            assert!(app_path.exists());
+        }
+    }
+
+    #[test]
+    fn leaving_a_company_with_its_own_db_deletes_only_that_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_path = dir.path().join("nisaba.db");
+        let company_path = dir.path().join("company.db");
+        std::fs::write(&app_path, b"app").unwrap();
+        std::fs::write(&company_path, b"company").unwrap();
+
+        assert!(remove_company_db_file(&company_path, &app_path).unwrap());
+        assert!(!company_path.exists());
+        assert!(app_path.exists());
+        // Already gone counts as deleted.
+        assert!(remove_company_db_file(&company_path, &app_path).unwrap());
+    }
+
+    // ── Recovering from a panic on open ───────────────────────
+
+    type BuildFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Database, TursoError>> + Send>>;
+
+    /// A database builder that panics on its first `panics` calls, the way
+    /// turso does on a file whose journals don't match it, and counts calls.
+    fn build_panicking_first(
+        panics: usize,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl Fn(String) -> BuildFuture {
+        move |path| {
+            let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if attempt < panics {
+                    panic!("simulated turso panic on open");
+                }
+                Builder::new_local(&path).build().await
+            })
+        }
+    }
+
+    fn journal_backups(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains(".journal-backup-"))
+            .collect()
+    }
+
+    #[test]
+    fn journal_files_are_moved_aside_with_their_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nisaba.db");
+        std::fs::write(&db_path, b"main").unwrap();
+        std::fs::write(dir.path().join("nisaba.db-wal"), b"uncheckpointed").unwrap();
+        std::fs::write(dir.path().join("nisaba.db-shm"), b"index").unwrap();
+
+        let backup = move_journal_files_aside(&db_path).unwrap().unwrap();
+
+        assert_eq!(backup.parent(), Some(dir.path()));
+        assert_eq!(journal_backups(dir.path()), vec![backup.clone()]);
+        assert_eq!(
+            std::fs::read(backup.join("nisaba.db-wal")).unwrap(),
+            b"uncheckpointed"
+        );
+        assert_eq!(
+            std::fs::read(backup.join("nisaba.db-shm")).unwrap(),
+            b"index"
+        );
+        assert!(!dir.path().join("nisaba.db-wal").exists());
+        assert!(!dir.path().join("nisaba.db-shm").exists());
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"main");
+    }
+
+    #[test]
+    fn a_db_without_journal_files_gets_no_backup_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nisaba.db");
+        std::fs::write(&db_path, b"main").unwrap();
+
+        assert_eq!(move_journal_files_aside(&db_path).unwrap(), None);
+        assert!(journal_backups(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_open_is_retried_once_with_the_journals_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nisaba.db");
+        std::fs::write(dir.path().join("nisaba.db-wal"), b"uncheckpointed").unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let opened = open_database(
+            db_path.to_str().unwrap(),
+            build_panicking_first(1, calls.clone()),
+        )
+        .await;
+
+        assert!(
+            opened.is_ok(),
+            "retry should open the DB: {:?}",
+            opened.err()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let backups = journal_backups(dir.path());
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read(backups[0].join("nisaba.db-wal")).unwrap(),
+            b"uncheckpointed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_that_panics_again_on_retry_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nisaba.db");
+        std::fs::write(&db_path, b"main").unwrap();
+        std::fs::write(dir.path().join("nisaba.db-wal"), b"uncheckpointed").unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let opened = open_database(
+            db_path.to_str().unwrap(),
+            build_panicking_first(usize::MAX, calls.clone()),
+        )
+        .await;
+
+        assert!(opened.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"main");
+        let backups = journal_backups(dir.path());
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read(backups[0].join("nisaba.db-wal")).unwrap(),
+            b"uncheckpointed"
+        );
     }
 }

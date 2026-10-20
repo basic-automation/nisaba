@@ -92,6 +92,43 @@ pub fn load_secret_from_keyring(company_id: &str) -> Result<String, SyncError> {
         .map_err(|e| SyncError::ConfigError(format!("Failed to load secret from keyring: {e}")))
 }
 
+/// Move a company secret that is stored in plaintext into the OS keyring.
+///
+/// Returns the hash to replace the stored copy with, but only after reading
+/// the keyring back and finding exactly `stored` there. Returns `Ok(None)`
+/// when `stored` is already the hash of the keyring's secret — the move
+/// happened on an earlier start — so the real secret is never overwritten with
+/// its hash. On error the stored copy must be kept: it may be the only one.
+pub fn move_secret_to_keyring(company_id: &str, stored: &str) -> Result<Option<String>, SyncError> {
+    move_secret_with(
+        stored,
+        || load_secret_from_keyring(company_id),
+        |secret| store_secret_in_keyring(company_id, secret),
+    )
+}
+
+fn move_secret_with(
+    stored: &str,
+    load: impl Fn() -> Result<String, SyncError>,
+    store: impl FnOnce(&str) -> Result<(), SyncError>,
+) -> Result<Option<String>, SyncError> {
+    if let Ok(existing) = load() {
+        if hash_secret(&existing) == stored {
+            return Ok(None);
+        }
+    }
+    store(stored)?;
+    match load() {
+        Ok(saved) if saved == stored => Ok(Some(hash_secret(stored))),
+        Ok(_) => Err(SyncError::ConfigError(
+            "Keyring returned a different secret than the one just stored".into(),
+        )),
+        Err(e) => Err(SyncError::ConfigError(format!(
+            "Secret stored in keyring but could not be read back: {e}"
+        ))),
+    }
+}
+
 /// Delete a company secret from the OS keyring.
 pub fn delete_secret_from_keyring(company_id: &str) -> Result<(), SyncError> {
     let entry = keyring::Entry::new("nisaba", company_id)
@@ -178,5 +215,77 @@ mod tests {
         // But both decrypt to the same value
         assert_eq!(decrypt(&e1, &key).unwrap(), "same");
         assert_eq!(decrypt(&e2, &key).unwrap(), "same");
+    }
+
+    /// What a fake keyring does when asked to store a secret.
+    enum Store {
+        Saves,
+        Fails,
+        /// Reports success but keeps nothing, like a keyring backend that
+        /// doesn't persist entries.
+        Drops,
+    }
+
+    /// An in-memory stand-in for one keyring entry.
+    struct FakeKeyring {
+        value: std::cell::RefCell<Option<String>>,
+        store: Store,
+    }
+
+    impl FakeKeyring {
+        fn new(value: Option<&str>, store: Store) -> Self {
+            Self {
+                value: std::cell::RefCell::new(value.map(str::to_string)),
+                store,
+            }
+        }
+
+        fn mv(&self, stored: &str) -> Result<Option<String>, SyncError> {
+            move_secret_with(
+                stored,
+                || {
+                    self.value
+                        .borrow()
+                        .clone()
+                        .ok_or_else(|| SyncError::ConfigError("no entry".into()))
+                },
+                |secret| match self.store {
+                    Store::Saves => {
+                        *self.value.borrow_mut() = Some(secret.to_string());
+                        Ok(())
+                    }
+                    Store::Fails => Err(SyncError::ConfigError("keyring unavailable".into())),
+                    Store::Drops => Ok(()),
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn moving_a_secret_returns_its_hash_once_the_keyring_holds_it() {
+        let keyring = FakeKeyring::new(None, Store::Saves);
+        let hash = keyring.mv("plain-secret").unwrap();
+        assert_eq!(hash, Some(hash_secret("plain-secret")));
+        assert_eq!(keyring.value.borrow().as_deref(), Some("plain-secret"));
+    }
+
+    #[test]
+    fn a_failed_keyring_save_gives_no_hash_to_replace_the_secret_with() {
+        let keyring = FakeKeyring::new(None, Store::Fails);
+        assert!(keyring.mv("plain-secret").is_err());
+    }
+
+    #[test]
+    fn a_save_the_keyring_cannot_read_back_gives_no_hash() {
+        let keyring = FakeKeyring::new(None, Store::Drops);
+        assert!(keyring.mv("plain-secret").is_err());
+    }
+
+    #[test]
+    fn an_already_hashed_secret_never_overwrites_the_keyring() {
+        let keyring = FakeKeyring::new(Some("plain-secret"), Store::Saves);
+        let hash = hash_secret("plain-secret");
+        assert_eq!(keyring.mv(&hash).unwrap(), None);
+        assert_eq!(keyring.value.borrow().as_deref(), Some("plain-secret"));
     }
 }

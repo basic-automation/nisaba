@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tauri::State;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use nisaba_core::config::CompanyRegistryEntry;
 use nisaba_core::crypto;
@@ -324,9 +325,26 @@ pub async fn leave_company(state: State<'_, AppState>, id: Option<String>) -> Re
     // Delete secret from keyring
     let _ = crypto::delete_secret_from_keyring(&company_id);
 
-    // Delete company DB file
+    // Delete company DB file — unless it is the app DB itself
     if let Some(path) = db_path {
-        let _ = std::fs::remove_file(&path);
+        match nisaba_core::db::remove_company_db_file(
+            Path::new(&path),
+            Path::new(state.app_db.path()),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                // A legacy-migrated company keeps its data in the app DB, so the
+                // file stays. Clear its identity rows instead, or the legacy
+                // migration would register it again on the next start.
+                warn!(company = %company_id, path = %path, "Company DB is the app DB; not deleting it");
+                if let Err(e) = state.app_db.delete_company().await {
+                    warn!(company = %company_id, error = %e, "Failed to clear legacy company rows");
+                }
+            }
+            Err(e) => {
+                warn!(company = %company_id, path = %path, error = %e, "Failed to delete company DB");
+            }
+        }
     }
 
     // Update active company
