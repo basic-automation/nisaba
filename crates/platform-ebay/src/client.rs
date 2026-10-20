@@ -26,6 +26,96 @@ pub struct EbayClient {
     api_base: String,
 }
 
+/// Inspect a bulk-update response and surface any per-SKU failure as `Err`.
+///
+/// eBay returns HTTP 200 when every entry succeeds and 207 when some (or
+/// all) fail; in both cases the per-entry `statusCode` / `errors` in the
+/// body are authoritative. Treating a 207 with per-SKU errors as success
+/// would report a write that never happened.
+pub(crate) fn check_bulk_update_response(
+    response: &BulkUpdateResponse,
+    context: &str,
+) -> Result<(), SyncError> {
+    let Some(responses) = &response.responses else {
+        return Ok(());
+    };
+    let mut failures: Vec<String> = Vec::new();
+    for entry in responses {
+        let status_failed = entry
+            .status_code
+            .map(|c| !(200..300).contains(&c))
+            .unwrap_or(false);
+        let has_errors = entry
+            .errors
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false);
+        if !status_failed && !has_errors {
+            continue;
+        }
+        if let Some(errors) = &entry.errors {
+            for err in errors {
+                warn!(
+                    sku = entry.sku.as_deref().unwrap_or("?"),
+                    error_id = err.error_id,
+                    message = err.message.as_deref().unwrap_or(""),
+                    "eBay bulk update error for item"
+                );
+            }
+        }
+        let detail = entry
+            .errors
+            .as_ref()
+            .map(|errs| {
+                errs.iter()
+                    .filter_map(|e| e.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("statusCode {}", entry.status_code.unwrap_or_default()));
+        failures.push(format!("{}: {detail}", entry.sku.as_deref().unwrap_or("?")));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!(
+                "{context} failed for {} SKU(s): {}",
+                failures.len(),
+                failures.join(" | ")
+            ),
+        })
+    }
+}
+
+/// Build the `bulk_update_price_quantity` body for a price-only update.
+///
+/// The offer entry carries the real `offerId` (without it eBay cannot
+/// target an offer and the price is never changed) and there is
+/// deliberately no `shipToLocationAvailability` — a price edit must
+/// never write a quantity, so it can never zero stock.
+pub(crate) fn build_bulk_price_body(
+    sku: &str,
+    offer_id: &str,
+    price: f64,
+    currency: &str,
+) -> serde_json::Value {
+    json!({
+        "requests": [{
+            "sku": sku,
+            "offers": [{
+                "offerId": offer_id,
+                "price": {
+                    "value": format!("{:.2}", price),
+                    "currency": currency,
+                }
+            }]
+        }]
+    })
+}
+
 impl EbayClient {
     pub fn new(is_sandbox: bool) -> Self {
         let http = Client::builder()
@@ -40,6 +130,16 @@ impl EbayClient {
         }
         .to_string();
 
+        Self { http, api_base }
+    }
+
+    /// Construct a client pointed at an explicit API base URL. Used by
+    /// fake-server tests (and any future non-standard endpoint).
+    pub fn with_api_base(api_base: String) -> Self {
+        let http = Client::builder()
+            .user_agent("Nisaba/0.1.0")
+            .build()
+            .expect("Failed to build HTTP client");
         Self { http, api_base }
     }
 
@@ -174,21 +274,9 @@ impl EbayClient {
                     message: format!("Failed to parse bulk update response: {e}"),
                 })?;
 
-            // Check for per-item errors
-            if let Some(responses) = response.responses {
-                for entry in responses {
-                    if let Some(errors) = entry.errors {
-                        for err in errors {
-                            warn!(
-                                sku = entry.sku.as_deref().unwrap_or("?"),
-                                error_id = err.error_id,
-                                message = err.message.as_deref().unwrap_or(""),
-                                "eBay bulk update error for item"
-                            );
-                        }
-                    }
-                }
-            }
+            // Per-SKU errors (including non-2xx statusCodes on a 200/207
+            // response) must surface as Err, not a warned-about Ok.
+            check_bulk_update_response(&response, "Bulk update")?;
         }
 
         Ok(())
@@ -608,36 +696,28 @@ impl EbayClient {
         Ok(listing_id)
     }
 
-    /// Update price and quantity using the bulk update endpoint for a single SKU.
+    /// Update price for a single SKU using the bulk update endpoint.
     /// Re-uses the existing bulk endpoint since eBay doesn't have a single-item
     /// price update in the Inventory API -- price is set via offer or bulk.
+    ///
+    /// The request targets a real offer via `offer_id` and carries no
+    /// quantity at all, so a price edit can never alter (or zero) stock.
+    /// The 200/207 response body is parsed and any per-SKU failure is
+    /// surfaced as `Err`.
     pub async fn bulk_update_price_quantity(
         &self,
         access_token: &str,
         sku: &str,
+        offer_id: &str,
         price: f64,
         currency: &str,
-        quantity: i64,
     ) -> Result<(), SyncError> {
         let url = format!(
             "{}/sell/inventory/v1/bulk_update_price_quantity",
             self.api_base
         );
 
-        let body = json!({
-            "requests": [{
-                "sku": sku,
-                "shipToLocationAvailability": {
-                    "quantity": quantity,
-                },
-                "offers": [{
-                    "price": {
-                        "value": format!("{:.2}", price),
-                        "currency": currency,
-                    }
-                }]
-            }]
-        });
+        let body = build_bulk_price_body(sku, offer_id, price, currency);
 
         let resp = self
             .http
@@ -660,12 +740,20 @@ impl EbayClient {
                 message: "Access token expired".into(),
             });
         }
+        let body_text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(SyncError::ApiError {
                 platform: Platform::Ebay,
-                message: format!("Bulk update price/quantity failed ({status}): {body}"),
+                message: format!("Bulk update price/quantity failed ({status}): {body_text}"),
             });
+        }
+        if !body_text.trim().is_empty() {
+            let response: BulkUpdateResponse =
+                serde_json::from_str(&body_text).map_err(|e| SyncError::ApiError {
+                    platform: Platform::Ebay,
+                    message: format!("Failed to parse bulk update price response: {e}"),
+                })?;
+            check_bulk_update_response(&response, "Bulk update price")?;
         }
 
         debug!(
@@ -1267,5 +1355,163 @@ impl EbayClient {
             platform: Platform::Ebay,
             message: format!("GetItem returned no item for {item_id}"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Read one HTTP/1.1 request (headers + content-length body).
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            // Check if we have the full request already.
+            if let Some(header_end) = find_subslice(&buf, b"\r\n\r\n") {
+                let header_text = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length: usize = header_text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if buf.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            match socket.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Spawn a fake eBay server that answers every request with the given
+    /// status/body and captures raw requests for assertions.
+    async fn spawn_fake_server(status: u16, body: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured_inner = captured_clone.clone();
+                let body_inner = body.clone();
+                tokio::spawn(async move {
+                    let req = read_request(&mut socket).await;
+                    captured_inner.lock().unwrap().push(req);
+                    let reason = match status {
+                        200 => "OK",
+                        207 => "Multi-Status",
+                        _ => "Status",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body_inner.len(),
+                        body_inner
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), captured)
+    }
+
+    fn request_body(raw: &str) -> &str {
+        raw.split("\r\n\r\n").nth(1).unwrap_or("")
+    }
+
+    const REJECTED_BULK_BODY: &str = r#"{"responses":[{"sku":"SKU-1","statusCode":400,"errors":[{"errorId":25021,"message":"Invalid quantity for SKU-1"}]}]}"#;
+    const OK_BULK_BODY: &str = r#"{"responses":[{"sku":"SKU-1","statusCode":200}]}"#;
+
+    #[test]
+    fn check_bulk_response_surfaces_status_code_without_errors() {
+        let resp: BulkUpdateResponse =
+            serde_json::from_str(r#"{"responses":[{"sku":"S1","statusCode":400}]}"#).unwrap();
+        assert!(check_bulk_update_response(&resp, "ctx").is_err());
+        let ok: BulkUpdateResponse =
+            serde_json::from_str(r#"{"responses":[{"sku":"S1","statusCode":200}]}"#).unwrap();
+        assert!(check_bulk_update_response(&ok, "ctx").is_ok());
+    }
+
+    #[test]
+    fn price_body_targets_offer_and_never_writes_quantity() {
+        let body = build_bulk_price_body("SKU-1", "offer-123", 12.5, "USD");
+        let text = body.to_string();
+        assert!(text.contains("\"offerId\":\"offer-123\""), "{text}");
+        assert!(!text.contains("quantity"), "{text}");
+        assert!(!text.contains("shipToLocationAvailability"), "{text}");
+    }
+
+    /// set_quantity path: a per-SKU rejection (HTTP 207) must be Err.
+    #[tokio::test]
+    async fn bulk_update_quantity_rejected_write_surfaces_as_err() {
+        let (base, _captured) = spawn_fake_server(207, REJECTED_BULK_BODY.to_string()).await;
+        let client = EbayClient::with_api_base(base);
+        let err = client
+            .bulk_update_quantity("token", vec![("SKU-1".to_string(), 5)])
+            .await
+            .expect_err("a rejected per-SKU write must surface as Err");
+        assert!(
+            err.to_string().contains("SKU-1"),
+            "error should name the SKU, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_update_quantity_success_returns_ok() {
+        let (base, _captured) = spawn_fake_server(200, OK_BULK_BODY.to_string()).await;
+        let client = EbayClient::with_api_base(base);
+        client
+            .bulk_update_quantity("token", vec![("SKU-1".to_string(), 5)])
+            .await
+            .expect("a 200 per-SKU result must be Ok");
+    }
+
+    /// set_price path: a per-SKU rejection (HTTP 207) must be Err.
+    #[tokio::test]
+    async fn bulk_update_price_rejected_write_surfaces_as_err() {
+        let (base, _captured) = spawn_fake_server(207, REJECTED_BULK_BODY.to_string()).await;
+        let client = EbayClient::with_api_base(base);
+        let err = client
+            .bulk_update_price_quantity("token", "SKU-1", "offer-123", 19.99, "USD")
+            .await
+            .expect_err("a rejected price write must surface as Err");
+        assert!(
+            err.to_string().contains("SKU-1"),
+            "error should name the SKU, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_update_price_request_includes_offer_id_and_no_quantity() {
+        let (base, captured) = spawn_fake_server(200, OK_BULK_BODY.to_string()).await;
+        let client = EbayClient::with_api_base(base);
+        client
+            .bulk_update_price_quantity("token", "SKU-1", "offer-123", 19.99, "USD")
+            .await
+            .expect("a 200 per-SKU price result must be Ok");
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = request_body(&requests[0]);
+        assert!(body.contains("\"offerId\":\"offer-123\""), "body: {body}");
+        assert!(
+            !body.contains("quantity"),
+            "body must not write quantity: {body}"
+        );
+        assert!(!body.contains("shipToLocationAvailability"), "body: {body}");
     }
 }
