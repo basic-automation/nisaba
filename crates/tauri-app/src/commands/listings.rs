@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use nisaba_core::traits::PlatformAdapter;
 use nisaba_core::types::{
-    CreateListingRequest, FullListing, ListingPhoto, ListingPrice, Platform, PlatformListing,
-    UpdateListingRequest,
+    CreateListingRequest, FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform,
+    PlatformListing, UpdateListingRequest,
 };
 use nisaba_ebay::types::{EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion};
 use nisaba_ebay::EbayAdapter;
@@ -43,6 +43,38 @@ type EbayBusinessPolicies = (
     Vec<EbayBusinessPolicy>,
     Vec<EbayBusinessPolicy>,
 );
+
+/// Pre-flight for creating a listing: refuse before anything is created on
+/// the platform when the product already has a live mapping for this
+/// platform + variant.
+///
+/// No adapter can delete a listing it created, so a mapping conflict
+/// discovered *after* `create_listing` would strand a live, unmapped
+/// listing (N-4.5). Checking first makes the failure clean: nothing is
+/// created remotely, and the caller can unmap the existing listing — which
+/// now frees its keys, thanks to the partial unique indexes — and retry.
+/// The mapping itself is then recorded atomically with the local listing
+/// record by `Db::record_created_listing`.
+async fn ensure_mapping_slot_free(
+    db: &nisaba_core::db::Db,
+    product_id: &str,
+    platform: Platform,
+    variant_id: &str,
+) -> Result<(), String> {
+    let existing = db
+        .get_mapping_for_product_platform_variant(product_id, platform.as_str(), variant_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    match existing {
+        Some(mapping) => Err(format!(
+            "Product {product_id} already has a live mapping on {} for this variant \
+             (item {}). Unmap it before creating another listing.",
+            platform.as_str(),
+            mapping.platform_item_id
+        )),
+        None => Ok(()),
+    }
+}
 
 async fn ensure_auth(adapter: &dyn PlatformAdapter) -> Result<(), String> {
     if !adapter.is_authenticated().await {
@@ -269,6 +301,11 @@ pub async fn migrate_listing(
     let tgt_plat = Platform::from_str_loose(&target_platform)
         .ok_or_else(|| format!("Unknown target platform: {target_platform}"))?;
 
+    // Refuse up front if the mapping could not be recorded — creating the
+    // target listing first would strand it live and unmapped.
+    let db = state.active_db().await?;
+    ensure_mapping_slot_free(&db, &product_id, tgt_plat, &variant_id).await?;
+
     let adapters = state.active_adapters().await?;
     let adapters = adapters.read().await;
 
@@ -286,6 +323,8 @@ pub async fn migrate_listing(
         .fetch_full_listing(&source_item_id)
         .await
         .map_err(|e| e.to_string())?;
+    // Kept to build the local record of the created listing below.
+    let source_listing = listing.clone();
 
     let request = CreateListingRequest {
         title: listing.title,
@@ -302,16 +341,31 @@ pub async fn migrate_listing(
         .await
         .map_err(|e| e.to_string())?;
 
-    let db = state.active_db().await?;
-    db.insert_mapping(
+    // Record the created listing and its mapping in one transaction: both
+    // land or neither does. A failure here can only be a race with the
+    // pre-flight check, so name the live item id — it shows up as unmapped
+    // and can be mapped manually instead of being silently lost.
+    let mut record = source_listing;
+    record.platform = tgt_plat;
+    record.platform_item_id = new_item_id.clone();
+    record.variant_id = Some(variant_id.clone());
+    let record_json = serde_json::to_string(&record).ok();
+    db.record_created_listing(
         &product_id,
         tgt_plat.as_str(),
         &new_item_id,
         None,
         &variant_id,
+        record_json.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        format!(
+            "Listing {new_item_id} was created on {} but recording its mapping failed: {e}. \
+             It is live but unmapped; map it from the listings page.",
+            tgt_plat.as_str()
+        )
+    })?;
 
     Ok(new_item_id)
 }
@@ -323,6 +377,11 @@ pub async fn create_listing_on_platform(
 ) -> Result<String, String> {
     let tgt_plat = Platform::from_str_loose(&params.target_platform)
         .ok_or_else(|| format!("Unknown platform: {}", params.target_platform))?;
+
+    // Refuse up front if the mapping could not be recorded — creating the
+    // listing first would strand it live and unmapped.
+    let db = state.active_db().await?;
+    ensure_mapping_slot_free(&db, &params.product_id, tgt_plat, &params.variant_id).await?;
 
     let adapters = state.active_adapters().await?;
     let adapters = adapters.read().await;
@@ -346,22 +405,73 @@ pub async fn create_listing_on_platform(
         photo_urls: params.photo_urls,
         extras: params.extras.unwrap_or_default(),
     };
+    // Kept to build the local record of the created listing below.
+    let record_fields = (
+        request.title.clone(),
+        request.description_html.clone(),
+        request.sku.clone(),
+        request.quantity,
+        request.price.clone(),
+        request.photo_urls.clone(),
+    );
 
     let new_item_id = tgt_adapter
         .create_listing(request)
         .await
         .map_err(|e| e.to_string())?;
 
-    let db = state.active_db().await?;
-    db.insert_mapping(
+    // Record the created listing and its mapping in one transaction: both
+    // land or neither does. A failure here can only be a race with the
+    // pre-flight check, so name the live item id — it shows up as unmapped
+    // and can be mapped manually instead of being silently lost.
+    let (title, description_html, sku, quantity, price, photo_urls) = record_fields;
+    let record = FullListing {
+        platform: tgt_plat,
+        platform_item_id: new_item_id.clone(),
+        title,
+        sku,
+        quantity,
+        price,
+        description: description_html.map(|html| ListingDescription {
+            platform: tgt_plat,
+            platform_item_id: new_item_id.clone(),
+            html: Some(html),
+            plain_text: None,
+            fetched_at: String::new(),
+        }),
+        photos: photo_urls
+            .into_iter()
+            .enumerate()
+            .map(|(position, url)| ListingPhoto {
+                url,
+                position: position as i32,
+                width: None,
+                height: None,
+                alt_text: None,
+            })
+            .collect(),
+        url: None,
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        extras: std::collections::HashMap::new(),
+        variant_id: Some(params.variant_id.clone()),
+    };
+    let record_json = serde_json::to_string(&record).ok();
+    db.record_created_listing(
         &params.product_id,
         tgt_plat.as_str(),
         &new_item_id,
         params.sku.as_deref(),
         &params.variant_id,
+        record_json.as_deref(),
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        format!(
+            "Listing {new_item_id} was created on {} but recording its mapping failed: {e}. \
+             It is live but unmapped; map it from the listings page.",
+            tgt_plat.as_str()
+        )
+    })?;
 
     Ok(new_item_id)
 }
