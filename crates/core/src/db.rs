@@ -247,6 +247,10 @@ impl Db {
 
     /// Execute a single write statement under a MVCC concurrent transaction.
     ///
+    /// Returns the statement's own affected-row count. The transaction is
+    /// committed only when the statement succeeded; a failed statement is
+    /// rolled back, never committed.
+    ///
     /// Uses `BEGIN IMMEDIATE` so multiple callers can write simultaneously
     /// without blocking each other. Retries automatically on busy/conflict errors
     /// (up to 5 attempts with yield between retries).
@@ -271,10 +275,14 @@ impl Db {
                 Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
             }
 
-            let result = conn
-                .execute(sql, params.clone())
-                .await
-                .and(conn.execute("COMMIT", ()).await);
+            // Run the statement first and only COMMIT when it succeeded.
+            // Chaining with `.and(...)` would evaluate the COMMIT eagerly —
+            // committing even a failed statement — and would report the
+            // COMMIT's row count instead of the statement's.
+            let result = match conn.execute(sql, params.clone()).await {
+                Ok(affected) => conn.execute("COMMIT", ()).await.map(|_| affected),
+                Err(e) => Err(e),
+            };
 
             match result {
                 Ok(n) => return Ok(n),
@@ -1345,9 +1353,8 @@ impl Db {
     /// `event_key` is already in the ledger (a retried sale, a re-run
     /// backfill), the row is left alone and this returns `false`.
     pub async fn record_stock_event(&self, event: &StockEvent) -> Result<bool, SyncError> {
-        // INSERT OR IGNORE ... then SELECT changes() on the same connection:
-        // `execute_write` reports the row count of COMMIT, not of the
-        // statement, so it cannot tell an ignored duplicate from a new row.
+        // INSERT OR IGNORE ... then SELECT changes() on the same connection,
+        // inside one transaction, to tell an ignored duplicate from a new row.
         let sql = "INSERT OR IGNORE INTO stock_ledger
             (event_key, product_id, variant_id, event_kind, delta, platform, source_order_id, note)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
@@ -2053,6 +2060,12 @@ impl Db {
 
     // ── Inventory History ─────────────────────────────────────
 
+    /// Record a product's quantity in the history time series — but only
+    /// when it differs from the most recently recorded quantity for that
+    /// product. History is a record of *changes*: writing a row for every
+    /// sync cycle even when nothing moved would add ~288 identical rows per
+    /// product per day at the default 5-minute schedule and drown the actual
+    /// changes. The first observation of a product always records a row.
     pub async fn record_inventory_history(
         &self,
         product_id: &str,
@@ -2061,7 +2074,14 @@ impl Db {
     ) -> Result<(), SyncError> {
         self.execute_write(
             "INSERT INTO inventory_history (product_id, quantity, sync_cycle_id)
-             VALUES (?1, ?2, ?3)",
+             SELECT ?1, ?2, ?3
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM inventory_history
+                 WHERE product_id = ?1
+                   AND quantity = ?2
+                   AND id = (SELECT MAX(id) FROM inventory_history
+                             WHERE product_id = ?1)
+             )",
             params![product_id, quantity, sync_cycle_id],
         )
         .await?;
@@ -6556,5 +6576,162 @@ mod tests {
         assert_eq!(events[0].kind, StockEventKind::Opening);
         assert_eq!(events[0].event_key, "opening:v1");
         assert_eq!(events[0].delta, 7);
+    }
+
+    // ── N-4.7: execute_write semantics, history-on-change, pruning ──
+
+    async fn migrated_test_db(name: &str) -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn execute_write_returns_the_statements_row_count() {
+        let (_dir, db) = migrated_test_db("exec-write-count.db").await;
+
+        let inserted = db
+            .execute_write(
+                "INSERT INTO products (id, canonical_sku, name, quantity)
+                 VALUES ('p1', 'SKU-p1', 'P1', 1), ('p2', 'SKU-p2', 'P2', 2)",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(inserted, 2, "INSERT reports its own row count");
+
+        let updated = db
+            .execute_write("UPDATE products SET quantity = quantity + 10", ())
+            .await
+            .unwrap();
+        assert_eq!(updated, 2, "UPDATE reports the rows it touched");
+
+        let deleted = db
+            .execute_write("DELETE FROM products WHERE id = 'p1'", ())
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let no_op = db
+            .execute_write("DELETE FROM products WHERE id = 'missing'", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            no_op, 0,
+            "a statement matching nothing reports 0, not COMMIT's count"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_write_does_not_commit_a_failed_statement() {
+        let (_dir, db) = migrated_test_db("exec-write-failure.db").await;
+
+        db.execute_write(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p1', 'SKU-p1', 'P1', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // Duplicate primary key: the statement fails, so nothing may be
+        // committed and the error must surface.
+        let result = db
+            .execute_write(
+                "INSERT INTO products (id, canonical_sku, name, quantity)
+                 VALUES ('p1', 'SKU-dupe', 'Dupe', 99)",
+                (),
+            )
+            .await;
+        assert!(result.is_err(), "failed statement returns an error");
+
+        let product = db.get_product("p1").await.unwrap().unwrap();
+        assert_eq!(product.name, "P1", "the failed insert left no trace");
+        assert_eq!(product.quantity, 1);
+
+        // The database is still writable after the rolled-back failure.
+        let n = db
+            .execute_write("UPDATE products SET quantity = 5 WHERE id = 'p1'", ())
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn record_inventory_history_writes_only_on_change() {
+        let (_dir, db) = migrated_test_db("history-on-change.db").await;
+        db.execute_write(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p1', 'SKU-p1', 'P1', 5)",
+            (),
+        )
+        .await
+        .unwrap();
+
+        // First observation records a row; repeats of the same quantity —
+        // the every-cycle spam this guards against — do not.
+        db.record_inventory_history("p1", 5, "cyc-1").await.unwrap();
+        db.record_inventory_history("p1", 5, "cyc-2").await.unwrap();
+        db.record_inventory_history("p1", 5, "cyc-3").await.unwrap();
+        let history = db.get_inventory_history("p1", None).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].quantity, 5);
+
+        // A real change records a row; changing back records another.
+        db.record_inventory_history("p1", 3, "cyc-4").await.unwrap();
+        db.record_inventory_history("p1", 3, "cyc-5").await.unwrap();
+        db.record_inventory_history("p1", 5, "cyc-6").await.unwrap();
+        let history = db.get_inventory_history("p1", None).await.unwrap();
+        let quantities: Vec<i64> = history.iter().map(|h| h.quantity).collect();
+        assert_eq!(quantities, vec![5, 3, 5]);
+    }
+
+    #[tokio::test]
+    async fn prune_and_downsample_delete_only_old_rows() {
+        let (_dir, db) = migrated_test_db("prune.db").await;
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO sync_events (product_id, source_platform, target_platform,
+                old_quantity, new_quantity, event_type, sync_cycle_id, created_at)
+             VALUES ('p1', 'a', 'b', 1, 1, 'quantity_change', 'old', datetime('now', '-100 days')),
+                    ('p1', 'a', 'b', 1, 1, 'quantity_change', 'new', datetime('now'))",
+            (),
+        )
+        .await
+        .unwrap();
+        for (quantity, recorded_at) in [
+            (9, "datetime('now', '-40 days')"),
+            (8, "datetime('now', '-40 days', '+1 hour')"),
+            (7, "datetime('now', '-40 days', '+2 hours')"),
+            (4, "datetime('now')"),
+        ] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO inventory_history (product_id, quantity, sync_cycle_id, recorded_at)
+                     VALUES ('p1', {quantity}, 'cyc', {recorded_at})"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        }
+        drop(conn);
+
+        // The returned counts are the DELETEs' own row counts (this also
+        // pins execute_write reporting the statement count, not COMMIT's).
+        let pruned = db.prune_old_sync_events(90).await.unwrap();
+        assert_eq!(pruned, 1);
+        let events = db.list_recent_sync_events(10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sync_cycle_id, "new");
+
+        let removed = db.downsample_old_history(30).await.unwrap();
+        assert_eq!(removed, 2, "three rows on one old day thin to one");
+        let history = db.get_inventory_history("p1", None).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].quantity, 9);
+        assert_eq!(history[1].quantity, 4);
     }
 }
