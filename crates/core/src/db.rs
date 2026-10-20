@@ -15,7 +15,7 @@ use crate::types::{
     VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 21;
+const CURRENT_SCHEMA_VERSION: i64 = 22;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -513,7 +513,7 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008`
     ///   (repairing the columns migration 007 dropped when it rebuilt
-    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019` and `021` are
+    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019`, `021` and `022` are
     ///   all inline. The inline step is the single authority for these
     ///   numbers: an orphan `.sql` file with an inline step's number must not
     ///   exist (three such orphans were deleted by N-3.2).
@@ -997,6 +997,18 @@ impl Db {
                 )
                 .await?;
                 debug!("Applied migration 021: variant-aware platform_snapshots");
+            }
+            22 => {
+                // Approval-bound code fingerprint (see crate::plugins). NULL means the
+                // row was never reviewed under the binding (legacy rows, new imports,
+                // P2P arrivals awaiting review).
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_registry ADD COLUMN code_hash TEXT",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 022: vendor_plugin_registry.code_hash");
             }
             _ => {}
         }
@@ -3387,7 +3399,7 @@ impl Db {
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
                         category, icon, include_vendor_stock, created_at, updated_at,
-                        allowed_hosts
+                        allowed_hosts, code_hash
                  FROM vendor_plugin_registry ORDER BY display_name",
                 (),
             )
@@ -3410,7 +3422,7 @@ impl Db {
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
                         category, icon, include_vendor_stock, created_at, updated_at,
-                        allowed_hosts
+                        allowed_hosts, code_hash
                  FROM vendor_plugin_registry WHERE id = ?1",
                 params![id],
             )
@@ -3433,7 +3445,7 @@ impl Db {
                 "SELECT id, plugin_file, display_name, description, files_json, version,
                         config_fields, config_json, status, submitted_by, approved_by,
                         category, icon, include_vendor_stock, created_at, updated_at,
-                        allowed_hosts
+                        allowed_hosts, code_hash
                  FROM vendor_plugin_registry WHERE display_name = ?1 LIMIT 1",
                 params![display_name],
             )
@@ -3452,13 +3464,15 @@ impl Db {
             "INSERT INTO vendor_plugin_registry
                 (id, plugin_file, display_name, description, code, files_json, version,
                  config_fields, config_json, status, submitted_by, approved_by,
-                 category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts)
-             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                 category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts,
+                 code_hash)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(id) DO UPDATE SET
                 plugin_file = ?2, display_name = ?3, description = ?4, files_json = ?5,
                 version = ?6, config_fields = ?7, config_json = ?8, status = ?9,
                 submitted_by = ?10, approved_by = ?11, category = ?12, icon = ?13,
-                include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17",
+                include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17,
+                code_hash = ?18",
             params![
                 plugin.id.clone(),
                 plugin.plugin_file.clone(),
@@ -3477,6 +3491,7 @@ impl Db {
                 plugin.created_at.clone(),
                 plugin.updated_at.clone(),
                 plugin.allowed_hosts_json.clone(),
+                plugin.code_hash.clone(),
             ],
         )
         .await?;
@@ -3499,15 +3514,26 @@ impl Db {
         Ok(())
     }
 
-    pub async fn set_plugin_status(
+    /// Record an admin review decision on a registry plugin, binding the decision to
+    /// the plugin's current code fingerprint: any later re-import or P2P merge whose
+    /// code or fetch allowlist no longer matches this hash resets the plugin to
+    /// `pending` (see [`crate::plugins::reconcile_plugin_approval`]). A rejection is
+    /// bound the same way, so a changed re-submission comes back as `pending`.
+    pub async fn review_registry_plugin(
         &self,
         id: &str,
         status: &str,
-        approved_by: Option<&str>,
+        reviewed_by: Option<&str>,
     ) -> Result<(), SyncError> {
+        let code_hash = match self.get_registry_plugin(id).await? {
+            Some(row) => {
+                crate::plugins::plugin_code_fingerprint(&row.files_json, &row.allowed_hosts_json)
+            }
+            None => None,
+        };
         self.execute_write(
-            "UPDATE vendor_plugin_registry SET status = ?1, approved_by = ?2, updated_at = datetime('now') WHERE id = ?3",
-            params![status, approved_by, id],
+            "UPDATE vendor_plugin_registry SET status = ?1, approved_by = ?2, code_hash = ?3, updated_at = datetime('now') WHERE id = ?4",
+            params![status, reviewed_by, code_hash, id],
         )
         .await?;
         Ok(())
@@ -4384,6 +4410,7 @@ fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncErro
         created_at: row.get::<String>(14)?,
         updated_at: row.get::<String>(15)?,
         allowed_hosts_json: row.get::<Option<String>>(16)?,
+        code_hash: row.get::<Option<String>>(17)?,
     })
 }
 
@@ -4585,7 +4612,41 @@ mod tests {
             created_at: "2026-09-25 00:00:00".to_string(),
             updated_at: "2026-09-25 00:00:00".to_string(),
             allowed_hosts_json: allowed_hosts_json.map(str::to_string),
+            code_hash: None,
         }
+    }
+
+    #[tokio::test]
+    async fn review_binds_the_approval_to_the_current_code_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        db.upsert_registry_plugin(&registry_row("plug", Some(r#"["api.example.com"]"#)))
+            .await
+            .unwrap();
+
+        db.review_registry_plugin("plug", "approved", Some("onion-x"))
+            .await
+            .unwrap();
+        let row = db.get_registry_plugin("plug").await.unwrap().unwrap();
+        assert_eq!(row.status, "approved");
+        assert_eq!(row.approved_by.as_deref(), Some("onion-x"));
+        assert_eq!(
+            row.code_hash,
+            crate::plugins::plugin_code_fingerprint(&row.files_json, &row.allowed_hosts_json)
+        );
+        assert!(row.code_hash.is_some());
+
+        // A rejection is bound the same way, so a changed re-submission
+        // comes back as pending rather than inheriting the rejection.
+        db.review_registry_plugin("plug", "rejected", Some("onion-x"))
+            .await
+            .unwrap();
+        let row = db.get_registry_plugin("plug").await.unwrap().unwrap();
+        assert_eq!(row.status, "rejected");
+        assert!(row.code_hash.is_some());
     }
 
     #[tokio::test]

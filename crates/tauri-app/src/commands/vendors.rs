@@ -39,6 +39,11 @@ pub struct VendorPluginInfo {
     /// This machine's time limit for one run, in minutes, and whether it is the default.
     pub timeout_minutes: u32,
     pub timeout_is_default: bool,
+    /// SHA-256 fingerprint of the plugin's code and fetch allowlist, bound at the last
+    /// review (see `nisaba_core::plugins`). A re-import or P2P merge that changed the
+    /// code resets the plugin to pending and stores the new hash here, so the review
+    /// card shows exactly what the admin is being asked to approve.
+    pub code_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -458,6 +463,7 @@ fn build_plugin_info_with_timeout(
             .map(|m| m.clamp(1, MAX_PLUGIN_TIMEOUT_MINUTES as i64) as u32)
             .unwrap_or_else(default_timeout_minutes),
         timeout_is_default: timeout_minutes.is_none(),
+        code_hash: p.code_hash,
     }
 }
 
@@ -472,6 +478,26 @@ fn parse_files_json(files_json: &str) -> Result<HashMap<String, String>, String>
         return Err("Plugin has no files".to_string());
     }
     serde_json::from_str(files_json).map_err(|e| format!("Failed to parse plugin files: {e}"))
+}
+
+/// Reconcile a same-name re-import (or re-submission) against the existing registry
+/// row: keep the stored review state when the code and fetch allowlist are unchanged;
+/// otherwise reset to `pending` with the new code hash so the change is visible to
+/// the reviewer. Returns `(status, approved_by, code_hash)`.
+fn reconcile_reimport(
+    existing: &VendorPluginRow,
+    files_json: &str,
+    allowed_hosts_json: &Option<String>,
+) -> (String, Option<String>, Option<String>) {
+    let (status, approved_by, code_hash) =
+        nisaba_core::plugins::reconcile_plugin_approval(existing, files_json, allowed_hosts_json);
+    if status == "pending" && existing.status != "pending" {
+        tracing::warn!(
+            plugin = %existing.display_name,
+            "Plugin code or allowlist changed on re-import; approval revoked, pending re-approval"
+        );
+    }
+    (status, approved_by, code_hash)
 }
 
 // ── Registry commands (company-level, syncs via P2P) ──────────
@@ -586,7 +612,11 @@ pub async fn submit_vendor_plugin(
                 metadata.name, metadata.version
             ));
         }
-        // Update in-place: preserve id, config, approval status
+        // Update in-place: preserve id and config. Approval carries over only when
+        // the code and allowlist are unchanged; any change resets to pending with
+        // the new code hash surfaced for re-approval.
+        let (status, approved_by, code_hash) =
+            reconcile_reimport(&existing, &files_json, &allowed_hosts_json);
         VendorPluginRow {
             id: existing.id,
             plugin_file: file_name,
@@ -596,15 +626,16 @@ pub async fn submit_vendor_plugin(
             version: metadata.version,
             config_fields: config_fields_json,
             config_json: existing.config_json,
-            status: existing.status,
+            status,
             submitted_by,
-            approved_by: existing.approved_by,
+            approved_by,
             category: metadata.category,
             icon,
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
             allowed_hosts_json: allowed_hosts_json.clone(),
+            code_hash,
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -626,6 +657,8 @@ pub async fn submit_vendor_plugin(
             created_at: now.clone(),
             updated_at: now,
             allowed_hosts_json,
+            // Fresh import: never reviewed yet, so no bound code hash.
+            code_hash: None,
         }
     };
 
@@ -704,7 +737,11 @@ pub async fn import_vendor_plugin(
                 metadata.name, metadata.version
             ));
         }
-        // Update in-place: preserve id, config, approval status
+        // Update in-place: preserve id and config. Approval carries over only when
+        // the code and allowlist are unchanged; any change resets to pending with
+        // the new code hash surfaced for re-approval.
+        let (status, approved_by, code_hash) =
+            reconcile_reimport(&existing, &files_json, &allowed_hosts_json);
         VendorPluginRow {
             id: existing.id,
             plugin_file: file_name,
@@ -714,15 +751,16 @@ pub async fn import_vendor_plugin(
             version: metadata.version,
             config_fields: config_fields_json,
             config_json: existing.config_json,
-            status: existing.status,
+            status,
             submitted_by,
-            approved_by: existing.approved_by,
+            approved_by,
             category: metadata.category,
             icon,
             include_vendor_stock: existing.include_vendor_stock,
             created_at: existing.created_at,
             updated_at: now,
             allowed_hosts_json: allowed_hosts_json.clone(),
+            code_hash,
         }
     } else {
         let id = uuid::Uuid::new_v4().to_string();
@@ -744,6 +782,8 @@ pub async fn import_vendor_plugin(
             created_at: now.clone(),
             updated_at: now,
             allowed_hosts_json,
+            // Fresh import: never reviewed yet, so no bound code hash.
+            code_hash: None,
         }
     };
 
@@ -782,7 +822,7 @@ pub async fn approve_vendor_plugin(
         .flatten()
         .and_then(|(_, _, _, onion, _)| onion);
 
-    db.set_plugin_status(&plugin_id, "approved", our_onion.as_deref())
+    db.review_registry_plugin(&plugin_id, "approved", our_onion.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -805,7 +845,7 @@ pub async fn reject_vendor_plugin(
         .flatten()
         .and_then(|(_, _, _, onion, _)| onion);
 
-    db.set_plugin_status(&plugin_id, "rejected", our_onion.as_deref())
+    db.review_registry_plugin(&plugin_id, "rejected", our_onion.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -980,6 +1020,10 @@ pub async fn fetch_vendor_listings(
         .map_err(|e| e.to_string())?
         .ok_or("Plugin not found in registry")?;
 
+    if plugin.status != "approved" {
+        return Err("Plugin is not approved".to_string());
+    }
+
     // Secrets are injected from the OS keyring here; config_json never holds them.
     let config = plugin_config_for_run(&db, &plugin_id).await;
 
@@ -1072,6 +1116,11 @@ pub async fn sync_vendor_listings(
             // Clean up syncing state on error
             "Plugin not found in registry".to_string()
         })?;
+
+    if plugin.status != "approved" {
+        state.vendor_syncing.lock().await.remove(&plugin_id);
+        return Err("Plugin is not approved".to_string());
+    }
 
     // Secrets are injected from the OS keyring here; config_json never holds them.
     let config = plugin_config_for_run(&db, &plugin_id).await;
@@ -1494,6 +1543,31 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
         }
     };
 
+    // Never run a plugin that is not installed+enabled and approved. A code or
+    // allowlist change resets the plugin to pending, which revokes its run
+    // eligibility until an admin re-approves the new code.
+    let installs = db.list_installed_plugins().await.unwrap_or_default();
+    let install = installs.iter().find(|i| i.plugin_id == plugin_id);
+    if !nisaba_core::plugins::plugin_run_allowed(&plugin, install) {
+        tracing::warn!(
+            plugin = %plugin_id,
+            status = %plugin.status,
+            "Auto vendor sync: refusing to run plugin that is not installed+approved"
+        );
+        if let Some(ref app) = app {
+            let _ = app.emit(
+                "vendor-sync",
+                VendorSyncEvent {
+                    plugin_id: plugin_id.clone(),
+                    status: "skipped".to_string(),
+                    listing_count: 0,
+                    message: "Plugin is not installed and approved; sync skipped".to_string(),
+                },
+            );
+        }
+        return;
+    }
+
     // Secrets are injected from the OS keyring here; config_json never holds them.
     let config = plugin_config_for_run(&db, &plugin_id).await;
 
@@ -1605,9 +1679,19 @@ pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
         }
     };
 
+    // Only installed+enabled plugins with a current approval may run; a code or
+    // allowlist change resets a plugin to pending, which keeps it out of the run.
+    let approved: std::collections::HashSet<String> = db
+        .list_registry_plugins()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.status == "approved")
+        .map(|p| p.id)
+        .collect();
     let active: Vec<_> = installs
         .into_iter()
-        .filter(|i| i.installed && i.enabled)
+        .filter(|i| i.installed && i.enabled && approved.contains(&i.plugin_id))
         .collect();
 
     if active.is_empty() {
