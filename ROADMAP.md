@@ -414,8 +414,8 @@ anything on the platform (see "Writes that report success without writing" below
       (`platform-ebay/src/types.rs:11`), and Amazon LWA client secrets have a rotation
       deadline; check the current window before building this.
 - [ ] A fifth adapter would prove the trait is actually general. Superseded: the next
-      adapter is Shopify, built as a marketplace plugin (Phase 3, *Plugin kinds after 1.0*;
-      *Services and integrations*).
+      adapter is WooCommerce, then Shopify, built as marketplace plugins (Phase 3,
+      *Plugin kinds after 1.0*; *Services and integrations*).
 - [ ] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
       callback accepts a `code` from any page the auth window reaches (~279–283). Add and
       check `state`.
@@ -659,7 +659,8 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
       becomes a host rule: every write returns a structured result (`applied`, `rejected`,
       `rate_limited`, `auth_failed`), never a bare success. The host also enforces dry-run,
       so a plugin cannot write during a preview, and supplies idempotency keys and a
-      rate-limit helper. Shopify is the first one (*Services and integrations*).
+      rate-limit helper. WooCommerce is the first one, then Shopify (*Services and
+      integrations*, WordPress priority).
 - [ ] **Order (dropship) plugins.** When a sale of a vendor-sourced variant is detected,
       call the source plugin's `placeOrder` to submit it to the supplier. An approval queue
       is on by default, dry-run is supported, and order status is polled afterwards.
@@ -1288,19 +1289,85 @@ broker. Which ones are worth building depends on two facts this list does not ha
 customers' sales actually come from, and whether they sell in person. Ask before building
 past the *Should* group.
 
-**Should** — clear fit for the current channels, in recommended order:
+#### Priority: WordPress and the WooCommerce ecosystem
+
+Owner direction 2026-10-19: WordPress and its ecosystem come first. WooCommerce is the
+next adapter, ahead of Shopify. It has four advantages over the rest of the list:
+
+- it is self-hosted, so customers own their store and their data, which matches Nisaba's
+  stance;
+- it is common with sellers who take crypto, which matches the XMR Bazaar audience;
+- it is the only candidate that CI can verify against a real store, using the official
+  WordPress and WooCommerce Docker images;
+- its official channel extensions can carry stock onward to Google, Meta and TikTok.
+
+- [ ] **WooCommerce adapter** (as a marketplace plugin if the Phase 3 bridge is ready,
+      otherwise as a Rust crate that later moves behind it):
+      - **Auth.** REST API v3 with a consumer key and secret that the customer generates in
+        WooCommerce → Settings → Advanced → REST API (Read/Write), over HTTPS only.
+        Bring-your-own keys, no app review.
+      - **Stock.** Simple products and every variation carry `manage_stock`,
+        `stock_quantity`, `stock_status` and `backorders`; map variations onto Nisaba
+        variants by SKU. Push through the `products/batch` and `variations/batch`
+        endpoints rather than one request per item.
+      - **Sales.** Poll orders with `modified_after` on each cycle; a desktop app cannot
+        receive WooCommerce webhooks. Key each sale by store and order id so it lands in
+        the stock ledger once (Phase 4). Decide which order statuses count as a sale, and
+        how WooCommerce's held stock for pending orders is treated.
+      - **Price and description.** `regular_price` and `sale_price` are strings, which
+        suits the decimal-money item; descriptions are HTML and go through the same
+        sanitiser as every other `v-html` sink.
+      - **Create listing**, including variable products with attributes and images by URL.
+- [ ] **Live verification in CI.** Start `wordpress` with WooCommerce in a service
+      container, seed products and variations, and run the adapter's full write path
+      against it, including a rejected write. No other platform allows a real-API test
+      in CI, so this adapter becomes the template for "writes report what really
+      happened" (Phase 2).
+- [ ] **Blind stock writes race checkout.** A REST stock update is an absolute set, so an
+      order placed between Nisaba's read and write is overwritten, losing that decrement.
+      Every platform has this race; WooCommerce is the one where Nisaba can ship
+      server-side code to close it. If polling cannot keep the window small enough,
+      build the companion plugin below.
+- [ ] **Companion WordPress plugin "Nisaba Connector"** (optional; build only if the race
+      above or the REST API's limits demand it). It would provide an atomic adjust
+      endpoint ("decrement by N") or a compare-and-set ("set to X if current is Y"), a
+      bulk stock read keyed by SKU, and an order-change cursor. Authentication would use
+      WordPress Application Passwords or the WooCommerce keys. Publish it on
+      wordpress.org so customers install it from their dashboard.
+- [ ] **Channel extensions instead of direct adapters.** Google's, Meta's and TikTok's
+      official WooCommerce extensions sync the store's catalog and availability to
+      Merchant Center, Meta catalogs and TikTok Shop. For a WooCommerce seller, a correct
+      WooCommerce stock count therefore reaches all three without a Nisaba adapter.
+      Document the recommended setup, and verify that each extension pushes stock changes
+      promptly and does not wait for a daily feed. Direct Merchant Center, Meta and TikTok
+      adapters (below) are then for sellers without WooCommerce.
+- [ ] **Crypto checkout guide.** BTCPay Server for WooCommerce, and the Monero WooCommerce
+      gateway, are the recommended way for XMR Bazaar sellers to take crypto on their own
+      store. No integration is needed, because Nisaba sees WooCommerce orders whatever the
+      payment method; this is a setup guide.
+- [ ] **WordPress.com-hosted WooCommerce.** Confirm that the REST API and its keys work on
+      WordPress.com's commerce plans, so customers who don't want to self-host are covered.
+- [ ] **Move a catalog into WooCommerce.** Use Nisaba's cross-platform create-listing to
+      copy a Squarespace or eBay catalog into a new WooCommerce store, with mappings
+      created as it goes. This turns "set up a WordPress store" from a migration project
+      into a button.
+- [ ] *Could:* WordPress multi-vendor marketplaces such as Dokan, WCFM and WC Vendors, for
+      sellers who list on someone else's WordPress-based marketplace. Dokan exposes a
+      REST API for vendors. Build one when a customer sells on one.
+- *Not building:* Easy Digital Downloads and other WordPress digital-goods plugins. They
+  sell downloads, so there is no physical stock to sync.
+
+**Should** — after WordPress, in recommended order:
 
 - [ ] **Shopify** — the largest small-business storefront. The GraphQL Admin API has
       first-class inventory levels per location. A custom app created in the store's admin
-      gives an access token with no app review. This is the strongest next adapter.
-- [ ] **Google Merchant Center** — sellers with their own store (Squarespace today) can
-      list its products in Google's free Shopping listings. Merchant Center disapproves
-      items whose availability does not match the store page, so accurate stock is exactly
-      what it needs. Build on the new Merchant API, not the Content API for Shopping it
-      replaces; check the Content API's sunset date first.
-- [ ] **WooCommerce** — self-hosted WordPress stores, using REST API keys generated in the
-      store. It is common with sellers who take crypto (BTCPay Server has a WooCommerce
-      plugin), which fits the XMR Bazaar audience.
+      gives an access token with no app review.
+- [ ] **Google Merchant Center** — a direct adapter for sellers whose store is *not*
+      WooCommerce (Squarespace today); WooCommerce sellers are covered by Google's
+      extension (above). Merchant Center disapproves items whose availability does not
+      match the store page, so accurate stock is exactly what it needs. Build on the new
+      Merchant API, not the Content API for Shopping it replaces; check the Content API's
+      sunset date first.
 - [ ] **Square POS — if customers sell in person** (shows, a shop). A sale at a table is an
       oversell Nisaba cannot see today. Square issues a personal access token for the
       seller's own account, which fits bring-your-own keys. Square is unrelated to
@@ -1308,19 +1375,23 @@ past the *Should* group.
 - [ ] **Walmart Marketplace** — a large marketplace, but sellers must be approved by
       Walmart first. Its API keys are per seller.
 - [ ] Build these as **marketplace plugins** rather than new Rust crates (Phase 3,
-      *Plugin kinds after 1.0*). A new marketplace then ships without an app release, and
-      Shopify is the proof that the plugin bridge is general. This supersedes the
-      "fifth adapter" item in Phase 2.
+      *Plugin kinds after 1.0*). A new marketplace then ships without an app release.
+      WooCommerce, followed by Shopify, proves that the plugin bridge is general. This
+      supersedes the "fifth adapter" item in Phase 2.
 
 **Could** — build when a customer actually sells there:
 
-- [ ] **BigCommerce** — a storefront like Shopify, with store-level API tokens.
-- [ ] **Meta (Facebook/Instagram) catalog** — catalog and availability sync only. Meta
-      moved US Shops checkout to sellers' own websites, so this channel sends traffic
-      rather than taking sales. Check the current state of Shops checkout before
+- [ ] **BigCommerce** — a storefront like Shopify, with store-level API tokens. It also
+      has a WordPress plugin (BigCommerce for WordPress), so it overlaps with the WordPress
+      priority above.
+- [ ] **Meta (Facebook/Instagram) catalog** — for sellers without WooCommerce, since
+      WooCommerce sellers are covered by Meta's extension. Catalog and availability sync
+      only: Meta moved US Shops checkout to sellers' own websites, so this channel sends
+      traffic rather than taking sales. Check the current state of Shops checkout before
       building.
-- [ ] **TikTok Shop** — a growing channel, but it needs partner app approval, the same
-      risk that sank Nisaba's own Amazon application (*1.0 release*).
+- [ ] **TikTok Shop** — for sellers without WooCommerce, since WooCommerce sellers are
+      covered by TikTok's extension. A growing channel, but it needs partner app approval,
+      the same risk that sank Nisaba's own Amazon application (*1.0 release*).
 - [ ] **BTCPay Server store and point-of-sale apps** — a crypto-native storefront that
       tracks item inventory; the audience matches XMR Bazaar's. Confirm that the Greenfield
       API exposes item inventory for read and write.
