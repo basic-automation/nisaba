@@ -4,6 +4,16 @@ use std::sync::Arc;
 
 use deno_core::{op2, OpState};
 
+use nisaba_core::net_guard;
+
+/// Post-DNS SSRF guard for `op_nisaba_fetch`, consulted alongside `FetchPolicy`.
+/// When `true` (the production default — the op fails closed when it is absent from
+/// the `OpState`), hosts resolving to loopback, private, link-local or otherwise
+/// non-public addresses are refused, including on every redirect hop. The loopback
+/// fixture servers used by the test suite opt out explicitly.
+#[derive(Clone, Copy)]
+pub struct BlockPrivateHosts(pub bool);
+
 /// The largest response body `op_nisaba_fetch` will read, in bytes. Bodies are buffered
 /// in Rust — outside the V8 heap and its limit — so they need a ceiling of their own.
 /// Without one in the `OpState`, bodies are unbounded.
@@ -64,8 +74,29 @@ impl FetchPolicy {
     }
 }
 
-/// Redirects are followed at most this many hops, each checked against the policy.
+/// Redirects are followed at most this many hops; every hop is held to the same
+/// policy *and* the same post-DNS refusal as the initial request, so an allowed
+/// host cannot bounce the request somewhere the plugin could not reach directly.
 const MAX_REDIRECTS: usize = 10;
+
+/// The full gate for one fetch target: the host-name policy first, then the
+/// post-DNS SSRF refusal.
+async fn check_fetch_target(
+    policy: &FetchPolicy,
+    block_private: bool,
+    url: &reqwest::Url,
+) -> Result<(), String> {
+    if !policy.allows(url) {
+        return Err(policy.refusal(url));
+    }
+    if block_private {
+        match url.host_str() {
+            Some(host) => net_guard::ensure_host_is_public(host).await?,
+            None => return Err(format!("Fetch error: URL has no host: {url}")),
+        }
+    }
+    Ok(())
+}
 
 /// HTTP fetch via reqwest — the only network access plugins get.
 #[op2]
@@ -75,7 +106,7 @@ pub async fn op_nisaba_fetch(
     #[string] url: String,
     #[string] options_json: String,
 ) -> Result<String, deno_error::JsErrorBox> {
-    let (max_body, policy) = {
+    let (max_body, policy, block_private) = {
         let state = state.borrow();
         (
             state
@@ -85,14 +116,16 @@ pub async fn op_nisaba_fetch(
                 .try_borrow::<FetchPolicy>()
                 .cloned()
                 .unwrap_or(FetchPolicy::Deny),
+            // Absent guard means enforced: production always installs it explicitly.
+            state.try_borrow::<BlockPrivateHosts>().is_none_or(|b| b.0),
         )
     };
 
     let parsed = reqwest::Url::parse(&url)
         .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: invalid URL: {e}")))?;
-    if !policy.allows(&parsed) {
-        return Err(deno_error::JsErrorBox::generic(policy.refusal(&parsed)));
-    }
+    check_fetch_target(&policy, block_private, &parsed)
+        .await
+        .map_err(deno_error::JsErrorBox::generic)?;
 
     #[derive(serde::Deserialize)]
     struct FetchOptions {
@@ -113,38 +146,24 @@ pub async fn op_nisaba_fetch(
         body: None,
     });
 
-    // Every redirect hop is held to the same policy, so an allowed host cannot bounce
-    // the request somewhere the plugin could not reach directly.
-    let redirect_policy = policy.clone();
+    // Redirects are followed manually rather than by reqwest's redirect policy so
+    // that every hop can be gated asynchronously: the host-name policy and the
+    // post-DNS SSRF refusal both run again on the resolved `Location`, so an
+    // allowed host cannot bounce the request somewhere the plugin could not reach
+    // directly.
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.error("too many redirects")
-            } else if redirect_policy.allows(attempt.url()) {
-                attempt.follow()
-            } else {
-                let refusal = redirect_policy.refusal(attempt.url());
-                attempt.error(format!("redirect refused: {refusal}"))
-            }
-        }))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| deno_error::JsErrorBox::generic(format!("Fetch error: {e}")))?;
-    let method =
+    let mut method =
         reqwest::Method::from_bytes(opts.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut url = parsed;
+    let mut headers = opts.headers;
+    let mut body = opts.body;
 
-    let mut req = client.request(method, parsed);
-
-    for (k, v) in &opts.headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-
-    if let Some(body) = opts.body {
-        req = req.body(body);
-    }
-
-    let mut resp = req.send().await.map_err(|e| {
-        // reqwest's Display omits the cause ("error following redirect"), and the cause
-        // is what a plugin author needs — e.g. which redirect the allowlist refused.
+    let send_error = |e: reqwest::Error| {
+        // reqwest's Display omits the cause, and the cause is what a plugin author
+        // needs — e.g. why the connection failed.
         let mut msg = format!("Fetch error: {e}");
         let mut source = std::error::Error::source(&e);
         while let Some(cause) = source {
@@ -152,7 +171,58 @@ pub async fn op_nisaba_fetch(
             source = cause.source();
         }
         deno_error::JsErrorBox::generic(msg)
-    })?;
+    };
+
+    let mut resp = None;
+    for _ in 0..=MAX_REDIRECTS {
+        let mut req = client.request(method.clone(), url.clone());
+        for (k, v) in &headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(b) = &body {
+            req = req.body(b.clone());
+        }
+        let r = req.send().await.map_err(send_error)?;
+        if !r.status().is_redirection() {
+            resp = Some(r);
+            break;
+        }
+        let location = r
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                deno_error::JsErrorBox::generic("Fetch error: redirect without a Location header")
+            })?;
+        let next = url.join(location).map_err(|e| {
+            deno_error::JsErrorBox::generic(format!("Fetch error: bad redirect location: {e}"))
+        })?;
+        if let Err(e) = check_fetch_target(&policy, block_private, &next).await {
+            return Err(deno_error::JsErrorBox::generic(format!(
+                "redirect refused: {e}"
+            )));
+        }
+        // 301/302/303 turn a non-GET/HEAD request into a GET without a body, as
+        // browsers do; 307/308 keep method and body.
+        if matches!(r.status().as_u16(), 301..=303)
+            && !matches!(method, reqwest::Method::GET | reqwest::Method::HEAD)
+        {
+            method = reqwest::Method::GET;
+            body = None;
+        }
+        // Do not leak credentials to a different origin on redirect.
+        if next.host_str() != url.host_str()
+            || next.port_or_known_default() != url.port_or_known_default()
+        {
+            headers.retain(|k, _| {
+                let k = k.to_ascii_lowercase();
+                k != "authorization" && k != "cookie"
+            });
+        }
+        url = next;
+    }
+    let mut resp =
+        resp.ok_or_else(|| deno_error::JsErrorBox::generic("Fetch error: too many redirects"))?;
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
     let headers: std::collections::HashMap<String, String> = resp_headers
