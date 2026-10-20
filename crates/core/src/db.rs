@@ -1,10 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use turso::params::Params;
 use turso::{params, Builder, Connection, Database, Error as TursoError};
 
 use crate::config::CompanyRegistryEntry;
+use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
 use crate::types::{
     AuthToken, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto, NewSyncEvent,
@@ -342,7 +344,102 @@ impl Db {
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
     /// Apply every migration step the DB has not seen yet.
     ///
-    /// A note on where each step lives, for the next person adding one:
+    /// Each step runs in its own `BEGIN IMMEDIATE ... COMMIT` transaction via
+    /// [`migrate_step`](Self::migrate_step), which bumps `PRAGMA user_version`
+    /// to the step number atomically with the schema change. A crash anywhere
+    /// before the step's `COMMIT` rolls the whole step back, leaving the
+    /// database at the previous version and the step re-runnable.
+    pub async fn migrate(&self) -> Result<(), SyncError> {
+        let start = self.schema_version().await?;
+        if start >= CURRENT_SCHEMA_VERSION {
+            debug!(version = start, "Database schema is up to date");
+            return Ok(());
+        }
+
+        info!(
+            current_version = start,
+            target_version = CURRENT_SCHEMA_VERSION,
+            "Running database migrations"
+        );
+        for step in (start + 1)..=CURRENT_SCHEMA_VERSION {
+            self.migrate_step(step).await?;
+        }
+        info!("Migrations complete, schema version = {CURRENT_SCHEMA_VERSION}");
+        Ok(())
+    }
+
+    /// Current `PRAGMA user_version` of this database.
+    async fn schema_version(&self) -> Result<i64, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn.query("PRAGMA user_version", ()).await?;
+        if let Some(row) = rows.next().await? {
+            Ok(row.get::<i64>(0)?)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Apply one migration step inside its own transaction, bumping
+    /// `PRAGMA user_version` to the step number atomically with the schema
+    /// change.
+    ///
+    /// SQLite rolls `PRAGMA user_version = N` back with the enclosing
+    /// transaction, so a crash anywhere before `COMMIT` leaves the database at
+    /// the previous version and the step re-runnable. Steps already applied
+    /// are skipped.
+    async fn migrate_step(&self, step: i64) -> Result<(), SyncError> {
+        if self.schema_version().await? >= step {
+            return Ok(());
+        }
+
+        let conn = self.connect().await?;
+        for attempt in 0..3u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => break,
+                Err(ref e) if is_retryable(e) && attempt < 2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt)))
+                        .await;
+                }
+                Err(e) => {
+                    return Err(SyncError::DatabaseError(format!(
+                        "Migration step {step}: failed to begin transaction: {e}"
+                    )));
+                }
+            }
+        }
+
+        if let Err(e) = self.run_migration_step(&conn, step).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        conn.execute(&format!("PRAGMA user_version = {step}"), ())
+            .await
+            .map_err(|e| {
+                SyncError::DatabaseError(format!(
+                    "Migration step {step}: user_version bump failed: {e}"
+                ))
+            })?;
+
+        match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                debug!(step, "Applied migration step");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(SyncError::DatabaseError(format!(
+                    "Migration step {step}: commit failed: {e}"
+                )))
+            }
+        }
+    }
+
+    /// The body of a single migration step. Runs inside the transaction opened
+    /// by [`migrate_step`](Self::migrate_step); never call it directly.
+    ///
+    /// Two things about the numbering are worth knowing before adding a step,
+    /// because neither is obvious from `migrations/`:
     ///
     /// * **A file-backed step's number is its schema version.** Step N runs
     ///   when `version < N`, and a step whose whole body is SQL lives in
@@ -359,70 +456,49 @@ impl Db {
     ///   exist (three such orphans were deleted by N-3.2).
     ///
     /// Adding a step means bumping [`CURRENT_SCHEMA_VERSION`] and appending a
-    /// new `if version < N` block. Never edit or renumber a step that shipped.
-    pub async fn migrate(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
-
-        let mut rows = conn.query("PRAGMA user_version", ()).await?;
-        let version: i64 = if let Some(row) = rows.next().await? {
-            row.get::<i64>(0)?
-        } else {
-            0
-        };
-
-        if version < CURRENT_SCHEMA_VERSION {
-            info!(
-                current_version = version,
-                target_version = CURRENT_SCHEMA_VERSION,
-                "Running database migrations"
-            );
-
-            if version < 1 {
+    /// new match arm here. Never edit or renumber a step that shipped.
+    async fn run_migration_step(&self, conn: &Connection, step: i64) -> Result<(), SyncError> {
+        match step {
+            1 => {
                 conn.execute_batch(include_str!("../../../migrations/001_initial.sql"))
                     .await?;
                 debug!("Applied migration 001_initial.sql");
             }
-
-            if version < 2 {
+            2 => {
                 conn.execute_batch(include_str!("../../../migrations/002_p2p_company.sql"))
                     .await?;
                 debug!("Applied migration 002_p2p_company.sql");
             }
-
-            if version < 3 {
+            3 => {
                 conn.execute_batch(include_str!("../../../migrations/003_multi_company.sql"))
                     .await?;
 
                 // Migrate existing peers from company_peers → company_peers_v2
-                self.migrate_peers_to_v2().await?;
+                self.migrate_peers_to_v2(conn).await?;
 
                 // Add peer_id column to company table if it exists and doesn't have it
-                self.add_company_peer_id_column().await?;
+                self.add_company_peer_id_column(conn).await?;
 
                 debug!("Applied migration 003_multi_company.sql");
             }
-
-            if version < 4 {
+            4 => {
                 // Add logo columns to company table (company DB)
-                self.add_company_logo_columns().await?;
+                self.add_company_logo_columns(conn).await?;
                 // Add logo column to company_registry table (app DB)
-                self.add_registry_logo_column().await?;
+                self.add_registry_logo_column(conn).await?;
                 debug!("Applied migration 004_company_logo");
             }
-
-            if version < 5 {
+            5 => {
                 conn.execute_batch(include_str!("../../../migrations/005_vendor_plugins.sql"))
                     .await?;
                 debug!("Applied migration 005_vendor_plugins.sql");
             }
-
-            if version < 6 {
+            6 => {
                 conn.execute_batch(include_str!("../../../migrations/006_plugin_metadata.sql"))
                     .await?;
                 debug!("Applied migration 006_plugin_metadata.sql");
             }
-
-            if version < 7 {
+            7 => {
                 // Create product_variants table + indexes
                 conn.execute_batch(include_str!("../../../migrations/007_product_variants.sql"))
                     .await?;
@@ -463,8 +539,7 @@ impl Db {
 
                 debug!("Applied migration 007_product_variants");
             }
-
-            if version < 8 {
+            8 => {
                 // Repair: migration 7 rebuilt platform_mappings but may have
                 // dropped the deleted_at/updated_at columns added by migration 2.
                 // Add them back idempotently.
@@ -482,27 +557,23 @@ impl Db {
                     .await;
                 debug!("Applied migration 008_repair_mappings_columns");
             }
-
-            if version < 9 {
+            9 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/009_vendor_listings_cache.sql"
                 ))
                 .await?;
                 debug!("Applied migration 009_vendor_listings_cache.sql");
             }
-
-            if version < 10 {
-                self.migrate_always_variants().await?;
+            10 => {
+                self.migrate_always_variants(conn).await?;
                 debug!("Applied migration 010_always_variants");
             }
-
-            if version < 11 {
+            11 => {
                 conn.execute_batch(include_str!("../../../migrations/011_cached_listings.sql"))
                     .await?;
                 debug!("Applied migration 011_cached_listings.sql");
             }
-
-            if version < 12 {
+            12 => {
                 // Idempotent — ignore error if columns already exist (e.g. from
                 // a previous interrupted migration that didn't bump the version).
                 let _ = conn
@@ -519,8 +590,7 @@ impl Db {
                     .await;
                 debug!("Applied migration 012: product_variants vendor source columns");
             }
-
-            if version < 13 {
+            13 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/013_product_vendor_data.sql"
                 ))
@@ -590,8 +660,7 @@ impl Db {
 
                 debug!("Applied migration 013_product_vendor_data.sql (with backfill)");
             }
-
-            if version < 14 {
+            14 => {
                 // Dropship-aware inventory: per-plugin toggle + on-hand quantity
                 let _ = conn
                     .execute(
@@ -613,8 +682,7 @@ impl Db {
                 .await?;
                 debug!("Applied migration 014: dropship inventory (include_vendor_stock + on_hand_quantity)");
             }
-
-            if version < 15 {
+            15 => {
                 // Rebuild platform_mappings without AUTOINCREMENT (unsupported in MVCC mode).
                 // INTEGER PRIMARY KEY still auto-generates IDs via max(rowid)+1.
                 conn.execute_batch(
@@ -642,8 +710,7 @@ impl Db {
                 .await?;
                 debug!("Applied migration 015: rebuild platform_mappings without AUTOINCREMENT for MVCC compat");
             }
-
-            if version < 16 {
+            16 => {
                 // Rebuild all remaining tables that used AUTOINCREMENT (unsupported in MVCC mode).
                 // INTEGER PRIMARY KEY still auto-generates IDs via max(rowid)+1.
 
@@ -790,16 +857,14 @@ impl Db {
 
                 debug!("Applied migration 016: rebuild all remaining AUTOINCREMENT tables for MVCC compat");
             }
-
-            if version < 17 {
+            17 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/017_cached_platform_listings.sql"
                 ))
                 .await?;
                 debug!("Applied migration 017: cached_platform_listings table");
             }
-
-            if version < 18 {
+            18 => {
                 // Cached fetch allowlist per registry plugin (see VendorPluginRow). NULL
                 // means "not computed yet", which is exactly right for every existing row.
                 let _ = conn
@@ -810,8 +875,7 @@ impl Db {
                     .await;
                 debug!("Applied migration 018: vendor_plugin_registry.allowed_hosts");
             }
-
-            if version < 19 {
+            19 => {
                 // Per-install plugin time limit (local, never synced). NULL = default.
                 let _ = conn
                     .execute(
@@ -821,19 +885,8 @@ impl Db {
                     .await;
                 debug!("Applied migration 019: vendor_plugin_installs.timeout_minutes");
             }
-
-            // Set the new schema version
-            conn.execute_batch(&format!(
-                "PRAGMA user_version = {};",
-                CURRENT_SCHEMA_VERSION
-            ))
-            .await?;
-
-            info!("Migrations complete, schema version = {CURRENT_SCHEMA_VERSION}");
-        } else {
-            debug!(version, "Database schema is up to date");
+            _ => {}
         }
-
         Ok(())
     }
 
@@ -2487,9 +2540,7 @@ impl Db {
     /// Migration 10: ensure every product has at least one variant row.
     /// Products with has_variants=0 and no variant rows get a "Default" variant
     /// created from their canonical_sku and quantity. Then has_variants is set to 1.
-    async fn migrate_always_variants(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
-
+    async fn migrate_always_variants(&self, conn: &Connection) -> Result<(), SyncError> {
         // Find products that have no variant rows
         let mut rows = conn
             .query(
@@ -2535,8 +2586,7 @@ impl Db {
         Ok(())
     }
 
-    async fn migrate_peers_to_v2(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn migrate_peers_to_v2(&self, conn: &Connection) -> Result<(), SyncError> {
         // Check if the old company_peers table exists
         let mut rows = conn
             .query(
@@ -2594,8 +2644,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_company_peer_id_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_company_peer_id_column(&self, conn: &Connection) -> Result<(), SyncError> {
         // Check if company table exists
         let mut rows = conn
             .query(
@@ -2634,8 +2683,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_company_logo_columns(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_company_logo_columns(&self, conn: &Connection) -> Result<(), SyncError> {
         // Try to add columns; ignore errors if table doesn't exist or column already exists
         let _ = conn
             .execute_batch("ALTER TABLE company ADD COLUMN logo TEXT")
@@ -2646,8 +2694,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_registry_logo_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_registry_logo_column(&self, conn: &Connection) -> Result<(), SyncError> {
         // Try to add column; ignore errors if table doesn't exist or column already exists
         let _ = conn
             .execute_batch("ALTER TABLE company_registry ADD COLUMN logo TEXT")
@@ -3166,7 +3213,172 @@ impl Db {
         Ok(())
     }
 
+    /// Store a plugin's config map, routing `secret: true` values to the
+    /// secret store (the OS keyring in production) instead of `config_json`.
+    ///
+    /// Which keys are secret comes from the plugin's own `config_fields`
+    /// metadata. An empty secret value deletes the stored entry — that is how
+    /// a secret is cleared from the config form. If the secret store is
+    /// unavailable the value is kept in `config_json` (the old behaviour) so
+    /// the plugin keeps working; a warning is logged.
+    pub async fn set_plugin_config_split(
+        &self,
+        plugin_id: &str,
+        config: &HashMap<String, String>,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<(), SyncError> {
+        let secret_keys = match self.get_registry_plugin(plugin_id).await? {
+            Some(plugin) => secret_config_keys(plugin.config_fields.as_deref()),
+            None => HashSet::new(),
+        };
+        let mut plain = HashMap::new();
+        for (key, value) in config {
+            if secret_keys.contains(key) {
+                if value.is_empty() {
+                    if let Err(e) = secrets.delete(plugin_id, key) {
+                        warn!(plugin = %plugin_id, key, "Failed to delete plugin secret: {e}");
+                    }
+                } else if let Err(e) = secrets.store(plugin_id, key, value) {
+                    warn!(plugin = %plugin_id, key,
+                           "Keyring unavailable, keeping plugin secret in config_json: {e}");
+                    plain.insert(key.clone(), value.clone());
+                }
+            } else {
+                plain.insert(key.clone(), value.clone());
+            }
+        }
+        let config_json = serde_json::to_string(&plain).map_err(|e| {
+            SyncError::ConfigError(format!("Failed to serialise plugin config: {e}"))
+        })?;
+        self.set_plugin_config(plugin_id, &config_json).await
+    }
+
+    /// Load a plugin's effective config: non-secret values from `config_json`
+    /// plus `secret: true` values injected from the secret store.
+    ///
+    /// Any plaintext secrets still sitting in `config_json` from before this
+    /// mechanism existed are moved to the secret store and scrubbed from the
+    /// database on this first load. Secret-store failures degrade to whatever
+    /// `config_json` holds (a warning is logged) so plugins keep running on
+    /// machines without an OS keyring.
+    pub async fn get_plugin_config_merged(
+        &self,
+        plugin_id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<HashMap<String, String>, SyncError> {
+        self.migrate_plugin_secrets_for(plugin_id, secrets).await?;
+        let plugin = self
+            .get_registry_plugin(plugin_id)
+            .await?
+            .ok_or_else(|| SyncError::ConfigError(format!("Plugin not found: {plugin_id}")))?;
+        let mut config: HashMap<String, String> = plugin
+            .config_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        for key in secret_config_keys(plugin.config_fields.as_deref()) {
+            match secrets.load(plugin_id, &key) {
+                Ok(Some(value)) => {
+                    config.insert(key, value);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(plugin = %plugin_id, key,
+                           "Failed to load plugin secret from keyring: {e}");
+                }
+            }
+        }
+        Ok(config)
+    }
+
+    /// Move one plugin's plaintext `secret: true` values out of `config_json`
+    /// into the secret store, scrubbing them from the database. Returns the
+    /// number of values moved.
+    ///
+    /// A value is only removed from `config_json` after the secret store
+    /// reads it back identically; on any failure the plaintext copy is kept
+    /// (it may be the only one).
+    pub async fn migrate_plugin_secrets_for(
+        &self,
+        plugin_id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<usize, SyncError> {
+        let plugin = match self.get_registry_plugin(plugin_id).await? {
+            Some(plugin) => plugin,
+            None => return Ok(0),
+        };
+        let secret_keys = secret_config_keys(plugin.config_fields.as_deref());
+        if secret_keys.is_empty() {
+            return Ok(0);
+        }
+        let config: HashMap<String, String> = plugin
+            .config_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let mut moved = 0;
+        for key in &secret_keys {
+            let Some(value) = config.get(key) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            match secrets.store(plugin_id, key, value) {
+                Ok(()) => match secrets.load(plugin_id, key) {
+                    Ok(Some(saved)) if saved == *value => moved += 1,
+                    _ => warn!(plugin = %plugin_id, key,
+                               "Keyring did not return the secret just stored; keeping plaintext copy"),
+                },
+                Err(e) => warn!(plugin = %plugin_id, key,
+                                "Keyring unavailable, keeping plaintext plugin secret in config_json: {e}"),
+            }
+        }
+        if moved > 0 {
+            let scrubbed = strip_secret_values(
+                plugin.config_fields.as_deref(),
+                plugin.config_json.as_deref(),
+            )
+            .unwrap_or_else(|| "{}".to_string());
+            self.set_plugin_config(plugin_id, &scrubbed).await?;
+            info!(plugin = %plugin_id, moved,
+                   "Migrated plugin secrets from config_json to the secret store");
+        }
+        Ok(moved)
+    }
+
+    /// Move every registry plugin's plaintext `secret: true` values into the
+    /// secret store. Returns the total number of values moved.
+    pub async fn migrate_plugin_secrets_to_keyring(
+        &self,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<usize, SyncError> {
+        let mut total = 0;
+        for plugin in self.list_registry_plugins().await? {
+            total += self.migrate_plugin_secrets_for(&plugin.id, secrets).await?;
+        }
+        Ok(total)
+    }
+
     pub async fn delete_registry_plugin(&self, id: &str) -> Result<(), SyncError> {
+        self.delete_registry_plugin_with_secrets(id, &crate::crypto::OsKeyringPluginSecrets)
+            .await
+    }
+
+    /// Delete a registry plugin, also removing its secrets from the secret
+    /// store so nothing lingers in the OS keyring after removal.
+    pub async fn delete_registry_plugin_with_secrets(
+        &self,
+        id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<(), SyncError> {
+        if let Some(plugin) = self.get_registry_plugin(id).await? {
+            for key in secret_config_keys(plugin.config_fields.as_deref()) {
+                if let Err(e) = secrets.delete(id, &key) {
+                    warn!(plugin = %id, key, "Failed to delete plugin secret from keyring: {e}");
+                }
+            }
+        }
         let p = to_params(params![id]);
         self.execute_writes(&[
             (
@@ -3790,6 +4002,58 @@ impl Db {
     }
 }
 
+/// Config keys declared with `secret: true` in a plugin's `config_fields` JSON.
+///
+/// `config_fields` is the serialised `Vec<ConfigField>` from the plugin's
+/// metadata; only the `key` and `secret` members matter here. Returns an empty
+/// set when the plugin declares no fields.
+pub fn secret_config_keys(config_fields_json: Option<&str>) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    if let Some(json) = config_fields_json {
+        if let Ok(fields) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
+            for field in fields {
+                let is_secret = field
+                    .get("secret")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if is_secret {
+                    if let Some(key) = field.get("key").and_then(serde_json::Value::as_str) {
+                        keys.insert(key.to_string());
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Remove `secret: true` values from a plugin `config_json` string.
+///
+/// Used wherever config crosses a boundary that must never carry secrets:
+/// the P2P sync payload (both directions) and the on-disk scrub performed by
+/// [`Db::migrate_plugin_secrets_to_keyring`]. Unparseable input is returned
+/// unchanged — never silently dropped.
+pub fn strip_secret_values(
+    config_fields_json: Option<&str>,
+    config_json: Option<&str>,
+) -> Option<String> {
+    let secret_keys = secret_config_keys(config_fields_json);
+    if secret_keys.is_empty() {
+        return config_json.map(str::to_string);
+    }
+    let json: String = config_json?.to_string();
+    let mut map: HashMap<String, String> = match serde_json::from_str(&json) {
+        Ok(map) => map,
+        Err(_) => return Some(json),
+    };
+    let before = map.len();
+    map.retain(|k, _| !secret_keys.contains(k));
+    if map.len() == before {
+        return Some(json);
+    }
+    serde_json::to_string(&map).ok().or(Some(json))
+}
+
 fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncError> {
     Ok(VendorPluginRow {
         id: row.get::<String>(0)?,
@@ -4102,6 +4366,382 @@ mod tests {
         let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// Open a database and apply migration steps `1..=target` one at a time,
+    /// exactly as `migrate()` would have on an older release.
+    async fn db_at_schema_version(dir: &tempfile::TempDir, name: &str, target: i64) -> Db {
+        let path = dir.path().join(name);
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        for step in 1..=target {
+            db.migrate_step(step).await.unwrap();
+        }
+        assert_eq!(db.schema_version().await.unwrap(), target);
+        db
+    }
+
+    async fn user_version_of(db: &Db) -> i64 {
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    async fn table_columns(conn: &turso::Connection, table: &str) -> Vec<String> {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .unwrap();
+        let mut cols = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            cols.push(row.get::<String>(1).unwrap());
+        }
+        cols
+    }
+
+    async fn table_ddl(conn: &turso::Connection, table: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                turso::params![table],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    async fn index_names(conn: &turso::Connection, table: &str) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
+                turso::params![table],
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        names
+    }
+
+    #[tokio::test]
+    async fn user_version_pragma_rolls_back_with_its_transaction() {
+        // migrate_step() bumps user_version inside the step's transaction. This
+        // locks in the SQLite behavior that makes that atomic: the pragma is
+        // rolled back with the transaction, so a crash mid-step can never
+        // leave the version bumped while the schema change rolled back.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "pragma-tx.db", 1).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        conn.execute("PRAGMA user_version = 42", ()).await.unwrap();
+        conn.execute("ROLLBACK", ()).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 1);
+
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        conn.execute("PRAGMA user_version = 42", ()).await.unwrap();
+        conn.execute("COMMIT", ()).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 42);
+    }
+
+    #[tokio::test]
+    async fn step_7_rebuild_preserves_populated_mappings() {
+        // Upgrade from a populated v6 database through the DROP/RENAME table
+        // rebuild in step 7. The step must bump the version by itself, keep
+        // every row, and swap the unique indexes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v6.db", 6).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p1', 'SKU-1', 'Widget', 10)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings
+                 (id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at)
+             VALUES (7, 'p1', 'ebay', 'EBAY-1', 'SKU-1', 1, NULL, '2026-10-01')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(7).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 7);
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT product_id, platform, platform_item_id, platform_sku, deleted_at, updated_at, variant_id
+                 FROM platform_mappings WHERE id = 7",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "p1");
+        assert_eq!(row.get::<String>(1).unwrap(), "ebay");
+        assert_eq!(row.get::<String>(2).unwrap(), "EBAY-1");
+        assert_eq!(row.get::<String>(3).unwrap(), "SKU-1");
+        assert!(row.get::<Option<String>>(4).unwrap().is_none());
+        assert_eq!(row.get::<String>(5).unwrap(), "2026-10-01");
+        assert!(row.get::<Option<String>>(6).unwrap().is_none());
+
+        // The rebuild added variant_id and swapped the unique indexes.
+        assert!(table_columns(&conn, "platform_mappings")
+            .await
+            .contains(&"variant_id".to_string()));
+        let indexes = index_names(&conn, "platform_mappings").await;
+        assert!(indexes.contains(&"idx_mappings_product_platform_variant".to_string()));
+        assert!(indexes.contains(&"idx_mappings_platform_item".to_string()));
+        assert!(!indexes.contains(&"idx_mappings_product_platform".to_string()));
+        drop(conn);
+
+        // The remaining steps complete the upgrade from the stepped version.
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn step_15_rebuild_drops_autoincrement_and_keeps_data() {
+        // Upgrade from a populated v14 database through the step-15 rebuild of
+        // platform_mappings (AUTOINCREMENT is unsupported in MVCC mode).
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v14.db", 14).await;
+
+        let conn = db.connect().await.unwrap();
+        assert!(
+            table_ddl(&conn, "platform_mappings")
+                .await
+                .contains("AUTOINCREMENT"),
+            "v14 platform_mappings should still use AUTOINCREMENT"
+        );
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p2', 'SKU-2', 'Gadget', 3)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings (product_id, platform, platform_item_id, is_active, variant_id)
+             VALUES ('p2', 'etsy', 'ETSY-9', 1, 'var-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(15).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 15);
+
+        let conn = db.connect().await.unwrap();
+        assert!(
+            !table_ddl(&conn, "platform_mappings")
+                .await
+                .contains("AUTOINCREMENT"),
+            "step 15 must remove AUTOINCREMENT"
+        );
+        let mut rows = conn
+            .query(
+                "SELECT product_id, platform, platform_item_id, variant_id FROM platform_mappings",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "p2");
+        assert_eq!(row.get::<String>(3).unwrap(), "var-1");
+        assert!(rows.next().await.unwrap().is_none());
+        drop(conn);
+
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn step_16_rebuild_preserves_every_table() {
+        // Upgrade from a populated v15 database through the step-16 rebuild of
+        // all remaining AUTOINCREMENT tables. Every row in every rebuilt table
+        // must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v15.db", 15).await;
+
+        let conn = db.connect().await.unwrap();
+        for table in [
+            "platform_snapshots",
+            "sync_events",
+            "inventory_history",
+            "listing_descriptions",
+            "listing_photos",
+            "pricing_snapshots",
+            "vendor_listings_cache",
+        ] {
+            assert!(
+                table_ddl(&conn, table).await.contains("AUTOINCREMENT"),
+                "v15 {table} should still use AUTOINCREMENT"
+            );
+        }
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p3', 'SKU-3', 'Thing', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at)
+             VALUES ('p3', 'ebay', 5, '2026-10-01')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_events (product_id, source_platform, target_platform, old_quantity, new_quantity, event_type, sync_cycle_id)
+             VALUES ('p3', 'ebay', 'etsy', 5, 4, 'quantity', 'cyc-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO inventory_history (product_id, quantity, sync_cycle_id)
+             VALUES ('p3', 4, 'cyc-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listing_descriptions (product_id, platform, platform_item_id, description_text)
+             VALUES ('p3', 'ebay', 'EBAY-1', 'hello')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listing_photos (product_id, platform, platform_item_id, url)
+             VALUES ('p3', 'ebay', 'EBAY-1', 'https://x/y.png')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pricing_snapshots (product_id, platform, amount)
+             VALUES ('p3', 'ebay', 9.99)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO vendor_listings_cache (plugin_id, vendor_item_id, title)
+             VALUES ('plug', 'V-1', 'Vendor thing')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(16).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 16);
+
+        let conn = db.connect().await.unwrap();
+        for table in [
+            "platform_snapshots",
+            "sync_events",
+            "inventory_history",
+            "listing_descriptions",
+            "listing_photos",
+            "pricing_snapshots",
+            "vendor_listings_cache",
+        ] {
+            assert!(
+                !table_ddl(&conn, table).await.contains("AUTOINCREMENT"),
+                "{table} still uses AUTOINCREMENT after step 16"
+            );
+            let mut rows = conn
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .unwrap();
+            let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            assert_eq!(n, 1, "{table} lost its row in the step-16 rebuild");
+        }
+        drop(conn);
+
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn failed_step_rolls_back_and_stays_rerunnable() {
+        // Simulates a crash between DROP and RENAME in a table rebuild: the
+        // step body runs inside a transaction, an error aborts it before
+        // COMMIT, and the database must stay at the previous version with its
+        // data intact — so the next launch can simply re-run the step.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "crash.db", 6).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p4', 'SKU-4', 'Doohickey', 2)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings (product_id, platform, platform_item_id)
+             VALUES ('p4', 'ebay', 'EBAY-4')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        db.run_migration_step(&conn, 7).await.unwrap();
+        // The crash: a statement error aborts the transaction before COMMIT.
+        conn.execute("THIS IS NOT VALID SQL AND SIMULATES A CRASH", ())
+            .await
+            .unwrap_err();
+        conn.execute("ROLLBACK", ()).await.unwrap();
+
+        assert_eq!(
+            user_version_of(&db).await,
+            6,
+            "a failed step must not bump user_version"
+        );
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM platform_mappings", ())
+            .await
+            .unwrap();
+        let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(n, 1, "rolled-back rebuild must not lose rows");
+        assert!(
+            !table_columns(&conn, "platform_mappings")
+                .await
+                .contains(&"variant_id".to_string()),
+            "rolled-back rebuild must not leave the new column behind"
+        );
+        drop(conn);
+
+        // The next launch re-runs the step and completes the upgrade.
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM platform_mappings", ())
+            .await
+            .unwrap();
+        let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[tokio::test]
@@ -4444,5 +5084,199 @@ mod tests {
             std::fs::read(backups[0].join("nisaba.db-wal")).unwrap(),
             b"uncheckpointed"
         );
+    }
+
+    // ── Plugin `secret: true` config values ────────────────────
+
+    const SECRET_FIELDS_JSON: &str = r#"[
+        {"key":"api_key","label":"API key","required":true,"secret":true},
+        {"key":"region","label":"Region","required":false,"secret":false}
+    ]"#;
+
+    fn secret_plugin_row(id: &str) -> VendorPluginRow {
+        let mut row = registry_row(id, None);
+        row.config_fields = Some(SECRET_FIELDS_JSON.to_string());
+        row
+    }
+
+    async fn secret_test_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn secret_config_keys_parses_secret_true_fields() {
+        let keys = secret_config_keys(Some(SECRET_FIELDS_JSON));
+        assert_eq!(keys, HashSet::from(["api_key".to_string()]));
+        assert!(secret_config_keys(None).is_empty());
+        assert!(secret_config_keys(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn strip_secret_values_removes_secret_true_entries() {
+        let stripped = strip_secret_values(
+            Some(SECRET_FIELDS_JSON),
+            Some(r#"{"api_key":"s3cr3t","region":"us"}"#),
+        );
+        assert_eq!(stripped.as_deref(), Some(r#"{"region":"us"}"#));
+
+        // Nothing secret declared: unchanged.
+        let untouched = strip_secret_values(None, Some(r#"{"api_key":"s3cr3t"}"#));
+        assert_eq!(untouched.as_deref(), Some(r#"{"api_key":"s3cr3t"}"#));
+
+        // No secrets present: the original string is returned as-is.
+        let same = strip_secret_values(Some(SECRET_FIELDS_JSON), Some(r#"{"region":"us"}"#));
+        assert_eq!(same.as_deref(), Some(r#"{"region":"us"}"#));
+
+        // Unparseable input is never silently dropped.
+        let corrupt = strip_secret_values(Some(SECRET_FIELDS_JSON), Some("{oops"));
+        assert_eq!(corrupt.as_deref(), Some("{oops"));
+    }
+
+    #[tokio::test]
+    async fn set_plugin_config_split_routes_secrets_to_the_secret_store() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        config.insert("region".to_string(), "us".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        // The secret is in the store, not in the database…
+        assert_eq!(
+            store.load("p1", "api_key").unwrap().as_deref(),
+            Some("s3cr3t-token")
+        );
+        let raw = db
+            .get_registry_plugin("p1")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_json
+            .unwrap();
+        assert!(
+            !raw.contains("s3cr3t-token"),
+            "config_json must not contain the secret: {raw}"
+        );
+        // …while the non-secret value is still there.
+        let raw_map: HashMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw_map.get("region").map(String::as_str), Some("us"));
+        assert!(!raw_map.contains_key("api_key"));
+    }
+
+    #[tokio::test]
+    async fn get_plugin_config_merged_injects_secrets_for_runs() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        config.insert("region".to_string(), "us".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+        assert_eq!(
+            merged.get("api_key").map(String::as_str),
+            Some("s3cr3t-token")
+        );
+        assert_eq!(merged.get("region").map(String::as_str), Some("us"));
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_secrets_migrate_to_the_secret_store_on_first_load() {
+        let (_dir, db) = secret_test_db().await;
+        // A row written by an older version: the secret sits in config_json.
+        let mut row = secret_plugin_row("p1");
+        row.config_json = Some(r#"{"api_key":"legacy-secret","region":"us"}"#.to_string());
+        db.upsert_registry_plugin(&row).await.unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+
+        // The plugin still gets its full config…
+        assert_eq!(
+            merged.get("api_key").map(String::as_str),
+            Some("legacy-secret")
+        );
+        assert_eq!(merged.get("region").map(String::as_str), Some("us"));
+        // …the secret moved to the store…
+        assert_eq!(
+            store.load("p1", "api_key").unwrap().as_deref(),
+            Some("legacy-secret")
+        );
+        // …and config_json was scrubbed.
+        let raw = db
+            .get_registry_plugin("p1")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_json
+            .unwrap();
+        assert!(
+            !raw.contains("legacy-secret"),
+            "config_json must be scrubbed after migration: {raw}"
+        );
+        let raw_map: HashMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw_map.get("region").map(String::as_str), Some("us"));
+    }
+
+    #[tokio::test]
+    async fn clearing_a_secret_field_deletes_the_stored_entry() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+        assert!(store.load("p1", "api_key").unwrap().is_some());
+
+        // Saving an empty secret clears it.
+        config.insert("api_key".to_string(), String::new());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+        assert_eq!(store.load("p1", "api_key").unwrap(), None);
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+        assert!(!merged.contains_key("api_key"));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_plugin_removes_its_secrets_from_the_store() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        db.delete_registry_plugin_with_secrets("p1", &store)
+            .await
+            .unwrap();
+        assert_eq!(store.load("p1", "api_key").unwrap(), None);
+        assert!(db.get_registry_plugin("p1").await.unwrap().is_none());
     }
 }
