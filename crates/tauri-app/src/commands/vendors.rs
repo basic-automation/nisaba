@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use nisaba_core::crypto::OsKeyringPluginSecrets;
 use nisaba_core::db::Db;
 use nisaba_core::types::{VendorListingCache, VendorPluginRow};
 use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
@@ -395,6 +396,18 @@ async fn execute_plugin_in_thread(
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Load a plugin's effective config for a run: non-secret values from the
+/// database plus `secret: true` values injected from the OS keyring.
+///
+/// Plaintext secrets left in `config_json` by older versions are migrated to
+/// the keyring on this first load. Never returns an error: secret-store
+/// failures degrade to the stored config so plugins keep running.
+async fn plugin_config_for_run(db: &Db, plugin_id: &str) -> HashMap<String, String> {
+    db.get_plugin_config_merged(plugin_id, &OsKeyringPluginSecrets)
+        .await
+        .unwrap_or_default()
 }
 
 fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> VendorPluginInfo {
@@ -809,8 +822,8 @@ pub async fn set_vendor_plugin_config(
     }
 
     let db = state.active_db().await?;
-    let config_json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
-    db.set_plugin_config(&plugin_id, &config_json)
+    // `secret: true` values go to the OS keyring, never to config_json.
+    db.set_plugin_config_split(&plugin_id, &config, &OsKeyringPluginSecrets)
         .await
         .map_err(|e| e.to_string())
 }
@@ -868,19 +881,11 @@ pub async fn get_vendor_plugin_config(
     plugin_id: String,
 ) -> Result<HashMap<String, String>, String> {
     let db = state.active_db().await?;
-    let plugin = db
-        .get_registry_plugin(&plugin_id)
+    // Returns the effective config: `secret: true` values are injected from
+    // the OS keyring so the config form can pre-fill them.
+    db.get_plugin_config_merged(&plugin_id, &OsKeyringPluginSecrets)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or("Plugin not found")?;
-
-    let config: HashMap<String, String> = plugin
-        .config_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-
-    Ok(config)
+        .map_err(|e| e.to_string())
 }
 
 // ── User install commands (local only) ────────────────────────
@@ -975,11 +980,8 @@ pub async fn fetch_vendor_listings(
         .map_err(|e| e.to_string())?
         .ok_or("Plugin not found in registry")?;
 
-    let config: HashMap<String, String> = plugin
-        .config_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    // Secrets are injected from the OS keyring here; config_json never holds them.
+    let config = plugin_config_for_run(&db, &plugin_id).await;
 
     let files = parse_files_json(&plugin.files_json)?;
     let limits = plugin_limits(&db, &plugin_id).await;
@@ -1071,11 +1073,8 @@ pub async fn sync_vendor_listings(
             "Plugin not found in registry".to_string()
         })?;
 
-    let config: HashMap<String, String> = plugin
-        .config_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    // Secrets are injected from the OS keyring here; config_json never holds them.
+    let config = plugin_config_for_run(&db, &plugin_id).await;
 
     let files = parse_files_json(&plugin.files_json)?;
 
@@ -1495,11 +1494,8 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
         }
     };
 
-    let config: HashMap<String, String> = plugin
-        .config_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    // Secrets are injected from the OS keyring here; config_json never holds them.
+    let config = plugin_config_for_run(&db, &plugin_id).await;
 
     let files = match parse_files_json(&plugin.files_json) {
         Ok(f) => f,
