@@ -136,6 +136,22 @@ impl SyncEngine {
     }
 
     /// Run a single sync cycle: poll → detect → resolve → push → record.
+    ///
+    /// # Partial-failure policy: never push to an unpolled platform
+    ///
+    /// A platform that could not be read this cycle receives **no pushes**
+    /// this cycle. For a numeric platform a successful reading is a
+    /// `fetch_inventory` poll that returned this listing's quantity; for a
+    /// stock-mode platform it is a successful poll *and* a successful
+    /// `detect_sales` call (stock-mode platforms have no numeric reading —
+    /// sale detection is their read). One platform being down never aborts
+    /// the cycle: the remaining platforms still resolve and are pushed to,
+    /// the failure surfaces as a [`SyncEngineEvent::PlatformError`], and the
+    /// unread platform is simply skipped in the push step. Pushing to it
+    /// anyway would overwrite live stock with a canonical value resolved
+    /// without any reading from it — a platform that was merely slow to
+    /// answer could lose real sales or be restocked on paper. The platform
+    /// is reconciled on the next cycle in which it can be read again.
     pub async fn run_cycle(&self) -> Result<(usize, usize), SyncError> {
         let cycle_id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -169,10 +185,17 @@ impl SyncEngine {
 
         // ── Step 1: Poll all enabled platforms ────────────────
         let mut platform_quantities: HashMap<(Platform, String), i64> = HashMap::new();
+        // Platforms whose poll succeeded this cycle. Together with
+        // `platform_quantities` (numeric platforms) and
+        // `sales_read_platforms` (stock-mode platforms) this is the record
+        // the push step consults for the partial-failure policy documented
+        // on `run_cycle`: no successful reading, no push.
+        let mut polled_platforms: HashSet<Platform> = HashSet::new();
 
         for (platform, adapter) in adapters.iter() {
             match self.poll_with_retry(adapter.as_ref()).await {
                 Ok(items) => {
+                    polled_platforms.insert(*platform);
                     for item in items {
                         platform_quantities
                             .insert((*platform, item.platform_item_id.clone()), item.quantity);
@@ -214,6 +237,12 @@ impl SyncEngine {
             .map(|p| p.id.clone())
             .collect();
 
+        // Stock-mode platforms whose sale detection succeeded this cycle.
+        // Sale detection is a stock-mode platform's reading, so the push
+        // step requires membership here (in addition to `polled_platforms`)
+        // before it will write to such a platform.
+        let mut sales_read_platforms: HashSet<Platform> = HashSet::new();
+
         for (platform, adapter) in adapters.iter() {
             if !adapter.capabilities().has_stock_mode_inventory {
                 continue;
@@ -221,6 +250,7 @@ impl SyncEngine {
 
             match adapter.detect_sales().await {
                 Ok(sales) => {
+                    sales_read_platforms.insert(*platform);
                     for sale in sales {
                         let order_id = sale.order_id.as_deref().unwrap_or("");
 
@@ -577,6 +607,25 @@ impl SyncEngine {
 
                     // Stock-mode-aware push logic
                     if adapter.capabilities().has_stock_mode_inventory {
+                        // Partial-failure policy (see `run_cycle`): a
+                        // stock-mode platform with no successful reading
+                        // this cycle — its poll failed, or its sale
+                        // detection (the stock-mode reading) failed — is
+                        // never pushed to. Its live stock mode is unknown,
+                        // and flipping it from a canonical value resolved
+                        // without it could deactivate a live listing or
+                        // reactivate one that sold out in the meantime.
+                        if !polled_platforms.contains(&mapping.platform)
+                            || !sales_read_platforms.contains(&mapping.platform)
+                        {
+                            debug!(
+                                product = %product.name,
+                                platform = %mapping.platform,
+                                "No successful reading this cycle, skipping stock-mode push"
+                            );
+                            continue;
+                        }
+
                         let snapshot = self
                             .db
                             .get_snapshot(&product.id, mapping.platform.as_str(), group_variant_id)
@@ -711,9 +760,21 @@ impl SyncEngine {
 
                     // Normal (numeric quantity) push logic.
                     //
-                    // A platform with no reading this cycle is skipped: its
-                    // state is unknown, and pushing blind would overwrite
-                    // live stock with a number derived from its peers.
+                    // Partial-failure policy (see `run_cycle`): a platform
+                    // with no successful reading this cycle is skipped — both
+                    // when its whole poll failed (`polled_platforms`) and
+                    // when the poll succeeded but returned no quantity for
+                    // this listing (`platform_quantities`). Its state is
+                    // unknown, and pushing blind would overwrite live stock
+                    // with a number derived from its peers.
+                    if !polled_platforms.contains(&mapping.platform) {
+                        debug!(
+                            product = %product.name,
+                            platform = %mapping.platform,
+                            "Platform was not polled this cycle, skipping push"
+                        );
+                        continue;
+                    }
                     let platform_key = (mapping.platform, mapping.platform_item_id.clone());
                     let Some(current_on_platform) = platform_quantities.get(&platform_key).copied()
                     else {
@@ -1049,6 +1110,8 @@ mod tests {
         /// are both expressible.
         polls: Mutex<Vec<Poll>>,
         sales: Mutex<Vec<SaleDetection>>,
+        /// When set, `detect_sales` fails with this message.
+        sales_error: Mutex<Option<String>>,
         /// When set, every `set_quantity` fails with this message.
         push_error: Mutex<Option<String>>,
         pushes: Mutex<Vec<(String, i64)>>,
@@ -1064,6 +1127,7 @@ mod tests {
                 capabilities: PlatformCapabilities::default(),
                 polls: Mutex::new(vec![Poll::Items(Vec::new())]),
                 sales: Mutex::new(Vec::new()),
+                sales_error: Mutex::new(None),
                 push_error: Mutex::new(None),
                 pushes: Mutex::new(Vec::new()),
                 poll_calls: AtomicUsize::new(0),
@@ -1091,6 +1155,12 @@ mod tests {
 
         fn with_sales(self, sales: Vec<SaleDetection>) -> Self {
             *self.sales.lock().unwrap() = sales;
+            self
+        }
+
+        /// Make every `detect_sales` call fail, as if the platform were down.
+        fn failing_sales_detection(self, message: &str) -> Self {
+            *self.sales_error.lock().unwrap() = Some(message.to_string());
             self
         }
 
@@ -1182,6 +1252,12 @@ mod tests {
 
         async fn detect_sales(&self) -> Result<Vec<SaleDetection>, SyncError> {
             self.detect_sales_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(message) = self.sales_error.lock().unwrap().clone() {
+                return Err(SyncError::NetworkError {
+                    platform: self.platform,
+                    message,
+                });
+            }
             // Sales are reported once and then consumed, which is how a scrape
             // of a "recent orders" page behaves after the order ages out.
             Ok(std::mem::take(&mut *self.sales.lock().unwrap()))
@@ -1727,6 +1803,126 @@ mod tests {
         assert!(
             harness.adapter(Platform::Squarespace).pushes().is_empty(),
             "no reading means no push, even though canonical moved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_missing_from_a_successful_poll_receives_no_push() {
+        // The poll succeeds but omits one listing (a partial page, a listing
+        // suspended mid-cycle). That listing has no reading this cycle, so
+        // the policy applies per listing, not just per platform: Squarespace
+        // is pushed for the listing it did report, never for the one it did
+        // not. S-2's canonical group is a second product whose only reading
+        // would have come from S-2 itself.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 2), ("E-2", 2)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 8)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                8,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        harness
+            .add_product(
+                "p2",
+                8,
+                &[(Platform::Ebay, "E-2"), (Platform::Squarespace, "S-2")],
+            )
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        // p1 resolves 8 -> 2 from eBay and pushes Squarespace's reported
+        // listing; p2 also resolves to 2, but S-2 was never read.
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 2)],
+            "only the listing actually read this cycle may be pushed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stock_mode_platform_whose_sales_detection_fails_receives_no_push() {
+        // Stock-mode platforms have no numeric reading: sale detection is
+        // their read. When it fails, the platform is unread this cycle, so
+        // the partial-failure policy forbids flipping its stock mode even
+        // though eBay's reading drives canonical to zero — the desired
+        // state for the unread listing would be `out_of_stock`.
+        let mut harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 0)]),
+                FakeAdapter::new(Platform::XmrBazaar)
+                    .with_stock_mode()
+                    .failing_sales_detection("sales page unreachable"),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                1,
+                &[(Platform::Ebay, "E-1"), (Platform::XmrBazaar, "X-1")],
+            )
+            .await;
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 0);
+        assert_eq!((synced, pushed), (1, 0));
+        assert!(
+            harness.adapter(Platform::XmrBazaar).pushes().is_empty(),
+            "no successful stock-mode reading means no stock-mode push"
+        );
+        let events = harness.drain_events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SyncEngineEvent::PlatformError {
+                    platform: Platform::XmrBazaar,
+                    ..
+                }
+            )),
+            "the failed sale detection must surface a PlatformError"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stock_mode_platform_whose_poll_fails_receives_no_push() {
+        // The other stock-mode read: if the poll itself fails, sale
+        // detection succeeding is not enough — the platform was not
+        // successfully read this cycle and receives no push.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 0)]),
+                FakeAdapter::new(Platform::XmrBazaar)
+                    .with_stock_mode()
+                    .with_poll_script(vec![Poll::Network("connection refused")]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                1,
+                &[(Platform::Ebay, "E-1"), (Platform::XmrBazaar, "X-1")],
+            )
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 0);
+        assert!(
+            harness.adapter(Platform::XmrBazaar).pushes().is_empty(),
+            "a failed poll means no stock-mode push, even if detect_sales succeeded"
         );
     }
 

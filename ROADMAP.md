@@ -776,15 +776,15 @@ is used only when no platform reports.
 - [ ] Surface dry-run in the UI and the headless daemon — the engine supports it but nothing
       offers it to a user yet. A "preview this sync" button is the safest possible way to
       exercise the adapters against a real account.
-- [ ] Partial-failure semantics — one platform down must not abort the cycle or corrupt
-      `PlatformSnapshot` state. The cycle does survive a failed poll (there is now a test
-      for it), but it then **writes to the platform it could not read**: with no entry in
-      `platform_quantities`, `current_on_platform` is `None`, which never equals the
-      resolved quantity, so the push always fires — using a canonical value computed
-      without any reading from that platform. On a platform that was simply slow to answer
-      this overwrites live stock with a number derived from its peers. Decide the policy
-      (skip pushes to unpolled platforms, or push only when the last snapshot disagrees)
-      and make `one_platform_down_does_not_abort_the_cycle` assert the chosen one.
+- [x] Partial-failure semantics — one platform down must not abort the cycle or corrupt
+      `PlatformSnapshot` state. Policy chosen: **never push to a platform that could not
+      be read this cycle** — numeric pushes require a successful poll returning that
+      listing's quantity, and stock-mode pushes require a successful poll plus a
+      successful sale-detection pass. The unread platform is reconciled on the next
+      cycle it can be read. `one_platform_down_does_not_abort_the_cycle` asserts the
+      no-push behaviour, with stock-mode and per-listing successors alongside it; the
+      policy is documented on `SyncEngine::run_cycle` and in README's Sync cycle
+      section.
 - [ ] Surface a per-cycle reconciliation report in the UI, not just `SyncEvent` rows
 - [ ] Oversell protection: a configurable reserve buffer so concurrent sales across platforms
       cannot drive true stock negative. Moved to Phase 5, Sync v2 Step 3 (escrow), where a
