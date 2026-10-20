@@ -7,6 +7,8 @@ use image::ImageFormat;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, Runtime, State, UriSchemeContext};
 
+use nisaba_core::net_guard::{self, MAX_IMAGE_DOWNLOAD_BYTES};
+
 use crate::state::AppState;
 
 /// Max width for thumbnails used in grid/card views.
@@ -168,6 +170,62 @@ fn serve_file(file_path: &Path) -> tauri::http::Response<Vec<u8>> {
     }
 }
 
+/// Parse and gate an image URL before it is fetched: only http(s) is allowed, and
+/// the host must resolve to a publicly routable address — the webview hands us these
+/// URLs (including plugin `image_url` values and P2P-peer variants), so a name that
+/// resolves to loopback or a LAN address is an SSRF attempt.
+async fn validate_image_url(url: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid image URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "Refusing non-http(s) image URL with scheme '{}'",
+            parsed.scheme()
+        ));
+    }
+    let host = parsed.host_str().unwrap_or("");
+    net_guard::ensure_host_is_public(host).await?;
+    Ok(parsed)
+}
+
+/// Download one image with a hard size cap, streaming so a lying `Content-Length`
+/// cannot blow memory or disk. Writes the file on success.
+async fn download_image_capped(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let mut resp = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download image: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Non-200 response for image: {}", resp.status()));
+    }
+    let too_large = || format!("Image exceeds the download cap of {max_bytes} bytes");
+    // Refuse up front when the server declares the size, and count while streaming
+    // for when it does not (or lies).
+    if resp.content_length().is_some_and(|len| len > max_bytes) {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Body read error: {e}"))?
+    {
+        if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err("Empty response body for image".to_string());
+    }
+    std::fs::write(path, &bytes).map_err(|e| format!("Failed to write cached image: {e}"))?;
+    Ok(())
+}
 /// Load the entire cache manifest: returns all (url, filename) pairs.
 /// Called once on app startup to pre-populate the frontend cache map instantly.
 #[tauri::command]
@@ -199,7 +257,7 @@ pub async fn cache_images(
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let mut results = Vec::new();
-    let mut to_download: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut to_download: Vec<(reqwest::Url, String, String, PathBuf)> = Vec::new();
 
     for url in &urls {
         let fname = filename_for_url(url);
@@ -211,7 +269,12 @@ pub async fn cache_images(
             continue;
         }
 
-        to_download.push((url.clone(), fname, path));
+        // Gate every fetch target: non-http(s) schemes and hosts resolving to
+        // loopback/private/link-local addresses are refused before any connection.
+        match validate_image_url(url).await {
+            Ok(parsed) => to_download.push((parsed, url.clone(), fname, path)),
+            Err(e) => tracing::warn!(url, "{e}"),
+        }
     }
 
     // Download missing images concurrently (max 8 at a time)
@@ -219,32 +282,16 @@ pub async fn cache_images(
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
         let mut tasks = tokio::task::JoinSet::new();
 
-        for (url, fname, path) in to_download {
+        for (parsed, url, fname, path) in to_download {
             let client = client.clone();
             let sem = semaphore.clone();
             tasks.spawn(async move {
                 let _permit = sem.acquire().await;
-                match client.get(&url).send().await {
-                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                        Ok(bytes) if !bytes.is_empty() => {
-                            if let Err(e) = std::fs::write(&path, &bytes) {
-                                tracing::warn!(url, error = %e, "Failed to write cached image");
-                                None
-                            } else {
-                                Some((url, fname))
-                            }
-                        }
-                        _ => {
-                            tracing::warn!(url, "Empty response body for image");
-                            None
-                        }
-                    },
-                    Ok(resp) => {
-                        tracing::warn!(url, status = %resp.status(), "Non-200 response for image");
-                        None
-                    }
+                match download_image_capped(&client, &parsed, &path, MAX_IMAGE_DOWNLOAD_BYTES).await
+                {
+                    Ok(()) => Some((url, fname)),
                     Err(e) => {
-                        tracing::warn!(url, error = %e, "Failed to download image");
+                        tracing::warn!(url, "{e}");
                         None
                     }
                 }
@@ -409,4 +456,129 @@ fn percent_decode(s: &str) -> String {
     urlencoding::decode(s)
         .unwrap_or(std::borrow::Cow::Borrowed(s))
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// A loopback HTTP server that answers the next connection with `body`, then
+    /// closes. Declared and actual lengths can differ to simulate a lying server.
+    async fn serve_once(body: Vec<u8>, declared_len: Option<usize>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let len = declared_len.unwrap_or(body.len());
+            let head =
+                format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n");
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+        });
+        port
+    }
+
+    /// A loopback HTTP server answering with `Transfer-Encoding: chunked` and no
+    /// `Content-Length` — the case the streaming cap exists for.
+    async fn serve_chunked_once(body: Vec<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let head = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes()).await;
+            for chunk in body.chunks(32) {
+                let _ = stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await;
+                let _ = stream.write_all(chunk).await;
+                let _ = stream.write_all(b"\r\n").await;
+            }
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        port
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn non_http_schemes_are_refused() {
+        for url in [
+            "ftp://example.com/a.png",
+            "file:///etc/passwd",
+            "data:image/png;base64,AAAA",
+            "javascript:alert(1)",
+        ] {
+            let err = validate_image_url(url).await.unwrap_err();
+            assert!(err.contains("http(s)"), "{url}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_hosts_are_refused() {
+        for url in [
+            "http://127.0.0.1:9/a.png",
+            "http://localhost:9/a.png",
+            "https://[::1]:9/a.png",
+        ] {
+            let err = validate_image_url(url).await.unwrap_err();
+            assert!(err.contains("non-public"), "{url}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn over_cap_response_is_refused_while_streaming() {
+        // Declared length is honest…
+        let port = serve_once(vec![b'x'; 129], None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let err = download_image_capped(
+            &client(),
+            &reqwest::Url::parse(&format!("http://127.0.0.1:{port}/big.png")).unwrap(),
+            &dir.path().join("big.png"),
+            128,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("exceeds the download cap"), "{err}");
+
+        // …and a chunked response with no Content-Length at all is caught by
+        // chunk counting while streaming.
+        let port = serve_chunked_once(vec![b'x'; 129]).await;
+        let err = download_image_capped(
+            &client(),
+            &reqwest::Url::parse(&format!("http://127.0.0.1:{port}/chunked.png")).unwrap(),
+            &dir.path().join("chunked.png"),
+            128,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("exceeds the download cap"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn under_cap_response_is_saved() {
+        let body = vec![b'y'; 64];
+        let port = serve_once(body.clone(), None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("ok.png");
+        download_image_capped(
+            &client(),
+            &reqwest::Url::parse(&format!("http://127.0.0.1:{port}/ok.png")).unwrap(),
+            &dest,
+            128,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
 }
