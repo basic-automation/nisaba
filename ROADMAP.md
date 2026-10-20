@@ -443,13 +443,13 @@ leaves a sold-out listing live on another marketplace, and nothing in the UI say
 these before adding new capabilities, and give every write path a test that a rejected
 write surfaces as `Err`.
 
-- [ ] **eBay `set_quantity` swallows per-SKU errors.** `bulk_update_price_quantity`
+- [x] **eBay `set_quantity` swallows per-SKU errors.** `bulk_update_price_quantity`
       (`platform-ebay/src/client.rs` ~177–195) logs each item error at `warn!` and returns
       `Ok(())`, and `statusCode` is parsed but never read (`types.rs:81`). Listings created
       on eBay's website are keyed by ItemID; `set_quantity` sends that ItemID as a SKU, so
       every push to such a listing no-ops behind an `Ok`. Fails with the "two read paths"
       item above.
-- [ ] **eBay `set_price` probably never changes the price.** The `offers: [{price}]` entry
+- [x] **eBay `set_price` probably never changes the price.** The `offers: [{price}]` entry
       carries no `offerId` (`client.rs:633`), and the 200/207 body is never parsed. When
       `availability` is absent, the same path falls back to quantity `0` (`lib.rs:454`), so
       a price edit can zero stock. Verify against the Inventory API docs and a sandbox.
