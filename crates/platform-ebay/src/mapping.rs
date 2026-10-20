@@ -134,6 +134,13 @@ pub fn to_full_listing(item: &EbayInventoryItem, offers: &[EbayOffer]) -> FullLi
         extras.insert("ebay_condition".to_string(), condition.clone());
     }
 
+    if let Some(condition_description) = &item.condition_description {
+        extras.insert(
+            "ebay_condition_description".to_string(),
+            condition_description.clone(),
+        );
+    }
+
     if let Some(product) = &item.product {
         if let Some(aspects) = &product.aspects {
             if let Ok(json) = serde_json::to_string(aspects) {

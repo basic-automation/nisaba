@@ -21,6 +21,261 @@ fn url_encode(s: &str) -> String {
 const SANDBOX_API_BASE: &str = "https://api.sandbox.ebay.com";
 const PRODUCTION_API_BASE: &str = "https://api.ebay.com";
 
+/// Recursively remove object entries whose value is JSON `null`, so a
+/// re-serialised GET response does not send explicit nulls back in a PUT
+/// body (eBay treats a present-but-null field as clearing it).
+fn strip_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_nulls(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items.iter_mut() {
+                strip_nulls(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fields of an inventory item that a read-modify-write is allowed to
+/// change. Every other field of the complete body comes from the fetched
+/// item.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InventoryItemOverrides<'a> {
+    pub description: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub aspects: Option<&'a std::collections::HashMap<String, Vec<String>>>,
+    pub condition: Option<&'a str>,
+    pub condition_description: Option<&'a str>,
+}
+
+/// Build the `createOrReplaceInventoryItem` PUT body for a description /
+/// metadata edit, losslessly (N-5.2).
+///
+/// The body is the just-fetched item re-serialised — modelled fields,
+/// explicitly carried fields (brand, MPN, UPC, `packageWeightAndSize`,
+/// `conditionDescriptors`, `conditionDescription`) and every unknown field
+/// captured in the `extra` flatten maps — with only the caller's overrides
+/// applied. Unknown fields therefore round-trip instead of being erased
+/// by the full replace.
+///
+/// Stale-quantity hazard: `availability.shipToLocationAvailability.
+/// quantity` (and any per-location distribution quantity) is *omitted*,
+/// never written back. A quantity read moments earlier can already be
+/// stale if a sale landed in between; writing it back would resurrect
+/// sold stock. Quantity changes go through the bulk price/quantity
+/// endpoint instead, which is the path that owns quantity.
+pub fn build_inventory_item_put_body(
+    existing: &EbayInventoryItem,
+    overrides: &InventoryItemOverrides<'_>,
+) -> serde_json::Value {
+    let InventoryItemOverrides {
+        description,
+        title,
+        aspects,
+        condition,
+        condition_description,
+    } = *overrides;
+    let mut body = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        // `sku` identifies the item in the PUT path; it is not a body field.
+        obj.remove("sku");
+    }
+    strip_nulls(&mut body);
+
+    let has_product_override = description.is_some() || title.is_some() || aspects.is_some();
+    if has_product_override {
+        if !body.get("product").is_some_and(|p| p.is_object()) {
+            body["product"] = json!({});
+        }
+        if let Some(desc) = description {
+            body["product"]["description"] = json!(desc);
+        }
+        if let Some(t) = title {
+            body["product"]["title"] = json!(t);
+        }
+        if let Some(a) = aspects {
+            body["product"]["aspects"] = json!(a);
+        }
+    }
+    if let Some(c) = condition {
+        body["condition"] = json!(c);
+    }
+    if let Some(cd) = condition_description {
+        body["conditionDescription"] = json!(cd);
+    }
+
+    // Omit quantity (see above): strip it wherever any availability
+    // sub-block carries it (ship-to-location, pickup-at-location, …),
+    // including per-location distributions, and drop blocks that held
+    // nothing else.
+    if let Some(avail) = body.get_mut("availability").and_then(|a| a.as_object_mut()) {
+        for sub in avail.values_mut() {
+            if let Some(sub) = sub.as_object_mut() {
+                sub.remove("quantity");
+                if let Some(dists) = sub
+                    .get_mut("availabilityDistributions")
+                    .and_then(|d| d.as_array_mut())
+                {
+                    for dist in dists.iter_mut() {
+                        if let Some(d) = dist.as_object_mut() {
+                            d.remove("quantity");
+                        }
+                    }
+                }
+            }
+        }
+        avail.retain(|_, v| !(v.is_object() && v.as_object().is_some_and(|o| o.is_empty())));
+    }
+    if body
+        .get("availability")
+        .is_some_and(|a| a.is_object() && a.as_object().is_some_and(|o| o.is_empty()))
+    {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("availability");
+        }
+    }
+
+    body
+}
+
+/// Fields of an offer that `update_listing` is allowed to change. Every
+/// other field of the complete body comes from the fetched offer.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OfferOverrides<'a> {
+    pub category_id: Option<&'a str>,
+    pub fulfillment_policy_id: Option<&'a str>,
+    pub payment_policy_id: Option<&'a str>,
+    pub return_policy_id: Option<&'a str>,
+    pub listing_description: Option<&'a str>,
+}
+
+/// The dotted paths `updateOffer` requires in a full-replace PUT body.
+fn missing_offer_fields(body: &serde_json::Value) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    for key in [
+        "sku",
+        "marketplaceId",
+        "format",
+        "categoryId",
+        "availableQuantity",
+    ] {
+        if body.get(key).is_none() {
+            missing.push(match key {
+                "sku" => "sku",
+                "marketplaceId" => "marketplaceId",
+                "format" => "format",
+                "categoryId" => "categoryId",
+                _ => "availableQuantity",
+            });
+        }
+    }
+    if body
+        .pointer("/pricingSummary/price/value")
+        .and_then(|v| v.as_str())
+        .is_none_or(|s| s.is_empty())
+    {
+        missing.push("pricingSummary.price.value");
+    }
+    if body
+        .pointer("/pricingSummary/price/currency")
+        .and_then(|v| v.as_str())
+        .is_none_or(|s| s.is_empty())
+    {
+        missing.push("pricingSummary.price.currency");
+    }
+    for (key, label) in [
+        ("fulfillmentPolicyId", "listingPolicies.fulfillmentPolicyId"),
+        ("paymentPolicyId", "listingPolicies.paymentPolicyId"),
+        ("returnPolicyId", "listingPolicies.returnPolicyId"),
+    ] {
+        if body
+            .pointer(&format!("/listingPolicies/{key}"))
+            .and_then(|v| v.as_str())
+            .is_none_or(|s| s.is_empty())
+        {
+            missing.push(label);
+        }
+    }
+    missing
+}
+
+/// Reject a body that is not a complete `updateOffer` full replace.
+pub fn validate_complete_offer_body(body: &serde_json::Value) -> Result<(), SyncError> {
+    let missing = missing_offer_fields(body);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!(
+                "refusing to send a partial body to updateOffer (a full replace): \
+                 missing required field(s): {}",
+                missing.join(", ")
+            ),
+        })
+    }
+}
+
+/// Build a complete `updateOffer` PUT body from a fetched offer (N-5.2):
+/// the offer re-serialised losslessly (unmodelled fields via `extra`),
+/// minus the read-only `offerId` / `listingId` / `status`, with only the
+/// caller's overrides applied. Returns an explicit error when the fetched
+/// offer lacks a field a full replace requires — a partial body is never
+/// produced.
+pub fn build_offer_put_body(
+    existing: &EbayOffer,
+    overrides: &OfferOverrides<'_>,
+) -> Result<serde_json::Value, SyncError> {
+    let mut body = serde_json::to_value(existing).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("offerId");
+        obj.remove("listingId");
+        obj.remove("status");
+    }
+    strip_nulls(&mut body);
+
+    if let Some(cat) = overrides.category_id {
+        body["categoryId"] = json!(cat);
+    }
+    if let Some(desc) = overrides.listing_description {
+        body["listingDescription"] = json!(desc);
+    }
+    let has_policy_override = overrides.fulfillment_policy_id.is_some()
+        || overrides.payment_policy_id.is_some()
+        || overrides.return_policy_id.is_some();
+    if has_policy_override {
+        if !body.get("listingPolicies").is_some_and(|p| p.is_object()) {
+            body["listingPolicies"] = json!({});
+        }
+        if let Some(id) = overrides.fulfillment_policy_id {
+            body["listingPolicies"]["fulfillmentPolicyId"] = json!(id);
+        }
+        if let Some(id) = overrides.payment_policy_id {
+            body["listingPolicies"]["paymentPolicyId"] = json!(id);
+        }
+        if let Some(id) = overrides.return_policy_id {
+            body["listingPolicies"]["returnPolicyId"] = json!(id);
+        }
+    }
+
+    validate_complete_offer_body(&body).map_err(|e| match e {
+        SyncError::ApiError { message, .. } => SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!(
+                "cannot update eBay offer {}: {message}",
+                existing.offer_id.as_deref().unwrap_or("?")
+            ),
+        },
+        other => other,
+    })?;
+    Ok(body)
+}
+
 pub struct EbayClient {
     http: Client,
     api_base: String,
@@ -460,8 +715,10 @@ impl EbayClient {
     }
 
     /// Update an inventory item's description via PUT (full replace).
-    /// The eBay Inventory API requires a full PUT, so we fetch the item first,
-    /// merge the new description, and PUT back.
+    /// The item is re-read immediately before the PUT and the body is built
+    /// losslessly from that read (see [`build_inventory_item_put_body`]):
+    /// unmodelled fields round-trip and quantity is omitted rather than
+    /// written back stale.
     pub async fn update_inventory_item(
         &self,
         access_token: &str,
@@ -470,38 +727,13 @@ impl EbayClient {
     ) -> Result<(), SyncError> {
         // Fetch existing item to preserve all other fields
         let existing = self.fetch_inventory_item(access_token, sku).await?;
-
-        let product = existing.product.unwrap_or(EbayProductInfo {
-            title: None,
-            description: None,
-            image_urls: None,
-            aspects: None,
-        });
-
-        let mut product_json = json!({
-            "title": product.title.unwrap_or_default(),
-            "description": description,
-            "imageUrls": product.image_urls.unwrap_or_default(),
-        });
-
-        // Preserve existing aspects
-        if let Some(aspects) = &product.aspects {
-            product_json["aspects"] = json!(aspects);
-        }
-
-        let body = json!({
-            "product": product_json,
-            "availability": {
-                "shipToLocationAvailability": {
-                    "quantity": existing.availability
-                        .as_ref()
-                        .and_then(|a| a.ship_to_location_availability.as_ref())
-                        .and_then(|s| s.quantity)
-                        .unwrap_or(0)
-                }
+        let body = build_inventory_item_put_body(
+            &existing,
+            &InventoryItemOverrides {
+                description: Some(description),
+                ..Default::default()
             },
-            "condition": existing.condition.unwrap_or_else(|| "NEW".to_string()),
-        });
+        );
 
         let url = format!(
             "{}/sell/inventory/v1/inventory_item/{}",
@@ -764,13 +996,81 @@ impl EbayClient {
         Ok(())
     }
 
-    /// Update an existing offer by offer ID (full PUT).
+    /// Fetch a single offer by offer ID (GET /sell/inventory/v1/offer/{id}).
+    pub async fn fetch_offer(
+        &self,
+        access_token: &str,
+        offer_id: &str,
+    ) -> Result<EbayOffer, SyncError> {
+        let url = format!(
+            "{}/sell/inventory/v1/offer/{}",
+            self.api_base,
+            url_encode(offer_id)
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .header("Content-Language", "en-US")
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 {
+            return Err(SyncError::AuthError {
+                platform: Platform::Ebay,
+                message: "Access token expired".into(),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Fetch offer failed ({status}): {body}"),
+            });
+        }
+
+        let offer: EbayOffer = resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse offer response: {e}"),
+        })?;
+
+        debug!(offer_id = offer_id, "Fetched eBay offer");
+        Ok(offer)
+    }
+
+    /// Update an offer's category / policies / listing description via a
+    /// lossless read-modify-write: fetch the complete offer, rebuild a
+    /// complete PUT body from it (see [`build_offer_put_body`]) and PUT
+    /// that. If the fetched offer cannot yield a complete body, this
+    /// returns an explicit error and sends nothing.
+    pub async fn update_offer_fields(
+        &self,
+        access_token: &str,
+        offer_id: &str,
+        overrides: &OfferOverrides<'_>,
+    ) -> Result<(), SyncError> {
+        let existing = self.fetch_offer(access_token, offer_id).await?;
+        let body = build_offer_put_body(&existing, overrides)?;
+        self.update_offer(access_token, offer_id, &body).await
+    }
+
+    /// Update an existing offer by offer ID (full PUT). The body must be
+    /// complete (see [`validate_complete_offer_body`]); a partial body is
+    /// rejected before anything is sent, because `updateOffer` replaces
+    /// the whole offer.
     pub async fn update_offer(
         &self,
         access_token: &str,
         offer_id: &str,
         body: &serde_json::Value,
     ) -> Result<(), SyncError> {
+        validate_complete_offer_body(body)?;
         let url = format!("{}/sell/inventory/v1/offer/{}", self.api_base, offer_id);
 
         let resp = self
@@ -806,56 +1106,19 @@ impl EbayClient {
         Ok(())
     }
 
-    /// Update an inventory item via fetch-merge-PUT, supporting optional
-    /// description, aspects, and condition overrides.
+    /// Update an inventory item via a lossless fetch-merge-PUT, supporting
+    /// optional description, title, aspects, and condition overrides.
+    /// Unmodelled fields round-trip and quantity is omitted rather than
+    /// written back stale (see [`build_inventory_item_put_body`]). The
+    /// item is re-read here, immediately before the PUT.
     pub async fn update_inventory_item_full(
         &self,
         access_token: &str,
         sku: &str,
-        description: Option<&str>,
-        aspects: Option<&std::collections::HashMap<String, Vec<String>>>,
-        condition: Option<&str>,
-        condition_description: Option<&str>,
+        overrides: &InventoryItemOverrides<'_>,
     ) -> Result<(), SyncError> {
         let existing = self.fetch_inventory_item(access_token, sku).await?;
-
-        let product = existing.product.unwrap_or(EbayProductInfo {
-            title: None,
-            description: None,
-            image_urls: None,
-            aspects: None,
-        });
-
-        let mut product_json = json!({
-            "title": product.title.unwrap_or_default(),
-            "description": description.unwrap_or_else(|| product.description.as_deref().unwrap_or_default()),
-            "imageUrls": product.image_urls.unwrap_or_default(),
-        });
-
-        // Use provided aspects, or preserve existing
-        if let Some(new_aspects) = aspects {
-            product_json["aspects"] = json!(new_aspects);
-        } else if let Some(existing_aspects) = &product.aspects {
-            product_json["aspects"] = json!(existing_aspects);
-        }
-
-        let mut body = json!({
-            "product": product_json,
-            "availability": {
-                "shipToLocationAvailability": {
-                    "quantity": existing.availability
-                        .as_ref()
-                        .and_then(|a| a.ship_to_location_availability.as_ref())
-                        .and_then(|s| s.quantity)
-                        .unwrap_or(0)
-                }
-            },
-            "condition": condition.unwrap_or_else(|| existing.condition.as_deref().unwrap_or("NEW")),
-        });
-
-        if let Some(cd) = condition_description {
-            body["conditionDescription"] = json!(cd);
-        }
+        let body = build_inventory_item_put_body(&existing, overrides);
 
         let url = format!(
             "{}/sell/inventory/v1/inventory_item/{}",
