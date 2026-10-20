@@ -341,6 +341,68 @@ impl Db {
         ))
     }
 
+    /// Execute multiple owned write statements atomically under a MVCC concurrent transaction.
+    ///
+    /// Like [`Db::execute_writes`], but takes owned SQL strings so a caller can plan a
+    /// batch dynamically (the P2P merge does this: it decides every write up front, then
+    /// applies them all in one transaction so a failing write rolls the whole batch
+    /// back). All statements share a single `BEGIN IMMEDIATE ... COMMIT`: either all
+    /// succeed or all roll back. Retries on busy/conflict errors.
+    pub async fn execute_write_batch(&self, stmts: Vec<(String, Params)>) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        for attempt in 0..5u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => {}
+                Err(ref e) if is_retryable(e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    continue;
+                }
+                Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
+            }
+
+            let mut ok = true;
+            let mut last_err = None;
+            for (sql, p) in &stmts {
+                match conn.execute(sql.as_str(), p.clone()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        ok = false;
+                        last_err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            if ok {
+                match conn.execute("COMMIT", ()).await {
+                    Ok(_) => return Ok(()),
+                    Err(ref e) if is_retryable(e) => {
+                        let _ = conn.execute("ROLLBACK", ()).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
+                            .await;
+                        continue;
+                    }
+                    Err(e) => {
+                        let _ = conn.execute("ROLLBACK", ()).await;
+                        return Err(SyncError::DatabaseError(e.to_string()));
+                    }
+                }
+            }
+
+            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Some(ref e) = last_err {
+                if is_retryable(e) {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    continue;
+                }
+                return Err(SyncError::DatabaseError(e.to_string()));
+            }
+        }
+        Err(SyncError::DatabaseError(
+            "Batch write failed after 5 retries".to_string(),
+        ))
+    }
+
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
     /// Apply every migration step the DB has not seen yet.
     ///
@@ -972,6 +1034,12 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a product and every row that belongs to it, in one transaction.
+    ///
+    /// Every table keyed by `product_id` is cleaned up — including
+    /// `listing_descriptions`, `listing_photos`, `pricing_snapshots` and
+    /// `cached_listings`, which earlier versions of this method left behind as
+    /// orphans pointing at a product that no longer exists.
     pub async fn delete_product(&self, id: &str) -> Result<(), SyncError> {
         let p = to_params(params![id]);
         self.execute_writes(&[
@@ -989,6 +1057,22 @@ impl Db {
             ),
             (
                 "DELETE FROM product_vendor_data WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM listing_descriptions WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM listing_photos WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM pricing_snapshots WHERE product_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM cached_listings WHERE product_id = ?1",
                 p.clone(),
             ),
             (
@@ -1136,11 +1220,17 @@ impl Db {
         Ok(())
     }
 
+    /// Delete a variant and every row that belongs to it, in one transaction —
+    /// its platform mappings and its vendor data, so no orphans remain.
     pub async fn delete_variant(&self, id: &str) -> Result<(), SyncError> {
         let p = to_params(params![id]);
         self.execute_writes(&[
             (
                 "DELETE FROM platform_mappings WHERE variant_id = ?1",
+                p.clone(),
+            ),
+            (
+                "DELETE FROM product_vendor_data WHERE variant_id = ?1",
                 p.clone(),
             ),
             ("DELETE FROM product_variants WHERE id = ?1", p),
@@ -1149,10 +1239,14 @@ impl Db {
         Ok(())
     }
 
+    /// Delete all of a product's variants and the rows that belong to them, in
+    /// one transaction — their platform mappings and vendor data, so no
+    /// orphans remain.
     pub async fn delete_variants_for_product(&self, product_id: &str) -> Result<(), SyncError> {
         let p = to_params(params![product_id]);
         self.execute_writes(&[
             ("DELETE FROM platform_mappings WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id = ?1)", p.clone()),
+            ("DELETE FROM product_vendor_data WHERE product_id = ?1", p.clone()),
             ("DELETE FROM product_variants WHERE product_id = ?1", p),
         ]).await?;
         Ok(())
@@ -4779,6 +4873,213 @@ mod tests {
         db.delete_product("test-001").await.unwrap();
         let fetched = db.get_product("test-001").await.unwrap();
         assert!(fetched.is_none());
+    }
+
+    async fn count_rows(db: &Db, table: &str, column: &str, value: &str) -> i64 {
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                params![value],
+            )
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    fn deletable_product(id: &str) -> Product {
+        Product {
+            id: id.to_string(),
+            canonical_sku: format!("SKU-{id}"),
+            name: format!("Product {id}"),
+            quantity: 3,
+            low_stock_threshold: None,
+            is_tracked: true,
+            has_variants: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn deletable_variant(id: &str, product_id: &str) -> ProductVariant {
+        ProductVariant {
+            id: id.to_string(),
+            product_id: product_id.to_string(),
+            sku: format!("SKU-{id}"),
+            name: format!("Variant {id}"),
+            attributes: std::collections::HashMap::new(),
+            quantity: 3,
+            on_hand_quantity: 3,
+            image_url: None,
+            sort_order: 0,
+            source_plugin_id: Some("plug".to_string()),
+            source_vendor_item_id: Some("VI-1".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_product_cleans_up_its_dependent_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("test.db").to_str().unwrap())
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+
+        db.insert_product(&deletable_product("p-del"))
+            .await
+            .unwrap();
+        db.insert_variant(&deletable_variant("v-del", "p-del"))
+            .await
+            .unwrap();
+        db.insert_mapping("p-del", "ebay", "ITEM-1", Some("SKU-v-del"), "v-del")
+            .await
+            .unwrap();
+        db.upsert_snapshot("p-del", "ebay", 3, "2026-10-20 00:00:00")
+            .await
+            .unwrap();
+        db.record_inventory_history("p-del", 3, "cycle-1")
+            .await
+            .unwrap();
+        db.upsert_listing_description("p-del", "ebay", "ITEM-1", Some("<p>x</p>"), Some("x"))
+            .await
+            .unwrap();
+        db.save_listing_photo("p-del", "ebay", "ITEM-1", "https://img/1.jpg", 0)
+            .await
+            .unwrap();
+        db.record_pricing_snapshot("p-del", "ebay", 9.99, "USD")
+            .await
+            .unwrap();
+        db.save_cached_listing("p-del", "ebay", "ITEM-1", "{}")
+            .await
+            .unwrap();
+        // A vendor-data row for the product's variant (variant_id set).
+        db.connect()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO product_vendor_data (product_id, variant_id, plugin_id, vendor_item_id, title)
+                 VALUES ('p-del', 'v-del', 'plug', 'VI-1', 'Vendor')",
+                (),
+            )
+            .await
+            .unwrap();
+
+        // A second product whose rows must survive the delete of the first.
+        db.insert_product(&deletable_product("p-keep"))
+            .await
+            .unwrap();
+        db.upsert_listing_description("p-keep", "ebay", "ITEM-9", Some("<p>k</p>"), Some("k"))
+            .await
+            .unwrap();
+        db.save_cached_listing("p-keep", "ebay", "ITEM-9", "{}")
+            .await
+            .unwrap();
+
+        for (table, column) in [
+            ("platform_mappings", "product_id"),
+            ("platform_snapshots", "product_id"),
+            ("inventory_history", "product_id"),
+            ("listing_descriptions", "product_id"),
+            ("listing_photos", "product_id"),
+            ("pricing_snapshots", "product_id"),
+            ("cached_listings", "product_id"),
+            ("product_vendor_data", "product_id"),
+            ("product_variants", "product_id"),
+        ] {
+            assert_eq!(
+                count_rows(&db, table, column, "p-del").await,
+                1,
+                "{table} should hold the product's row before the delete"
+            );
+        }
+
+        db.delete_product("p-del").await.unwrap();
+
+        for (table, column) in [
+            ("platform_mappings", "product_id"),
+            ("platform_snapshots", "product_id"),
+            ("inventory_history", "product_id"),
+            ("listing_descriptions", "product_id"),
+            ("listing_photos", "product_id"),
+            ("pricing_snapshots", "product_id"),
+            ("cached_listings", "product_id"),
+            ("product_vendor_data", "product_id"),
+            ("product_variants", "product_id"),
+            ("products", "id"),
+        ] {
+            assert_eq!(
+                count_rows(&db, table, column, "p-del").await,
+                0,
+                "{table} still holds an orphan after the delete"
+            );
+        }
+
+        // Scoped to the deleted product only.
+        assert!(db.get_product("p-keep").await.unwrap().is_some());
+        assert_eq!(
+            count_rows(&db, "listing_descriptions", "product_id", "p-keep").await,
+            1
+        );
+        assert_eq!(
+            count_rows(&db, "cached_listings", "product_id", "p-keep").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_variant_cleans_up_its_mappings_and_vendor_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("test.db").to_str().unwrap())
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+
+        db.insert_product(&deletable_product("p-v")).await.unwrap();
+        db.insert_variant(&deletable_variant("v-keep", "p-v"))
+            .await
+            .unwrap();
+        db.insert_variant(&deletable_variant("v-gone", "p-v"))
+            .await
+            .unwrap();
+        db.insert_mapping("p-v", "ebay", "ITEM-1", Some("SKU-v-keep"), "v-keep")
+            .await
+            .unwrap();
+        db.insert_mapping("p-v", "ebay", "ITEM-2", Some("SKU-v-gone"), "v-gone")
+            .await
+            .unwrap();
+        db.connect()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO product_vendor_data (product_id, variant_id, plugin_id, vendor_item_id, title)
+                 VALUES ('p-v', 'v-gone', 'plug', 'VI-1', 'Vendor')",
+                (),
+            )
+            .await
+            .unwrap();
+
+        db.delete_variant("v-gone").await.unwrap();
+
+        assert!(db.get_variant("v-gone").await.unwrap().is_none());
+        assert_eq!(
+            count_rows(&db, "platform_mappings", "variant_id", "v-gone").await,
+            0,
+            "the variant's mapping was orphaned"
+        );
+        assert_eq!(
+            count_rows(&db, "product_vendor_data", "variant_id", "v-gone").await,
+            0,
+            "the variant's vendor data was orphaned"
+        );
+
+        // The sibling variant and its rows are untouched.
+        assert!(db.get_variant("v-keep").await.unwrap().is_some());
+        assert_eq!(
+            count_rows(&db, "platform_mappings", "variant_id", "v-keep").await,
+            1
+        );
     }
 
     #[tokio::test]

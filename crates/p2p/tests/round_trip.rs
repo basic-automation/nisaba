@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use nisaba_core::db::Db;
 use nisaba_core::types::{Product, ProductVariant, VendorPluginRow};
 use nisaba_p2p::sync::{load_full_sync_payload, merge_remote_payload};
-use nisaba_p2p::types::{MergeSummary, SyncPayload, SyncRequest};
+use nisaba_p2p::types::{MergeSummary, SyncPayload, SyncRequest, SyncableVariant};
 use turso::params;
 
 async fn peer(dir: &tempfile::TempDir, name: &str) -> Db {
@@ -628,4 +628,79 @@ async fn auth_tokens_keep_their_timestamp_so_peers_stop_trading_them() {
             .access_token,
         "access-refreshed"
     );
+}
+
+#[tokio::test]
+async fn a_failing_merge_leaves_the_database_unchanged() {
+    // The merge must be transactional. The payload below first renames the
+    // product (an early, valid write) and then tries to insert a variant whose
+    // (product_id, sku) collides with the existing variant's unique index. The
+    // variant write fails, so the product rename must roll back with it —
+    // before, each row was applied in its own transaction, the rename stayed,
+    // and the same payload failed the same way on every later sync cycle.
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+    seed_peer_a(&a).await;
+    merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+
+    // Move B's copies into the past so the payload below counts as newer edits.
+    exec(
+        &b,
+        "UPDATE products SET updated_at = '2020-01-01 00:00:00'",
+        (),
+    )
+    .await;
+    exec(
+        &b,
+        "UPDATE product_variants SET updated_at = '2020-01-01 00:00:00'",
+        (),
+    )
+    .await;
+
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut payload = over_the_wire(load_full_sync_payload(&a).await.unwrap());
+    payload.products[0].name = "Renamed on A".to_string();
+    payload.products[0].updated_at = now.clone();
+    // A second variant for p1 reusing v1's SKU: the INSERT violates
+    // idx_variants_product_sku, so the merge must fail as a whole.
+    payload.product_variants.push(SyncableVariant {
+        id: "v-duplicate".to_string(),
+        product_id: "p1".to_string(),
+        sku: "CAN-OD".to_string(),
+        name: "Duplicate".to_string(),
+        attributes_json: "{}".to_string(),
+        quantity: 1,
+        on_hand_quantity: 1,
+        image_url: None,
+        sort_order: 1,
+        updated_at: now,
+        source_plugin_id: None,
+        source_vendor_item_id: None,
+    });
+
+    let result = merge_remote_payload(&b, &payload).await;
+    assert!(
+        result.is_err(),
+        "the colliding variant must fail the merge, got {result:?}"
+    );
+
+    let p = b
+        .get_product("p1")
+        .await
+        .unwrap()
+        .expect("product still there");
+    assert_eq!(p.name, "Canteen", "the product update was not rolled back");
+    assert!(b.get_variant("v-duplicate").await.unwrap().is_none());
+    let v = b
+        .get_variant("v1")
+        .await
+        .unwrap()
+        .expect("variant still there");
+    assert_eq!(v.sku, "CAN-OD");
 }
