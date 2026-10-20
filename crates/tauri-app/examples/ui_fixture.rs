@@ -124,6 +124,7 @@ enabled = false
             created_at: "2026-09-26 00:00:00".to_string(),
             updated_at: "2026-09-26 00:00:00".to_string(),
             allowed_hosts_json: allowed_hosts.map(str::to_string),
+            code_hash: None,
         })
         .await
         .unwrap();
