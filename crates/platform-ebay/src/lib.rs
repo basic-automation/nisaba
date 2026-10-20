@@ -506,11 +506,26 @@ impl PlatformAdapter for EbayAdapter {
         platform_item_id: &str,
         request: UpdateListingRequest,
     ) -> Result<(), SyncError> {
+        // eBay has no tag concept on inventory items or offers; silently
+        // dropping a requested tag edit would report success for a change
+        // that never happened, so refuse it explicitly.
+        if request.tags.as_ref().is_some_and(|t| !t.is_empty()) {
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: "eBay update_listing cannot apply tags: the Inventory \
+                          and Offer APIs have no tags field"
+                    .into(),
+            });
+        }
+
         let token = self.get_access_token().await?;
         let extras = request.extras.as_ref();
 
-        // Check if we need to update inventory item fields (description, aspects, condition)
-        let has_inv_changes = request.description_html.is_some()
+        // Check if we need to update inventory item fields (title,
+        // description, aspects, condition). The client re-reads the item
+        // and rebuilds the full-replace body losslessly, omitting quantity.
+        let has_inv_changes = request.title.is_some()
+            || request.description_html.is_some()
             || extras.is_some_and(|e| {
                 e.contains_key("ebay_aspects")
                     || e.contains_key("ebay_condition")
@@ -532,10 +547,13 @@ impl PlatformAdapter for EbayAdapter {
                 .update_inventory_item_full(
                     &token,
                     platform_item_id,
-                    request.description_html.as_deref(),
-                    aspects.as_ref(),
-                    condition,
-                    condition_desc,
+                    &crate::client::InventoryItemOverrides {
+                        description: request.description_html.as_deref(),
+                        title: request.title.as_deref(),
+                        aspects: aspects.as_ref(),
+                        condition,
+                        condition_description: condition_desc,
+                    },
                 )
                 .await?;
         }
@@ -544,7 +562,10 @@ impl PlatformAdapter for EbayAdapter {
             self.set_price(platform_item_id, price.clone()).await?;
         }
 
-        // Check if we need to update offer fields (category, policies)
+        // Check if we need to update offer fields (category, policies).
+        // `updateOffer` is a full replace, so this must send a complete
+        // offer or fail explicitly — never the partial body this code used
+        // to build from just the changed keys (N-5.2).
         let has_offer_changes = extras.is_some_and(|e| {
             e.contains_key("ebay_category_id")
                 || e.contains_key("ebay_fulfillment_policy_id")
@@ -553,38 +574,31 @@ impl PlatformAdapter for EbayAdapter {
         });
 
         if has_offer_changes {
+            let extras = extras.unwrap();
             let offers = self.client.fetch_offers(&token, platform_item_id).await?;
-            if let Some(offer) = offers.first() {
-                if let Some(offer_id) = &offer.offer_id {
-                    let extras = extras.unwrap();
-                    let mut body = serde_json::json!({});
+            let offer_id = offers
+                .first()
+                .and_then(|o| o.offer_id.clone())
+                .ok_or_else(|| SyncError::ApiError {
+                    platform: Platform::Ebay,
+                    message: format!(
+                        "cannot update offer fields for {platform_item_id}: \
+                         no eBay offer exists for this SKU"
+                    ),
+                })?;
 
-                    if let Some(cat_id) = extras.get("ebay_category_id") {
-                        body["categoryId"] = serde_json::json!(cat_id);
-                    }
-
-                    // Build listing policies if any policy ID is provided
-                    let has_policies = extras.contains_key("ebay_fulfillment_policy_id")
-                        || extras.contains_key("ebay_payment_policy_id")
-                        || extras.contains_key("ebay_return_policy_id");
-
-                    if has_policies {
-                        let mut policies = serde_json::json!({});
-                        if let Some(id) = extras.get("ebay_fulfillment_policy_id") {
-                            policies["fulfillmentPolicyId"] = serde_json::json!(id);
-                        }
-                        if let Some(id) = extras.get("ebay_payment_policy_id") {
-                            policies["paymentPolicyId"] = serde_json::json!(id);
-                        }
-                        if let Some(id) = extras.get("ebay_return_policy_id") {
-                            policies["returnPolicyId"] = serde_json::json!(id);
-                        }
-                        body["listingPolicies"] = policies;
-                    }
-
-                    self.client.update_offer(&token, offer_id, &body).await?;
-                }
-            }
+            let overrides = crate::client::OfferOverrides {
+                category_id: extras.get("ebay_category_id").map(|s| s.as_str()),
+                fulfillment_policy_id: extras.get("ebay_fulfillment_policy_id").map(|s| s.as_str()),
+                payment_policy_id: extras.get("ebay_payment_policy_id").map(|s| s.as_str()),
+                return_policy_id: extras.get("ebay_return_policy_id").map(|s| s.as_str()),
+                listing_description: None,
+            };
+            // Fetches the complete offer and PUTs a complete body built
+            // from it; errors explicitly if that is impossible.
+            self.client
+                .update_offer_fields(&token, &offer_id, &overrides)
+                .await?;
         }
 
         Ok(())
