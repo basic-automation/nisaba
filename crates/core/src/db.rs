@@ -1,10 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use turso::params::Params;
 use turso::{params, Builder, Connection, Database, Error as TursoError};
 
 use crate::config::CompanyRegistryEntry;
+use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
 use crate::types::{
     AuthToken, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto, NewSyncEvent,
@@ -3210,7 +3212,172 @@ impl Db {
         Ok(())
     }
 
+    /// Store a plugin's config map, routing `secret: true` values to the
+    /// secret store (the OS keyring in production) instead of `config_json`.
+    ///
+    /// Which keys are secret comes from the plugin's own `config_fields`
+    /// metadata. An empty secret value deletes the stored entry — that is how
+    /// a secret is cleared from the config form. If the secret store is
+    /// unavailable the value is kept in `config_json` (the old behaviour) so
+    /// the plugin keeps working; a warning is logged.
+    pub async fn set_plugin_config_split(
+        &self,
+        plugin_id: &str,
+        config: &HashMap<String, String>,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<(), SyncError> {
+        let secret_keys = match self.get_registry_plugin(plugin_id).await? {
+            Some(plugin) => secret_config_keys(plugin.config_fields.as_deref()),
+            None => HashSet::new(),
+        };
+        let mut plain = HashMap::new();
+        for (key, value) in config {
+            if secret_keys.contains(key) {
+                if value.is_empty() {
+                    if let Err(e) = secrets.delete(plugin_id, key) {
+                        warn!(plugin = %plugin_id, key, "Failed to delete plugin secret: {e}");
+                    }
+                } else if let Err(e) = secrets.store(plugin_id, key, value) {
+                    warn!(plugin = %plugin_id, key,
+                           "Keyring unavailable, keeping plugin secret in config_json: {e}");
+                    plain.insert(key.clone(), value.clone());
+                }
+            } else {
+                plain.insert(key.clone(), value.clone());
+            }
+        }
+        let config_json = serde_json::to_string(&plain).map_err(|e| {
+            SyncError::ConfigError(format!("Failed to serialise plugin config: {e}"))
+        })?;
+        self.set_plugin_config(plugin_id, &config_json).await
+    }
+
+    /// Load a plugin's effective config: non-secret values from `config_json`
+    /// plus `secret: true` values injected from the secret store.
+    ///
+    /// Any plaintext secrets still sitting in `config_json` from before this
+    /// mechanism existed are moved to the secret store and scrubbed from the
+    /// database on this first load. Secret-store failures degrade to whatever
+    /// `config_json` holds (a warning is logged) so plugins keep running on
+    /// machines without an OS keyring.
+    pub async fn get_plugin_config_merged(
+        &self,
+        plugin_id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<HashMap<String, String>, SyncError> {
+        self.migrate_plugin_secrets_for(plugin_id, secrets).await?;
+        let plugin = self
+            .get_registry_plugin(plugin_id)
+            .await?
+            .ok_or_else(|| SyncError::ConfigError(format!("Plugin not found: {plugin_id}")))?;
+        let mut config: HashMap<String, String> = plugin
+            .config_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        for key in secret_config_keys(plugin.config_fields.as_deref()) {
+            match secrets.load(plugin_id, &key) {
+                Ok(Some(value)) => {
+                    config.insert(key, value);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(plugin = %plugin_id, key,
+                           "Failed to load plugin secret from keyring: {e}");
+                }
+            }
+        }
+        Ok(config)
+    }
+
+    /// Move one plugin's plaintext `secret: true` values out of `config_json`
+    /// into the secret store, scrubbing them from the database. Returns the
+    /// number of values moved.
+    ///
+    /// A value is only removed from `config_json` after the secret store
+    /// reads it back identically; on any failure the plaintext copy is kept
+    /// (it may be the only one).
+    pub async fn migrate_plugin_secrets_for(
+        &self,
+        plugin_id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<usize, SyncError> {
+        let plugin = match self.get_registry_plugin(plugin_id).await? {
+            Some(plugin) => plugin,
+            None => return Ok(0),
+        };
+        let secret_keys = secret_config_keys(plugin.config_fields.as_deref());
+        if secret_keys.is_empty() {
+            return Ok(0);
+        }
+        let config: HashMap<String, String> = plugin
+            .config_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let mut moved = 0;
+        for key in &secret_keys {
+            let Some(value) = config.get(key) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            match secrets.store(plugin_id, key, value) {
+                Ok(()) => match secrets.load(plugin_id, key) {
+                    Ok(Some(saved)) if saved == *value => moved += 1,
+                    _ => warn!(plugin = %plugin_id, key,
+                               "Keyring did not return the secret just stored; keeping plaintext copy"),
+                },
+                Err(e) => warn!(plugin = %plugin_id, key,
+                                "Keyring unavailable, keeping plaintext plugin secret in config_json: {e}"),
+            }
+        }
+        if moved > 0 {
+            let scrubbed = strip_secret_values(
+                plugin.config_fields.as_deref(),
+                plugin.config_json.as_deref(),
+            )
+            .unwrap_or_else(|| "{}".to_string());
+            self.set_plugin_config(plugin_id, &scrubbed).await?;
+            info!(plugin = %plugin_id, moved,
+                   "Migrated plugin secrets from config_json to the secret store");
+        }
+        Ok(moved)
+    }
+
+    /// Move every registry plugin's plaintext `secret: true` values into the
+    /// secret store. Returns the total number of values moved.
+    pub async fn migrate_plugin_secrets_to_keyring(
+        &self,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<usize, SyncError> {
+        let mut total = 0;
+        for plugin in self.list_registry_plugins().await? {
+            total += self.migrate_plugin_secrets_for(&plugin.id, secrets).await?;
+        }
+        Ok(total)
+    }
+
     pub async fn delete_registry_plugin(&self, id: &str) -> Result<(), SyncError> {
+        self.delete_registry_plugin_with_secrets(id, &crate::crypto::OsKeyringPluginSecrets)
+            .await
+    }
+
+    /// Delete a registry plugin, also removing its secrets from the secret
+    /// store so nothing lingers in the OS keyring after removal.
+    pub async fn delete_registry_plugin_with_secrets(
+        &self,
+        id: &str,
+        secrets: &dyn PluginSecretStore,
+    ) -> Result<(), SyncError> {
+        if let Some(plugin) = self.get_registry_plugin(id).await? {
+            for key in secret_config_keys(plugin.config_fields.as_deref()) {
+                if let Err(e) = secrets.delete(id, &key) {
+                    warn!(plugin = %id, key, "Failed to delete plugin secret from keyring: {e}");
+                }
+            }
+        }
         let p = to_params(params![id]);
         self.execute_writes(&[
             (
@@ -3832,6 +3999,58 @@ impl Db {
 
         Ok(())
     }
+}
+
+/// Config keys declared with `secret: true` in a plugin's `config_fields` JSON.
+///
+/// `config_fields` is the serialised `Vec<ConfigField>` from the plugin's
+/// metadata; only the `key` and `secret` members matter here. Returns an empty
+/// set when the plugin declares no fields.
+pub fn secret_config_keys(config_fields_json: Option<&str>) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    if let Some(json) = config_fields_json {
+        if let Ok(fields) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
+            for field in fields {
+                let is_secret = field
+                    .get("secret")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if is_secret {
+                    if let Some(key) = field.get("key").and_then(serde_json::Value::as_str) {
+                        keys.insert(key.to_string());
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Remove `secret: true` values from a plugin `config_json` string.
+///
+/// Used wherever config crosses a boundary that must never carry secrets:
+/// the P2P sync payload (both directions) and the on-disk scrub performed by
+/// [`Db::migrate_plugin_secrets_to_keyring`]. Unparseable input is returned
+/// unchanged — never silently dropped.
+pub fn strip_secret_values(
+    config_fields_json: Option<&str>,
+    config_json: Option<&str>,
+) -> Option<String> {
+    let secret_keys = secret_config_keys(config_fields_json);
+    if secret_keys.is_empty() {
+        return config_json.map(str::to_string);
+    }
+    let json: String = config_json?.to_string();
+    let mut map: HashMap<String, String> = match serde_json::from_str(&json) {
+        Ok(map) => map,
+        Err(_) => return Some(json),
+    };
+    let before = map.len();
+    map.retain(|k, _| !secret_keys.contains(k));
+    if map.len() == before {
+        return Some(json);
+    }
+    serde_json::to_string(&map).ok().or(Some(json))
 }
 
 fn parse_vendor_plugin_row(row: &turso::Row) -> Result<VendorPluginRow, SyncError> {
@@ -4864,5 +5083,199 @@ mod tests {
             std::fs::read(backups[0].join("nisaba.db-wal")).unwrap(),
             b"uncheckpointed"
         );
+    }
+
+    // ── Plugin `secret: true` config values ────────────────────
+
+    const SECRET_FIELDS_JSON: &str = r#"[
+        {"key":"api_key","label":"API key","required":true,"secret":true},
+        {"key":"region","label":"Region","required":false,"secret":false}
+    ]"#;
+
+    fn secret_plugin_row(id: &str) -> VendorPluginRow {
+        let mut row = registry_row(id, None);
+        row.config_fields = Some(SECRET_FIELDS_JSON.to_string());
+        row
+    }
+
+    async fn secret_test_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn secret_config_keys_parses_secret_true_fields() {
+        let keys = secret_config_keys(Some(SECRET_FIELDS_JSON));
+        assert_eq!(keys, HashSet::from(["api_key".to_string()]));
+        assert!(secret_config_keys(None).is_empty());
+        assert!(secret_config_keys(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn strip_secret_values_removes_secret_true_entries() {
+        let stripped = strip_secret_values(
+            Some(SECRET_FIELDS_JSON),
+            Some(r#"{"api_key":"s3cr3t","region":"us"}"#),
+        );
+        assert_eq!(stripped.as_deref(), Some(r#"{"region":"us"}"#));
+
+        // Nothing secret declared: unchanged.
+        let untouched = strip_secret_values(None, Some(r#"{"api_key":"s3cr3t"}"#));
+        assert_eq!(untouched.as_deref(), Some(r#"{"api_key":"s3cr3t"}"#));
+
+        // No secrets present: the original string is returned as-is.
+        let same = strip_secret_values(Some(SECRET_FIELDS_JSON), Some(r#"{"region":"us"}"#));
+        assert_eq!(same.as_deref(), Some(r#"{"region":"us"}"#));
+
+        // Unparseable input is never silently dropped.
+        let corrupt = strip_secret_values(Some(SECRET_FIELDS_JSON), Some("{oops"));
+        assert_eq!(corrupt.as_deref(), Some("{oops"));
+    }
+
+    #[tokio::test]
+    async fn set_plugin_config_split_routes_secrets_to_the_secret_store() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        config.insert("region".to_string(), "us".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        // The secret is in the store, not in the database…
+        assert_eq!(
+            store.load("p1", "api_key").unwrap().as_deref(),
+            Some("s3cr3t-token")
+        );
+        let raw = db
+            .get_registry_plugin("p1")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_json
+            .unwrap();
+        assert!(
+            !raw.contains("s3cr3t-token"),
+            "config_json must not contain the secret: {raw}"
+        );
+        // …while the non-secret value is still there.
+        let raw_map: HashMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw_map.get("region").map(String::as_str), Some("us"));
+        assert!(!raw_map.contains_key("api_key"));
+    }
+
+    #[tokio::test]
+    async fn get_plugin_config_merged_injects_secrets_for_runs() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        config.insert("region".to_string(), "us".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+        assert_eq!(
+            merged.get("api_key").map(String::as_str),
+            Some("s3cr3t-token")
+        );
+        assert_eq!(merged.get("region").map(String::as_str), Some("us"));
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_secrets_migrate_to_the_secret_store_on_first_load() {
+        let (_dir, db) = secret_test_db().await;
+        // A row written by an older version: the secret sits in config_json.
+        let mut row = secret_plugin_row("p1");
+        row.config_json = Some(r#"{"api_key":"legacy-secret","region":"us"}"#.to_string());
+        db.upsert_registry_plugin(&row).await.unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+
+        // The plugin still gets its full config…
+        assert_eq!(
+            merged.get("api_key").map(String::as_str),
+            Some("legacy-secret")
+        );
+        assert_eq!(merged.get("region").map(String::as_str), Some("us"));
+        // …the secret moved to the store…
+        assert_eq!(
+            store.load("p1", "api_key").unwrap().as_deref(),
+            Some("legacy-secret")
+        );
+        // …and config_json was scrubbed.
+        let raw = db
+            .get_registry_plugin("p1")
+            .await
+            .unwrap()
+            .unwrap()
+            .config_json
+            .unwrap();
+        assert!(
+            !raw.contains("legacy-secret"),
+            "config_json must be scrubbed after migration: {raw}"
+        );
+        let raw_map: HashMap<String, String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw_map.get("region").map(String::as_str), Some("us"));
+    }
+
+    #[tokio::test]
+    async fn clearing_a_secret_field_deletes_the_stored_entry() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+        assert!(store.load("p1", "api_key").unwrap().is_some());
+
+        // Saving an empty secret clears it.
+        config.insert("api_key".to_string(), String::new());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+        assert_eq!(store.load("p1", "api_key").unwrap(), None);
+        let merged = db.get_plugin_config_merged("p1", &store).await.unwrap();
+        assert!(!merged.contains_key("api_key"));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_plugin_removes_its_secrets_from_the_store() {
+        let (_dir, db) = secret_test_db().await;
+        db.upsert_registry_plugin(&secret_plugin_row("p1"))
+            .await
+            .unwrap();
+
+        let store = crate::crypto::InMemoryPluginSecrets::new();
+        let mut config = HashMap::new();
+        config.insert("api_key".to_string(), "s3cr3t-token".to_string());
+        db.set_plugin_config_split("p1", &config, &store)
+            .await
+            .unwrap();
+
+        db.delete_registry_plugin_with_secrets("p1", &store)
+            .await
+            .unwrap();
+        assert_eq!(store.load("p1", "api_key").unwrap(), None);
+        assert!(db.get_registry_plugin("p1").await.unwrap().is_none());
     }
 }

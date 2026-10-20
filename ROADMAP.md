@@ -532,12 +532,19 @@ write surfaces as `Err`.
       fail with "must contain an index.ts". Importer tests: 5, the first in `nisaba-tauri`.
       Nisaba never calls `ZipArchive::extract`, so the symlink zip-slip in the `zip` crate
       (CVE-2025-29787) does not reach it. https://github.com/advisories/GHSA-94vh-gphv-8pm8
-- [ ] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
+- [x] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
       writes the whole config map — API tokens included — to
       `vendor_plugin_registry.config_json` in the unencrypted database, and that column is
       part of the P2P sync payload. The README claimed they were encrypted; it no longer
       does. Move secret fields to the OS keyring like the company secret, and decide how a
       peer that needs the token to run the plugin obtains it.
+      → Done (N-2.3): `secret: true` values are stored in the OS keyring
+      (`nisaba-plugin-config` service, one entry per plugin field) via
+      `Db::set_plugin_config_split`; `config_json` and the P2P payload never carry
+      them (stripped on payload build and on merge). Legacy plaintext values migrate
+      to the keyring on first load and are scrubbed from the DB
+      (`migrate_plugin_secrets_to_keyring`, also run at company-context init).
+      Secrets are per-machine: a peer that needs the token sets it locally.
 - [x] Plugin resource limits — `PluginLimits` bounds every run: a wall-clock timeout
       (a watchdog thread terminates the isolate, since a spinning plugin never yields to
       tokio's timer), a V8 heap ceiling with a near-limit callback, and an output budget
@@ -620,9 +627,14 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
       - UPC/GTIN, brand, MPN, weight and dimensions become typed fields instead of strings
         in `extras`, because platform create-listing needs them;
       - `extras` keeps its free-form role.
-- [ ] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
+- [x] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
       keyring, injected into the run, and never written to `config_json` or the P2P
       payload. This closes the plaintext item above.
+      → Done (N-2.3): `Db::get_plugin_config_merged` injects keyring secrets into
+      every plugin run path (`fetch_vendor_listings`, `sync_vendor_listings`,
+      `run_vendor_sync_single`); `get_vendor_plugin_config` returns the merged map
+      for the config form. Tests serialise both `config_json` and the P2P payload
+      and assert the secret is absent.
 - [ ] **Per-plugin storage**: `Nisaba.store.get/set/delete`, a small key–value store with a
       size cap that persists between runs. It holds cursors, ETags and last-seen
       timestamps.

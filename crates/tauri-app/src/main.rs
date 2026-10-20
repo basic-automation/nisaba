@@ -349,6 +349,17 @@ async fn init_company_context(
             .migrate()
             .await
             .map_err(|e| format!("Failed to migrate company DB: {e}"))?;
+        // Move any plaintext plugin `secret: true` values into the OS keyring.
+        // Best-effort: without a keyring the values stay in config_json (and a
+        // warning is logged) so plugins keep working.
+        match new_db
+            .migrate_plugin_secrets_to_keyring(&crypto::OsKeyringPluginSecrets)
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => info!(moved = n, "Migrated plugin secrets to the OS keyring"),
+            Err(e) => warn!("Plugin secret migration failed: {e}"),
+        }
         new_db
     };
 
