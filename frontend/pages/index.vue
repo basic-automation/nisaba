@@ -108,7 +108,7 @@ function formatEvent(event: any): string {
     >
       <p class="text-xs text-yellow-400/80">
         No platforms configured. Set up your platforms to start syncing inventory.
-        <NuxtLink to="/config" class="text-accent hover:text-accent/80 ml-1">Configure Platforms</NuxtLink>
+        <button class="text-accent hover:text-accent/80 ml-1" @click="openSettingsWindow('config')">Configure Platforms</button>
       </p>
     </div>
 
