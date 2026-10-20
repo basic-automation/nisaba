@@ -735,13 +735,18 @@ is used only when no platform reports.
       Fixed in N-4.3: the engine now groups mappings by (product, variant); canonical
       stock, platform readings/snapshots and pushes are all keyed per variant, with
       mappings that name no existing variant row falling back to product-level sync.
-- [ ] **Re-mapping an unmapped listing fails.** `delete_mapping` soft-deletes (`db.rs`
+- [x] **Re-mapping an unmapped listing fails.** `delete_mapping` soft-deletes (`db.rs`
       ~1142), but the unique indexes `idx_mappings_product_platform_variant` and
       `idx_mappings_platform_item` include deleted rows, so `insert_mapping` hits UNIQUE.
       `create_listing_on_platform` creates the live listing *before* inserting the mapping
       (`commands/listings.rs` ~351–366), so this leaves an unmapped live listing. Use
       partial indexes (`WHERE deleted_at IS NULL`), and create the mapping in the same
       transaction as the record of the listing.
+      Fixed in N-4.5: migration 023 rebuilds `platform_mappings` with both unique
+      indexes partial (`WHERE deleted_at IS NULL`), preserving tombstones; listing
+      creation pre-flights the mapping slot before creating anything remotely and
+      records the mapping with the cached listing record in one transaction
+      (`Db::record_created_listing`).
 - [ ] **An XMR order is marked processed before its sale is applied** (`sync_engine.rs`
       ~245). Any `?` exit in between, or an untracked product (~272), loses the sale for
       good. Mark it in the same transaction as the stock write.
