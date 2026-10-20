@@ -31,6 +31,152 @@ go before any new capability. Each line links to the full item in its phase.
    repair the Tor path beyond the data-loss fixes; Sync v2 replaces it.
 7. Fix the failing UI smoke job on PR #2, and make the frontend typecheck real (Phases 7, 0).
 
+The *1.0 release* section below turns these into release gates, alongside everything else
+that has to be true before tagging `v1.0.0`.
+
+## 1.0 release
+
+1.0 is a promise, not a feature count. It tells users that their data survives every later
+update, that `config.toml`, the export format and the plugin API will not break without a
+major version, and that the build they install is signed and updates itself. The workspace
+is at `0.1.1`. Everything below is the line between that and `v1.0.0`; items in the phases
+are referenced rather than repeated.
+
+### Scope decisions (settle first)
+
+- [ ] **Is P2P in 1.0?** Recommendation: no. Ship 1.0 as a single-machine product and put
+      company sync behind a "Preview" switch that is off by default. Sync v2 (Phase 5) is a
+      rewrite of the transport and the data layer, and today's Tor path does not work end
+      to end, so holding 1.0 for it would hold everything else. The exception is the
+      **stock ledger** (Phase 4): it changes the database's data model, so it must land
+      before 1.0, or 1.0 freezes the model Sync v2 has to migrate away from.
+- [x] **Credential model: customers bring their own API keys** (owner decision, 2026-10-19).
+      Nisaba's own application for Amazon SP-API keys was denied, so there is no shared
+      Amazon app to broker. Every customer enters their own eBay developer keyset, their
+      own Amazon SP-API app (LWA client id and secret plus a refresh token), their own
+      Squarespace API key and their own XMR Bazaar login. This is what the code already
+      does. 1.0 runs no hosted OAuth broker; the setup wizard (*Gate: product*) carries the
+      onboarding cost instead. Revisit a shared eBay keyset after 1.0 (see *Services*).
+- [ ] **Which adapters are "1.0"?** An adapter ships as stable only after a live-account
+      verification (below). Anything not verified ships labelled *Beta* in the UI, or
+      disabled. **Amazon ships as Beta:** each customer must get their own SP-API developer
+      registration approved, Amazon can refuse it as it refused ours, and the adapter has
+      never been run end to end. The setup guide says so before the customer starts.
+
+### Gate: correctness
+
+- [ ] Priority queue items 1–5 closed.
+- [ ] Phase 4 *Stock correctness* closed, including the stock ledger.
+- [ ] Phase 2 *Writes that report success without writing* closed, with a test per write
+      path that a rejected write surfaces as `Err`.
+- [ ] Live verification per stable adapter, recorded in this file with the date and what
+      was exercised: fetch, set quantity, set price, set description and create listing
+      against a real (or sandbox) account. Real captured fixtures (Phase 1) come out of the
+      same session.
+- [ ] A 7-day soak on a real catalog with the dry-run preview (Phase 4) on first and then
+      live, with no oversell incident and no unexplained stock change.
+
+### Gate: data safety
+
+- [ ] Transactional migrations, plus upgrade tests from a populated database at *every
+      released version* (0.1.0 onward), run in CI (Phase 1).
+- [ ] Automatic database backup before every migration and on a schedule (keep the last N),
+      with a *Restore from backup* action in the UI. Backups land next to the database and
+      never leave the machine.
+- [ ] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1).
+- [ ] Lossless export/import, round-trip tested (Cross-cutting). From 1.0 the export format
+      carries a version and every later release imports every earlier 1.x export.
+
+### Gate: security
+
+- [ ] Strict CSP and sanitised `v-html` (Cross-cutting).
+- [ ] Plugin re-approval on code change, and plugin secrets in the keyring (Phase 3).
+- [ ] Secret-handling audit closed: nothing secret in `config.toml`, logs, exports or P2P
+      payloads (Cross-cutting).
+- [ ] Tauri capabilities narrowed so the main window can invoke only the commands it uses,
+      and secret-returning commands are reachable only from the settings views that
+      display them.
+- [ ] `cargo audit` and `npm audit` clean in CI, on a schedule (Cross-cutting).
+- [ ] GitHub private vulnerability reporting enabled (Phase 0).
+
+### Gate: release engineering
+
+- [ ] Updater end to end (Phase 6): signing key, `createUpdaterArtifacts`, `latest.json`
+      assembled by the workflow, and an endpoint that only a published release can change.
+- [ ] **Update-path test.** Install the previous release, put data in it, update to the
+      release candidate through the in-app updater, and assert the data and settings
+      survived. Run it on all three platforms before every release from 1.0 on.
+- [ ] The tag-push release path proven on a `v0.x` tag before it is trusted with `v1.0.0`
+      (Phase 6). Treat `-rc.N` tags as pre-releases.
+- [ ] Windows code signing, with an Authenticode certificate or a cloud signing service.
+      Unsigned installers trigger SmartScreen's "unrecognised app" wall, which most users
+      will not click through.
+- [ ] macOS Developer ID signing and notarization, or a documented decision to ship
+      unsigned with the right-click-Open workaround (Phase 6).
+- [ ] CI green with no `continue-on-error`: typecheck, UI smoke, a macOS leg, and runners
+      moved off deprecated Node 20 actions (Phases 0, 6, 7).
+- [ ] A version-consistency check across `Cargo.toml`, `tauri.conf.json` and
+      `frontend/package.json` (Phase 6).
+- [ ] Decide `crates/service` and `crates/tui`: shipped as products with 1.0, or deleted
+      (Phase 6).
+
+### Gate: product
+
+- [ ] **First-run setup wizard.** It walks through each platform's credentials, with links
+      to the developer portals, the exact redirect URI (eBay RuName) to register, and a
+      *Test connection* button per platform. Because customers bring their own keys, this
+      is the difference between a tool its author can use and one a seller can. Amazon's
+      step explains the SP-API developer registration (self-authorized private app), the
+      roles to request, and that approval is Amazon's decision.
+- [ ] Credential health in the UI: per platform, show when the token or keys expire (eBay's
+      refresh token, Amazon's LWA client-secret rotation), warn ahead of time, and link
+      straight back to the wizard step that renews them (Phase 2's token-expiry item).
+- [ ] Empty and error states, confirmation of destructive actions, and the silent-startup
+      fix (Phase 7).
+- [ ] **Export diagnostics**: one button that zips recent logs, versions, the platform and
+      the redacted config for a bug report. This replaces any telemetry or crash-reporting
+      service (see *Services*).
+- [ ] An accessibility pass on the core flows (Phase 7).
+
+### Gate: documentation
+
+- [ ] A user guide: setup, each platform's credentials, mappings and variants, what sync
+      does and does not do, backups, and troubleshooting. Either ship it in the empty
+      `frontend/public/guide/` or host it.
+- [ ] The plugin author reference and published types (Phase 3, *Plugin API v1*).
+- [ ] README screenshots (Phase 0).
+- [ ] Release notes on every GitHub release, generated from PR titles. (This file stays the
+      plan; the release notes are the user-facing record.)
+
+### Gate: legal and platform terms
+
+- [ ] Third-party license notices bundled in the app: an *About → Licenses* view generated
+      by `cargo-about` (Rust) and a license checker (npm). Most dependencies are MIT or
+      Apache-2.0, and both require shipping their notices with binaries.
+- [ ] Each platform's API terms reviewed against what Nisaba does: eBay's API License
+      Agreement, Amazon SP-API's Acceptable Use and Data Protection policies (relevant as
+      soon as order data with buyer details is read), Squarespace's API terms, and XMR
+      Bazaar's terms on automated access, since that adapter scrapes HTML.
+- [ ] eBay **Marketplace Account Deletion** notifications. Every production keyset must
+      either subscribe an HTTPS endpoint or be granted an exemption for not storing eBay
+      user data. With customers bringing their own keys, each customer does this for their
+      own keyset, so the setup guide must walk through the exemption. (It would become a
+      hosted service only if Nisaba ever ships a shared keyset.) Confirm the current rule
+      with eBay before writing the guide.
+- [ ] A short privacy statement: what leaves the machine (update checks, marketplace API
+      calls, P2P relays if enabled) and what never does.
+
+### Stability contract at 1.0
+
+- [ ] Write down what is frozen and how it versions:
+      - the plugin API (`api_version` 1; Phase 3);
+      - `config.toml` (a `config_version` key, with migration on load);
+      - the export format (versioned, imports every earlier 1.x);
+      - the database (forward-only migrations, backup first);
+      - the P2P protocol (versioned, if P2P is in).
+      Plus a deprecation policy: a deprecated surface keeps working for at least one minor
+      release, with a warning in the UI.
+
 ## Phase 0 — Public release readiness
 
 - [x] MIT `LICENSE` at the repo root, matching `Cargo.toml`'s `workspace.package.license`
@@ -267,8 +413,9 @@ anything on the platform (see "Writes that report success without writing" below
       Also warn *before* expiry. eBay's `refresh_token_expires_in` is parsed but unused
       (`platform-ebay/src/types.rs:11`), and Amazon LWA client secrets have a rotation
       deadline; check the current window before building this.
-- [ ] A fifth adapter would prove the trait is actually general — Etsy or Shopify is the
-      obvious candidate
+- [ ] A fifth adapter would prove the trait is actually general. Superseded: the next
+      adapter is Shopify, built as a marketplace plugin (Phase 3, *Plugin kinds after 1.0*;
+      *Services and integrations*).
 - [ ] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
       callback accepts a `code` from any page the auth window reaches (~279–283). Add and
       check `state`.
@@ -450,6 +597,82 @@ write surfaces as `Err`.
 - [ ] Plugin signing or checksum pinning before any non-local distribution happens
 - [ ] Plugin version upgrade path — what happens to cached vendor listings when a plugin's
       schema changes under them
+
+### Plugin API v1 (freeze for 1.0)
+
+Today a plugin can do one thing: import a supplier catalog through `fetchListings`. It has
+five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata of
+`name`, `version`, `description`, `config_fields`, `category`, `icon` and `allowed_hosts`.
+1.0 freezes whatever shape exists at that point, so fix the shape first.
+
+- [ ] An `api_version` in metadata. The host refuses a major version it does not know and
+      says so at install. The surface frozen at `api_version: 1` is written down in
+      `plugins/template` and `SECURITY.md`.
+- [ ] Fix `VendorListing` before freezing it:
+      - `image_url` (a single URL) becomes `images: string[]`;
+      - `price: f64` becomes a decimal string or integer minor units, with `currency`
+        required whenever a price is present (the Cross-cutting money item);
+      - the meaning of `quantity: null` (unknown) versus `0` (out of stock) is written down;
+      - UPC/GTIN, brand, MPN, weight and dimensions become typed fields instead of strings
+        in `extras`, because platform create-listing needs them;
+      - `extras` keeps its free-form role.
+- [ ] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
+      keyring, injected into the run, and never written to `config_json` or the P2P
+      payload. This closes the plaintext item above.
+- [ ] **Per-plugin storage**: `Nisaba.store.get/set/delete`, a small key–value store with a
+      size cap that persists between runs. It holds cursors, ETags and last-seen
+      timestamps.
+- [ ] **Incremental sync.** `fetchListings({ since, cursor })` returns only what changed,
+      and the host merges it into the cached catalog. Full catalog pulls every cycle are
+      what hit supplier rate limits and stretch runs toward the 12 h limit.
+- [ ] **Host-managed OAuth for supplier APIs.** Metadata declares `oauth` (authorize URL,
+      token URL, scopes). The host runs the flow in its own window and keeps the tokens in
+      the keyring; the plugin receives only a current access token, never the refresh
+      token.
+- [ ] **Feed suppliers.** Many wholesalers publish CSV or XML feeds, over HTTPS, SFTP or
+      email, rather than an API. Add host-side, size-bounded `Nisaba.parseCsv` and
+      `Nisaba.parseXml`. Decide whether to support SFTP (an `sftp://` entry in
+      `allowed_hosts`), a `file` config field the host reads with the user's consent, or
+      both.
+- [ ] Per-plugin schedule (an interval, plus manual runs) and a **run history** in the UI:
+      start and end time, listings emitted, errors, and the plugin's own log lines (which
+      are already routed into the app log).
+- [ ] **Capabilities manifest.** Next to `allowed_hosts`, a plugin declares what it does:
+      `catalog` today, and `orders`, `marketplace` and `notify` later. The install card
+      shows the capabilities, the host refuses calls outside them, and a capability change
+      triggers re-approval like a code change.
+- [ ] **Author tooling.**
+      - Publish the `Nisaba` API and the `VendorListing` schema as TypeScript types,
+        generated from the Rust types so they cannot drift, in an npm package or as a
+        `nisaba.d.ts` in the template.
+      - A `nisaba-plugin` dev command that runs a plugin against a config, prints its
+        batches, validates them against the schema, and packages the zip with its hash.
+      - The fake-supplier harness from `tests/template.rs`, offered to authors as their own
+        test kit.
+
+### Plugin kinds after 1.0
+
+- [ ] **Marketplace adapter plugins.** A TypeScript implementation of the `PlatformAdapter`
+      contract (fetch listings, set quantity, set price, set description, create listing,
+      detect sales), running in the same sandbox behind a Rust bridge that implements the
+      trait. The engine then treats it exactly like a built-in adapter. Phase 2's lesson
+      becomes a host rule: every write returns a structured result (`applied`, `rejected`,
+      `rate_limited`, `auth_failed`), never a bare success. The host also enforces dry-run,
+      so a plugin cannot write during a preview, and supplies idempotency keys and a
+      rate-limit helper. Shopify is the first one (*Services and integrations*).
+- [ ] **Order (dropship) plugins.** When a sale of a vendor-sourced variant is detected,
+      call the source plugin's `placeOrder` to submit it to the supplier. An approval queue
+      is on by default, dry-run is supported, and order status is polled afterwards.
+      Rothco is the first candidate. The order carries the buyer's name and address, so
+      decide the retention and redaction rules first, and record them in the privacy
+      statement.
+- [ ] **Notification plugins.** Events go out to ntfy, email, Matrix, Slack or Discord: low
+      stock, an oversell incident (Phase 5, Step 3), credentials about to expire, a sync
+      failing, or a plugin needing re-approval.
+- [ ] **Pricing rules** — decide whether these are built in or a plugin kind: markup over
+      dealer price (Rothco's tiered pricing), minimum advertised price, and rounding. The
+      lean is built in, because prices push to every platform and need the same
+      write-safety as stock.
 
 ## Phase 4 — Sync engine depth
 
@@ -1026,6 +1249,67 @@ any peer can record a sale.
       then started with `cwd` set to the temp fixture dir, so WebKitWebDriver cannot find
       `target/debug/nisaba-tauri`. Locally it passes because the README passes an absolute
       path. Fix: `os.path.abspath(args.target_dir)`.
+
+## Services and integrations
+
+Two kinds of "service" matter here: hosted infrastructure that Nisaba itself would have to
+run, and external platforms that Nisaba syncs with. Nisaba is a desktop app that never
+holds a customer's keys anywhere but their own machine, so the bar for the first kind is
+high: every hosted service is an availability dependency, a privacy promise and a running
+cost.
+
+### Hosted infrastructure
+
+- [x] **No OAuth broker.** Customers bring their own API keys (see *1.0 release*, owner
+      decision 2026-10-19, after Nisaba's own Amazon SP-API application was denied).
+- [ ] Post-1.0, revisit a **shared eBay keyset** only. eBay is the platform where
+      bring-your-own costs the most: developer program signup, a production keyset, a
+      RuName, and the account-deletion exemption. Sharing a keyset would need a small
+      stateless broker that does the code-for-token exchange and every refresh with
+      Nisaba's client secret, plus an account-deletion endpoint. Weigh that against the
+      setup wizard's real-world drop-off before building it. Amazon stays bring-your-own
+      unless a new Nisaba application is approved.
+- [ ] **iroh relay** — only if Sync v2 picks option (a) in Step 0. Host one relay for
+      customers who want it, and document running your own; `iroh-relay` is a single
+      binary.
+- [ ] **Update manifest** — GitHub Releases, with no new service (Phase 6). Checks can be
+      turned off (Phase 6).
+- [ ] **Plugin registry** — no hosted registry for 1.0. Plugins are imported from a file
+      or URL, and shared within a company. Revisit with plugin signing (Phase 3).
+- [x] **No telemetry or crash-reporting service.** A local *Export diagnostics* bundle
+      that the user chooses to attach to a bug report covers the need without data
+      leaving the machine unasked (*1.0 release*, Gate: product).
+
+### Marketplace and storefront integrations
+
+Shipping today: eBay, Squarespace, XMR Bazaar, and Amazon (Beta for 1.0). Next candidates,
+in recommended order. All of them use per-store keys or tokens the customer creates
+themselves, so none needs a broker:
+
+- [ ] **Shopify** — the largest small-business storefront. The GraphQL Admin API has
+      first-class inventory levels per location. A custom app created in the store's admin
+      gives an access token with no app review. This is the strongest next adapter.
+- [ ] **WooCommerce** — self-hosted WordPress stores, using REST API keys generated in the
+      store. It is common with sellers who take crypto (BTCPay Server has a WooCommerce
+      plugin), which fits the XMR Bazaar audience.
+- [ ] **Walmart Marketplace** — a large marketplace, but sellers must be approved by
+      Walmart first. Its API keys are per seller.
+- [ ] Etsy only if the catalog fits. Etsy's seller policy is built around handmade,
+      vintage and craft supplies, so reselling a wholesale catalog such as Rothco's
+      is likely a policy problem rather than a technical one.
+- [ ] Other crypto-native marketplaces besides XMR Bazaar — ask current customers which
+      ones they actually sell on before building one.
+- [ ] Build the next one as a **marketplace plugin** rather than a new Rust crate (Phase 3,
+      *Plugin kinds after 1.0*). A new marketplace then ships without an app release, and
+      Shopify is the proof that the plugin bridge is general. This supersedes the
+      "fifth adapter" item in Phase 2.
+
+### Ancillary integrations (plugin-shaped, after 1.0)
+
+- [ ] Notifications — low stock, an oversell incident, credentials about to expire, sync
+      failing — to ntfy, email, Matrix, Slack or Discord (Phase 3, notification plugins).
+- [ ] Dropship ordering with suppliers that support it, starting with Rothco (Phase 3,
+      order plugins).
 
 ## Cross-cutting
 
