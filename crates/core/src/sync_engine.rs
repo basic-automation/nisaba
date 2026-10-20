@@ -79,6 +79,19 @@ pub enum SyncCommand {
 /// Now stay responsive while it runs.
 pub type VendorSyncFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// How long sync events are kept before the engine's housekeeping prunes
+/// them. Events are an audit/debug trail for recent cycles; older ones only
+/// grow the database.
+pub const SYNC_EVENT_RETENTION_DAYS: i64 = 90;
+
+/// Inventory history older than this is downsampled by housekeeping to one
+/// row per product per day — enough for long-range trend charts without
+/// keeping every intra-day change forever.
+pub const HISTORY_DOWNSAMPLE_AFTER_DAYS: i64 = 30;
+
+/// How often the running engine repeats housekeeping after the startup run.
+const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// One numeric platform reading captured for ledger resolution: the listing's
 /// current polled quantity plus its last-known snapshot quantity, if the
 /// listing has ever been observed before.
@@ -557,16 +570,13 @@ impl SyncEngine {
                 let new_canonical = resolved.new_canonical;
 
                 if new_canonical == canonical_old {
-                    // Record history even when no change (for time-series continuity).
-                    // Only the product-level group writes product history.
+                    // No history row here: history records quantity *changes*
+                    // only (see `Db::record_inventory_history`). Writing a row
+                    // for every unchanged cycle would spam the table with
+                    // ~288 identical rows per product per day.
                     // Falls through to the push step below: a platform whose
                     // reading disagrees with canonical still needs a push
                     // (failed-push retry, newly mapped listing correction).
-                    if !is_variant_group && !self.dry_run {
-                        self.db
-                            .record_inventory_history(&product.id, canonical_old, &cycle_id)
-                            .await?;
-                    }
 
                     // The sales were folded into the resolution even though
                     // the quantity did not move (already at the floor), so
@@ -918,8 +928,8 @@ impl SyncEngine {
                 }
 
                 // ── Step 5: Record history ────────────────────────
-                // Product-level group only. The unchanged-canonical path
-                // recorded above; this covers the changed path.
+                // Product-level group only, and only when the canonical
+                // quantity actually changed this cycle.
                 if group_changed && !is_variant_group && !self.dry_run {
                     self.db
                         .record_inventory_history(&product.id, new_canonical, &cycle_id)
@@ -1009,6 +1019,33 @@ impl SyncEngine {
         Err(last_err.unwrap_or_else(|| SyncError::Other("Poll failed with no error".into())))
     }
 
+    /// Prune old sync events and downsample old inventory history.
+    ///
+    /// This is the only caller of [`Db::prune_old_sync_events`] and
+    /// [`Db::downsample_old_history`]: the engine runs it once at startup
+    /// (from [`SyncEngine::run`]) and then once a day while it runs, so the
+    /// `sync_events` and `inventory_history` tables stay bounded without any
+    /// manual maintenance. A dry-run engine never calls this — pruning is a
+    /// local write, and a dry run makes none.
+    pub async fn run_housekeeping(&self) -> Result<(), SyncError> {
+        let pruned = self
+            .db
+            .prune_old_sync_events(SYNC_EVENT_RETENTION_DAYS)
+            .await?;
+        let downsampled = self
+            .db
+            .downsample_old_history(HISTORY_DOWNSAMPLE_AFTER_DAYS)
+            .await?;
+        if pruned > 0 || downsampled > 0 {
+            info!(
+                pruned_sync_events = pruned,
+                downsampled_history_rows = downsampled,
+                "Housekeeping pruned old sync data"
+            );
+        }
+        Ok(())
+    }
+
     /// Run the engine loop, listening for commands and executing cycles on a timer.
     pub async fn run(self, mut cmd_rx: mpsc::Receiver<SyncCommand>, interval_secs: u64) {
         // Startup: recalculate all vendor-sourced product quantities so that
@@ -1029,6 +1066,15 @@ impl SyncEngine {
             }
         }
 
+        // Startup housekeeping, repeated daily in the tick branch below.
+        // Skipped for a dry-run engine: pruning is a local write.
+        let mut last_housekeeping = tokio::time::Instant::now();
+        if !self.dry_run {
+            if let Err(e) = self.run_housekeeping().await {
+                warn!(error = %e, "Startup housekeeping failed");
+            }
+        }
+
         let mut paused = false;
         // The in-flight vendor refresh, spawned as its own task after each
         // cycle. The loop never awaits it, so commands (Pause, Sync Now)
@@ -1042,6 +1088,12 @@ impl SyncEngine {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    if !self.dry_run && last_housekeeping.elapsed() >= HOUSEKEEPING_INTERVAL {
+                        if let Err(e) = self.run_housekeeping().await {
+                            warn!(error = %e, "Scheduled housekeeping failed");
+                        }
+                        last_housekeeping = tokio::time::Instant::now();
+                    }
                     if !paused {
                         if let Err(e) = self.run_cycle().await {
                             error!(error = %e, "Sync cycle failed");
@@ -1757,7 +1809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_agreeing_cycle_pushes_nothing_but_still_records_history() {
+    async fn an_agreeing_cycle_pushes_nothing_and_writes_no_history() {
         let harness = Harness::new(
             vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 4)])],
             0,
@@ -1772,12 +1824,104 @@ mod tests {
         assert_eq!((synced, pushed), (0, 0));
         assert!(harness.adapter(Platform::Ebay).pushes().is_empty());
         let history = harness.db.get_inventory_history("p1", None).await.unwrap();
+        assert!(
+            history.is_empty(),
+            "a no-change cycle writes no history row, got {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_records_changes_only_across_cycles() {
+        // Cycle 1: eBay drops to 2, canonical follows — one history row.
+        // Cycle 2: everything agrees at 2 — no new row (this is the spam
+        // the old every-cycle write produced, 288 rows/product/day).
+        // Cycle 3: eBay drops to 1 — a second row with the new quantity.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_poll_script(vec![
+                Poll::items(&[("E-1", 2)]),
+                Poll::items(&[("E-1", 2)]),
+                Poll::items(&[("E-1", 1)]),
+            ])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 4, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+        harness.engine.run_cycle().await.unwrap();
+        harness.engine.run_cycle().await.unwrap();
+
+        let history = harness.db.get_inventory_history("p1", None).await.unwrap();
+        let quantities: Vec<i64> = history.iter().map(|h| h.quantity).collect();
+        assert_eq!(quantities, vec![2, 1]);
+    }
+
+    #[tokio::test]
+    async fn housekeeping_prunes_old_events_and_downsamples_old_history() {
+        // The engine's housekeeping is the only caller of the Db pruning
+        // methods: it must delete sync events past the retention window and
+        // thin old history to one row per product per day, leaving recent
+        // rows untouched.
+        let harness = Harness::new(Vec::new(), 0).await;
+        harness.add_product("p1", 4, &[]).await;
+
+        let conn = harness.db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO sync_events (product_id, source_platform, target_platform,
+                old_quantity, new_quantity, event_type, sync_cycle_id, created_at)
+             VALUES ('p1', 'sync_engine', 'ebay', 4, 3, 'quantity_change', 'old-cycle',
+                     datetime('now', '-100 days'))",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_events (product_id, source_platform, target_platform,
+                old_quantity, new_quantity, event_type, sync_cycle_id, created_at)
+             VALUES ('p1', 'sync_engine', 'ebay', 3, 3, 'quantity_change', 'recent-cycle',
+                     datetime('now'))",
+            (),
+        )
+        .await
+        .unwrap();
+        // Three history rows on one day 40 days ago, plus one from today.
+        for (quantity, recorded_at) in [
+            (9, "datetime('now', '-40 days')"),
+            (8, "datetime('now', '-40 days', '+1 hour')"),
+            (7, "datetime('now', '-40 days', '+2 hours')"),
+            (4, "datetime('now')"),
+        ] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO inventory_history (product_id, quantity, sync_cycle_id, recorded_at)
+                     VALUES ('p1', {quantity}, 'cyc', {recorded_at})"
+                ),
+                (),
+            )
+            .await
+            .unwrap();
+        }
+        drop(conn);
+
+        harness.engine.run_housekeeping().await.unwrap();
+
+        let events = harness.db.list_recent_sync_events(10).await.unwrap();
+        assert_eq!(events.len(), 1, "only the recent sync event survives");
+        assert_eq!(events[0].sync_cycle_id, "recent-cycle");
+
+        let history = harness.db.get_inventory_history("p1", None).await.unwrap();
         assert_eq!(
             history.len(),
-            1,
-            "history is recorded even on a no-change cycle"
+            2,
+            "old day downsampled to one row, today's row kept: {history:?}"
         );
-        assert_eq!(history[0].quantity, 4);
+        assert_eq!(
+            history[0].quantity, 9,
+            "the day's first row is the survivor"
+        );
+        assert_eq!(history[1].quantity, 4);
     }
 
     #[tokio::test]
