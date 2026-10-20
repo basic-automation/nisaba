@@ -182,6 +182,7 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
                     category: p.category,
                     icon: p.icon,
                     include_vendor_stock: p.include_vendor_stock,
+                    allowed_hosts_json: p.allowed_hosts_json,
                     updated_at: p.updated_at,
                 }
             })
@@ -594,13 +595,49 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             Err(_) => false, // table may not exist
         };
         if should_update {
+            use nisaba_core::plugins::{plugin_code_fingerprint, reconcile_plugin_approval};
             use nisaba_core::types::VendorPluginRow;
+            let remote_files_json = remote_plugin.resolved_files_json();
+            // A peer's approval never transfers: the plugin runs on this machine only
+            // under this machine's own review. If we have never seen this plugin, a
+            // peer-claimed "approved" arrives as pending for local review; if we have,
+            // a code or allowlist change since our last review resets it to pending.
+            let (status, approved_by, code_hash) = match &local_plugin {
+                Ok(Some(local)) => reconcile_plugin_approval(
+                    local,
+                    &remote_files_json,
+                    &remote_plugin.allowed_hosts_json,
+                ),
+                _ => {
+                    let fp = plugin_code_fingerprint(
+                        &remote_files_json,
+                        &remote_plugin.allowed_hosts_json,
+                    );
+                    if remote_plugin.status == "approved" {
+                        ("pending".to_string(), None, fp)
+                    } else {
+                        (
+                            remote_plugin.status.clone(),
+                            remote_plugin.approved_by.clone(),
+                            fp,
+                        )
+                    }
+                }
+            };
+            if status == "pending"
+                && matches!(&local_plugin, Ok(Some(local)) if local.status != "pending")
+            {
+                debug!(
+                    plugin_id = %remote_plugin.id,
+                    "Plugin code or allowlist changed in P2P merge; reset to pending for re-approval"
+                );
+            }
             let row = VendorPluginRow {
                 id: remote_plugin.id.clone(),
                 plugin_file: remote_plugin.plugin_file.clone(),
                 display_name: remote_plugin.display_name.clone(),
                 description: remote_plugin.description.clone(),
-                files_json: remote_plugin.resolved_files_json(),
+                files_json: remote_files_json,
                 version: remote_plugin.version.clone(),
                 config_fields: remote_plugin.config_fields.clone(),
                 // Secrets never sync between machines: strip any `secret: true`
@@ -609,30 +646,35 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     remote_plugin.config_fields.as_deref(),
                     remote_plugin.config_json.as_deref(),
                 ),
-                status: remote_plugin.status.clone(),
+                status,
                 submitted_by: remote_plugin.submitted_by.clone(),
-                approved_by: remote_plugin.approved_by.clone(),
+                approved_by,
                 category: remote_plugin.category.clone(),
                 icon: remote_plugin.icon.clone(),
                 include_vendor_stock: remote_plugin.include_vendor_stock,
                 created_at: remote_plugin.updated_at.clone(), // use updated_at as fallback
                 updated_at: remote_plugin.updated_at.clone(),
-                // Never taken from a peer: the allowlist shown to the user must come from
-                // these files, so it is recomputed locally when the plugin is installed.
-                allowed_hosts_json: None,
+                // The allowlist shown to the user must describe these files. The sender
+                // computes it from the same files; the install path recomputes it from
+                // the files again before anything runs, so a lying peer can only make
+                // the badge wrong, never the enforcement — and a changed list resets
+                // the plugin to pending above.
+                allowed_hosts_json: remote_plugin.allowed_hosts_json.clone(),
+                code_hash,
             };
             // The same upsert `Db::upsert_registry_plugin` runs.
             writes.push((
                 "INSERT INTO vendor_plugin_registry
                     (id, plugin_file, display_name, description, code, files_json, version,
                      config_fields, config_json, status, submitted_by, approved_by,
-                     category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts)
-                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                     category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts, code_hash)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                  ON CONFLICT(id) DO UPDATE SET
                     plugin_file = ?2, display_name = ?3, description = ?4, files_json = ?5,
                     version = ?6, config_fields = ?7, config_json = ?8, status = ?9,
                     submitted_by = ?10, approved_by = ?11, category = ?12, icon = ?13,
-                    include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17"
+                    include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17,
+                    code_hash = ?18"
                     .to_string(),
                 owned_params(params![
                     row.id.clone(),
@@ -652,6 +694,7 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     row.created_at.clone(),
                     row.updated_at.clone(),
                     row.allowed_hosts_json.clone(),
+                    row.code_hash.clone(),
                 ]),
             ));
             summary.vendor_plugins_updated += 1;
