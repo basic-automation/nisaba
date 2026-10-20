@@ -9,6 +9,28 @@ Tick `[x]` only when an item genuinely shipped and was verified.
 
 ---
 
+## Priority queue (code review, 2026-10-19)
+
+The phases below are grouped by area, not by urgency. A four-way code review on 2026-10-19,
+of `master` plus PR #2, found defects that lose data, oversell stock, or leak secrets. They
+go before any new capability. Each line links to the full item in its phase.
+
+1. **Data loss on disk.** Leaving a legacy-migrated company deletes the app's own database,
+   and `Db::open` deletes the WAL after a turso panic, discarding committed transactions
+   (Phase 5 *Today's P2P*, Cross-cutting).
+2. **Untrusted HTML with full IPC access.** CSP is off and `v-html` renders marketplace and
+   plugin HTML, so a supplier's description can read every platform secret (Cross-cutting).
+3. **Stock resolution is wrong.** `resolve_deltas` is dead code. Sales on two platforms in
+   the same cycle are undercounted. Stock edited in Nisaba never reaches the platforms.
+   Variants are ignored. A failed push is never retried (Phase 4 *Stock correctness*).
+4. **Writes that report success without writing,** on eBay, Amazon and XMR Bazaar (Phase 2).
+5. **Updated plugin code runs without re-approval,** and can silently drop its host
+   allowlist (Phase 3).
+6. **P2P company sync does not work end to end today.** The join flow cannot produce a
+   syncing pair, and the platform-sync round-robin is never called (Phase 5). Do not
+   repair the Tor path beyond the data-loss fixes; Sync v2 replaces it.
+7. Fix the failing UI smoke job on PR #2, and make the frontend typecheck real (Phases 7, 0).
+
 ## Phase 0 — Public release readiness
 
 - [x] MIT `LICENSE` at the repo root, matching `Cargo.toml`'s `workspace.package.license`
@@ -38,7 +60,10 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       `get_onion_name()` — and its crypto is pure Rust (no vendored C at all). Blocked
       today: `onyums 0.5.0` needs `arti-client 0.46`, `artiqwest 0.4.1` (the newest) pins
       `0.43`, and cargo cannot resolve both. Both crates are `basic-automation`'s, so the
-      unblock is an `artiqwest` release on arti 0.46.
+      unblock is an `artiqwest` release on arti 0.46. **On hold:** Phase 5 moves company
+      sync to iroh, which removes `onyums` and `artiqwest` outright unless Tor is kept as
+      an opt-in transport — do not spend an `artiqwest` release on this until that is
+      decided.
 - [x] Clear the clippy backlog behind CI's `-D warnings` gate. With fmt and the build green
       it was finally measurable, and there is no backlog: `cargo clippy --workspace
       --all-targets -- -D warnings` exits 0 across all eight member crates including
@@ -67,6 +92,19 @@ Tick `[x]` only when an item genuinely shipped and was verified.
       panicked on the missing `frontendDist` (`frontend/.output/public`, which is
       gitignored). The Rust job now runs `npm ci && npm run generate` before cargo.
 - [ ] Screenshots in the README — the UI is the product and there is currently nothing to look at
+- [ ] README accuracy. It says "Node.js 18+" (`README.md:63`), but Nuxt 3.21 and Vite 7
+      need `^20.19.0 || >=22.12.0`; add an `engines` field to `frontend/package.json` so npm
+      enforces the requirement. It says analytics are "charted in the UI", but there are no
+      charts: `inventory.vue` prints `history.length`. It also omits that `./config.toml` in
+      the working directory overrides the data-dir config (`core/src/config.rs` ~230–235).
+- [ ] `cleanup.ps1` and `parse_har.py` were purged from history but still sit untracked in
+      at least one checkout and are not gitignored, so a `git add -A` re-adds them. Ignore
+      them, or delete the local copies.
+- [ ] **The frontend typecheck has never run.** `ci.yml` runs `npx nuxt typecheck` with
+      `continue-on-error: true`, and `vue-tsc` is not a devDependency. On master
+      (run 36194520101) `npx` fetched an incompatible `vue-tsc`, which crashed with
+      `ERR_PACKAGE_PATH_NOT_EXPORTED './lib/tsc'`. Pin `vue-tsc` as a devDependency, fix the
+      errors, and drop `continue-on-error`. There is also no frontend lint or test step.
 
 ## Phase 1 — Test and verification foundation
 
@@ -95,8 +133,8 @@ layer's Tor transport are still untested.
       each radio group (`stock`, `delivery`, `payment_method`), file inputs as empty
       strings, and the fields of unrelated forms on the page. It now collects only the
       controls a browser would submit, from the form the CSRF token belongs to.
-- [x] `SyncEngine` tests over a fake `PlatformAdapter` (17): quantity deltas both ways
-      (lowest-stock-wins and restock-net-of-sales), the floor at zero, the
+- [x] `SyncEngine` tests over a fake `PlatformAdapter` (17 then, 22 now): quantity deltas
+      both ways (lowest-stock-wins and restock-net-of-sales), the floor at zero, the
       `has_stock_mode_inventory` path with order deduplication, retry/backoff and the
       auth-refresh branch, and partial platform failure. These found a real defect too:
       `update_snapshot_version_tag` is a plain `UPDATE` and was called *before* the snapshot
@@ -143,14 +181,29 @@ layer's Tor transport are still untested.
       on `Db::migrate`: steps whose body is an idempotent `ALTER TABLE` or a data repair are
       written inline in Rust rather than as a `.sql` file (`004`, `008`, `010`, `012`,
       `015`–`016` all are), so `migrations/` was never a complete list. `008` specifically
-      repairs the columns `007` drops when it rebuilds `platform_mappings`.
+      repairs the columns `007` drops when it rebuilds `platform_mappings`. Correction
+      (2026-10-19): `004_company_logo.sql` (comments only), `010_always_variants.sql` and
+      `012_variant_vendor_source.sql` *do* exist but are never `include_str!`'d, and the
+      `010` file differs from the inline `migrate_always_variants`. Delete them as part of
+      the renumbering below, and fix the `Db::migrate` doc comment.
 - [ ] Renumber or rename `migrations/*.sql` so a file's number matches its schema version —
       they have drifted (`014_cached_platform_listings.sql` runs at `version < 17`), and the
       `if version < N` gate being the only authority is a trap for a new contributor
+- [ ] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
+      BEGIN/COMMIT and writes `user_version` only at the end. A crash between `DROP` and
+      `RENAME` in the table rebuilds (steps 7, 15, 16) leaves a database on which every later
+      launch fails. Wrap each step in a transaction that bumps `user_version`. Add an
+      upgrade test from a *populated* database at each older version; today's tests only
+      migrate an empty one.
+- [ ] Multi-cycle sync-engine tests. `a_failed_push_is_recorded_and_does_not_abort_the_cycle`
+      runs one cycle, so it cannot see that the failed push is never retried (Phase 4).
 
 ## Phase 2 — Platform adapter completeness
 
-The capability matrix is the queue. Current state per `capabilities()`:
+The capability matrix is the queue. Current state per `capabilities()`. A ✅ means the
+adapter *implements* the method, **not** that a write was verified against a live account.
+The review on 2026-10-19 found several ✅ write paths that return `Ok` without changing
+anything on the platform (see "Writes that report success without writing" below):
 
 | | eBay | Squarespace | XMR Bazaar | Amazon |
 |---|---|---|---|---|
@@ -165,15 +218,19 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `crates/platform-ebay/src/lib.rs` is a stub that returns an error explaining that the
       Sell Inventory API has no per-photo upload call, and `can_upload_photos = false` is
       therefore *accurate*. The real work is to set photos the way the Inventory API expects
-      — the `imageUrls` array on the inventory item (`client.rs` already threads an
-      `image_urls` field through and sends `[]`) — and then decide whether `upload_photo`
-      becomes a set-photos operation or the trait grows one.
+      — the `imageUrls` array on the inventory item — and then decide whether `upload_photo`
+      becomes a set-photos operation or the trait grows one. Correction (2026-10-19): photos
+      at *create* time already work. `create_listing` sends `photo_urls` as `imageUrls`
+      (`lib.rs` ~625), and the PUT paths keep existing images. What is missing is changing
+      the photos of an existing listing.
 - [ ] If eBay ever needs a true binary upload rather than `imageUrls`, it must go through
       the Media API (`createImageFromFile` / `createImageFromUrl`); the Trading API's
       `UploadSiteHostedPictures` is decommissioned on 2026-09-30. Nisaba uses the Sell
       Inventory API throughout and so is not exposed to that deadline today.
       https://developer.ebay.com/updates/newsletter/q2_2025
-- [ ] Photo upload for Squarespace, XMR Bazaar and Amazon — no implementation at all
+- [ ] Photo upload for Squarespace and Amazon — no implementation at all. XMR Bazaar's
+      `create_listing` already uploads up to 6 photos as multipart parts (`client.rs`
+      ~505–610), so for XMR the gap is changing photos on an existing listing.
 - [ ] Squarespace `set_price` — the only platform that cannot be repriced from Nisaba
 - [ ] Amazon description read/write via the SP-API listings feed
 - [ ] Amazon is `enabled = false` by default in `config.example.toml` and has never been
@@ -203,11 +260,102 @@ The capability matrix is the queue. Current state per `capabilities()`:
       reporting more sold than listed yields a negative quantity in the mapping UI and makes
       that listing the minimum in any comparison. The sync engine floors canonical stock at
       zero, so nothing writes it back today.
-- [ ] Rate-limit handling per platform — eBay and Amazon both throttle and the adapters
-      currently have no backoff distinct from `max_retries`
-- [ ] Token refresh failure path: what the UI shows when `refresh_auth()` fails mid-sync
+- [ ] Rate-limit handling per platform. eBay, Amazon and Squarespace all throttle, and the
+      adapters have no backoff distinct from `max_retries`. Squarespace also rescans the
+      whole catalog for every per-item read, which multiplies its request count.
+- [ ] Token refresh failure path: what the UI shows when `refresh_auth()` fails mid-sync.
+      Also warn *before* expiry. eBay's `refresh_token_expires_in` is parsed but unused
+      (`platform-ebay/src/types.rs:11`), and Amazon LWA client secrets have a rotation
+      deadline; check the current window before building this.
 - [ ] A fifth adapter would prove the trait is actually general — Etsy or Shopify is the
       obvious candidate
+- [ ] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
+      callback accepts a `code` from any page the auth window reaches (~279–283). Add and
+      check `state`.
+- [ ] Four `SyncError` variants are never constructed: `RateLimited`, `EbayRevisionLimit`,
+      `ConflictError` and `PlatformDisabled` (`core/src/error.rs` ~12–34). In particular,
+      nothing counts eBay's per-listing daily revision limit. A sync schedule that pushes
+      often enough will hit it, and the failure looks like any other API error.
+
+### Writes that report success without writing
+
+Found by the 2026-10-19 review, on both `master` and PR #2 (which touches no adapter).
+Line numbers are from that review. This is the highest-risk gap in the project: the sync
+engine treats `Ok` as "the platform now holds this quantity". A silent no-op therefore
+leaves a sold-out listing live on another marketplace, and nothing in the UI says so. Fix
+these before adding new capabilities, and give every write path a test that a rejected
+write surfaces as `Err`.
+
+- [ ] **eBay `set_quantity` swallows per-SKU errors.** `bulk_update_price_quantity`
+      (`platform-ebay/src/client.rs` ~177–195) logs each item error at `warn!` and returns
+      `Ok(())`, and `statusCode` is parsed but never read (`types.rs:81`). Listings created
+      on eBay's website are keyed by ItemID; `set_quantity` sends that ItemID as a SKU, so
+      every push to such a listing no-ops behind an `Ok`. Fails with the "two read paths"
+      item above.
+- [ ] **eBay `set_price` probably never changes the price.** The `offers: [{price}]` entry
+      carries no `offerId` (`client.rs:633`), and the 200/207 body is never parsed. When
+      `availability` is absent, the same path falls back to quantity `0` (`lib.rs:454`), so
+      a price edit can zero stock. Verify against the Inventory API docs and a sandbox.
+- [ ] **eBay read-modify-write erases fields it doesn't model.** `EbayInventoryItem`
+      (`types.rs` ~16–31) carries only title, description, imageUrls, aspects, condition and
+      quantity. `createOrReplaceInventoryItem` is a full replace, so every description edit
+      (`client.rs` ~406, ~756) drops brand, MPN, UPC, `packageWeightAndSize` and
+      `conditionDescriptors`, and on the `set_description` path `conditionDescription`
+      too. It also writes back a quantity read earlier, which may be stale by then. Model
+      the item losslessly by carrying unknown fields through, or switch to a partial
+      update.
+- [ ] **eBay `update_listing` sends a partial body to `updateOffer`**, which is also a full
+      replace (`lib.rs` ~543–568): it drops price and quantity, or is rejected.
+- [ ] **Amazon PATCH bodies are double-wrapped, and failures report `Ok`.**
+      `AmazonPatch::value` is a `Vec<Value>`, and the client pushes `json!([{…}])` into it
+      (`platform-amazon/src/client.rs` ~214, ~299), which serializes as `"value": [[{…}]]`.
+      Even when Amazon marks the submission INVALID, `update_quantity` only warns
+      (~252), `update_price` never reads the body, and `create_listing` discards the
+      submission (`lib.rs` ~360).
+- [ ] **Amazon pagination may read the wrong key.** `types.rs:17` expects a top-level
+      `nextToken`. If `searchListingsItems` nests it under `pagination`, only the first 20
+      SKUs per marketplace are ever read. The hand-built fixture encodes the same
+      assumption, which is the case for real captured fixtures (Phase 1).
+- [ ] **XMR Bazaar writes cannot tell success from failure.** `client.rs` ~174, ~392 and
+      ~766 accept any final 2xx/3xx on a client that follows redirects, so a POST bounced
+      to `/login/` or a re-rendered form with errors counts as success. `set_stock_mode`
+      also returns `Ok` when no stock field is found (~343). Detect a successful save
+      positively: the redirect target, or the saved value read back.
+- [ ] **XMR `create_listing` can record the wrong listing id.** It takes `listings.first()`
+      as the newest listing (~650), and on a 200 body it accepts any `/listing/<id>/` link
+      (~662). A wrong mapping points later stock toggles at an unrelated listing.
+
+### Adapter correctness
+
+- [ ] The in-memory order dedup in the XMR adapter consumes sales: orders are marked seen
+      before the engine processes them (`platform-xmrbazaar/src/lib.rs` ~121), and
+      `run_cycle` calls `detect_sales` in dry-run too (`sync_engine.rs` ~189). A dry run can
+      then make the next real cycle skip a sale, which breaks Phase 4's dry-run guarantee.
+      A cycle that errors mid-batch also loses its sales. The DB dedup table already exists,
+      so remove the in-memory set.
+- [ ] XMR orders always count as one unit (`scraper.rs` ~778, pinned by `sales_page.rs:71`).
+      Confirm whether XMR Bazaar allows multi-unit orders in unlimited-stock mode; if it
+      does, read the quantity.
+- [ ] XMR listing status: `status.contains("active")` also matches `"inactive"`
+      (`scraper.rs:146`), so an inactive listing reads as in stock. `parse_listings` has no
+      test.
+- [ ] XMR error snippets slice `&body[..body.len().min(N)]` (`client.rs` ~183, ~407, ~672,
+      ~776), which panics when byte N splits a UTF-8 character in the remote HTML. Truncate
+      on a char boundary.
+- [ ] XMR `set_price` drops the currency (`lib.rs` ~290), and `set_description` posts raw
+      HTML (~300) while `create_listing` strips tags (`client.rs` ~476). Pick one behaviour.
+- [ ] eBay pagination ignores the `next` href (`types.rs` ~50, ~101). If `getOffers`
+      requires `sku`, as the docs suggest, `fetch_all_offers` (`client.rs` ~314) always
+      fails. That failure is only warned, so Inventory-API listings would have no prices.
+- [ ] Squarespace pagination loops forever if `hasNextPage` is true with a null cursor
+      (`client.rs` ~81, ~135), and only `fetch_inventory` maps a 401 to `AuthError` (~57).
+- [ ] Squarespace `update_listing` silently drops `request.price` (`lib.rs` ~324–336).
+      Return an error, as the capability matrix already says it cannot set a price.
+- [ ] Hard-coded regions: eBay always uses `EBAY_US` (`lib.rs` ~653) and `EbayConfig` has
+      no marketplace field; Amazon's consent URL is North America only (`auth.rs:9`)
+      despite the configured `region`.
+- [ ] Dead code: the XMR `stock_mode_field` cache is never written (`lib.rs` ~33, ~91), and
+      `client.update_quantity` (~100–190) is unused.
 
 ## Phase 3 — Vendor plugin platform
 
@@ -267,7 +415,26 @@ The capability matrix is the queue. Current state per `capabilities()`:
       top-level code gets no network at all (it runs at install time). A plugin that
       declares nothing stays unrestricted so existing installs keep working. The Rothco
       plugin now declares `www.rothco.com`. `tests/network.rs` (11).
-- [x] Surface each plugin's network access at install time. The marketplace cards show
+- [ ] **Updated plugin code runs without re-approval.** Re-importing or re-submitting a
+      plugin with the same `metadata.name` keeps the old `status`, `approved_by` and
+      `config_json`, API secrets included (`commands/vendors.rs` ~576–586, ~694–704). The
+      import then starts `run_vendor_sync_single`, which never checks status (~1485), even
+      for a plugin that is not installed or approved. A P2P merge overwrites `files_json`
+      and `status` the same way (`p2p/src/sync.rs` ~521, ~525), and the next auto-sync runs
+      the new code. A new version that drops `allowed_hosts` therefore becomes
+      Unrestricted without anyone seeing the badge. A changed code hash or allowlist must
+      reset the plugin to pending and show the diff, and the run paths must check status.
+- [ ] Host-side fetches bypass the plugin allowlist. `cache_images` (`commands/images.rs`
+      ~190–265) fetches any URL the webview hands it, including plugin `image_url` values
+      and variants received from peers, with no host filter and no size cap
+      (`resp.bytes()`), and writes the result to disk. Separately, `FetchPolicy`
+      (`vendor-runtime/src/ops.rs` ~29–52) checks host *names* only, so a plugin whose
+      allowed host resolves to loopback or a LAN address reaches it. Refuse private,
+      loopback and link-local addresses after DNS resolution.
+- [ ] `AUTO_VENDOR_SYNC_RUNNING` (`vendors.rs` ~1482) is a process-wide flag, so one
+      company's vendor sync skips every other company's, logged only at `debug`.
+- [x] Surface each plugin's network access at install time (first install only — in-place
+      updates skip it; see the re-approval item above). The marketplace cards show
       the declared hosts, "No network access", or an amber "Unrestricted" warning when a
       plugin declares none (`PluginNetworkAccess.vue`). The value is a cache on the registry
       row (migration 18, `vendor_plugin_registry.allowed_hosts`) computed from the plugin's
@@ -286,11 +453,65 @@ The capability matrix is the queue. Current state per `capabilities()`:
 
 ## Phase 4 — Sync engine depth
 
-- [x] Quantity deltas and conflict resolution (`resolve_deltas`)
+- [ ] ~~Quantity deltas and conflict resolution (`resolve_deltas`)~~ — was ticked, but
+      **`resolve_deltas` has no callers**. `conflict.rs` and its 6 tests are dead code; the
+      engine resolves stock its own way (see *Stock correctness* below).
 - [x] Cache-first listing loads and live/cached merge
-- [x] Per-sync-cycle vendor data refresh
-- [ ] `conflict.rs` exposes one strategy; make the resolution policy explicit and
-      user-selectable (last-writer-wins vs. platform-authoritative vs. manual review)
+- [x] Per-sync-cycle vendor data refresh. It updates `products.quantity`, which does not
+      reach the platforms today (see *Stock correctness*).
+- [ ] `conflict.rs` exposes one strategy, which the engine does not use. Fold this into the
+      stock ledger below, rather than making a dead strategy user-selectable.
+
+### Stock correctness
+
+Found by the 2026-10-19 review and still present on PR #2. The engine derives new stock
+**only from platform readings** (`sync_engine.rs` ~334–351). It takes the minimum across
+platforms, or the maximum plus total decreases when any platform went up. `product.quantity`
+is used only when no platform reports.
+
+- [ ] **Sales on two platforms in one cycle are undercounted.** eBay 10 → 8 and Squarespace
+      10 → 9 resolve to the minimum, 8; true stock is 7. Summing the deltas is what
+      `resolve_deltas` does, and it is not called.
+- [ ] **Stock changed in Nisaba never reaches the platforms.** A restock typed into the app,
+      or vendor stock added by `recalc_product_quantity`, is overwritten by the platform
+      minimum on the next cycle; the startup comment at ~707 acknowledges this. Nothing
+      else calls `set_quantity`.
+- [ ] **A failed push is never retried, and a newly mapped listing is never corrected.** The
+      push step is skipped when resolved stock equals stored stock (~354). After a failed
+      push to Squarespace, its snapshot already holds what it reported, so the next cycle
+      sees no change. A new mapping showing 10 against a canonical 3 keeps showing 10. Push
+      whenever a platform's *reading* differs from canonical, not when canonical changed.
+- [ ] **Variants are ignored.** Mappings carry `variant_id`, but the engine pushes the
+      product's total to every mapping (~432, ~545) and takes the minimum across different
+      variants' listings, so each variant listing advertises the whole product's stock.
+- [ ] **Re-mapping an unmapped listing fails.** `delete_mapping` soft-deletes (`db.rs`
+      ~1142), but the unique indexes `idx_mappings_product_platform_variant` and
+      `idx_mappings_platform_item` include deleted rows, so `insert_mapping` hits UNIQUE.
+      `create_listing_on_platform` creates the live listing *before* inserting the mapping
+      (`commands/listings.rs` ~351–366), so this leaves an unmapped live listing. Use
+      partial indexes (`WHERE deleted_at IS NULL`), and create the mapping in the same
+      transaction as the record of the listing.
+- [ ] **An XMR order is marked processed before its sale is applied** (`sync_engine.rs`
+      ~245). Any `?` exit in between, or an untracked product (~272), loses the sale for
+      good. Mark it in the same transaction as the stock write.
+- [ ] **Re-base the engine on a stock ledger.** Record every change as a uniquely keyed
+      event: a sale by platform + order id, a restock, a manual adjustment, a vendor
+      update. Canonical stock is the sum, and a push is the difference between canonical
+      and each platform's reading, per variant. This fixes every item above. It is also the
+      exact data model Sync v2 replicates (Phase 5, Step 2), so build it here first, on one
+      machine, and replicate it later.
+- [ ] Pruning is never wired. `prune_old_sync_events` and `downsample_old_history` have no
+      callers. `record_inventory_history` writes a row per tracked product every cycle even
+      when nothing changed (~354–363), which is 288 rows per product per day at the default
+      5-minute schedule. Also, `execute_write` (`db.rs` ~134) returns the row count of
+      `COMMIT` rather than of the statement, and commits even when the statement failed.
+- [ ] The vendor sync blocks the platform sync loop: the engine awaits the vendor run inline
+      (`sync_engine.rs` ~736, ~750). Plugin limits now go up to 12 h, and Pause and Sync Now
+      wait for the whole run. Run it as its own task.
+- [ ] `run_cycle` holds the adapters' read lock for the whole cycle, network retries
+      included (~135–629), so saving config waits for the cycle to finish. Several
+      commands (`listings.rs` ~66–76, `photos.rs`) hold it across fetches too. Clone the
+      adapter handles out, then release the lock.
 - [x] A dry-run mode that reports what a sync *would* change without writing to any platform
       — `SyncEngine::dry_run()`. It suppresses local writes too (snapshots, canonical
       quantity, history, sync events, the XMR order-dedup table and the vendor-sync
@@ -310,12 +531,23 @@ The capability matrix is the queue. Current state per `capabilities()`:
       and make `one_platform_down_does_not_abort_the_cycle` assert the chosen one.
 - [ ] Surface a per-cycle reconciliation report in the UI, not just `SyncEvent` rows
 - [ ] Oversell protection: a configurable reserve buffer so concurrent sales across platforms
-      cannot drive true stock negative
-- [ ] Backfill `InventoryHistoryEntry` analytics into charts beyond the current time windows
+      cannot drive true stock negative. Moved to Phase 5, Sync v2 Step 3 (escrow), where a
+      reserve is a share of stock rights held back from every peer.
+- [ ] Chart `InventoryHistoryEntry` analytics. There are no charts today (`chart.js` and
+      `vue-chartjs` are installed but never imported); `inventory.vue` shows a count.
+- [ ] **The sync schedule accepts anything and can kill the engine.** `config.vue` offers
+      free-form cron. `parse_interval` (`tauri-app/src/main.rs` ~492) understands only a
+      minute field of `*/N` and silently uses 300 s for anything else. `*/0` yields a 0 s
+      period, and `tokio::time::interval` panics on zero, which ends the sync engine task.
+      `Reload` never re-reads the interval (`sync_engine.rs` ~764), so a schedule change
+      needs a restart. Replace the field with an interval picker, validate on save, reject
+      zero, and apply changes on reload.
 
 ## Phase 5 — P2P and multi-company
 
-- [x] Tor onion service, peer client/server, encrypted company sync payloads
+- [x] Tor onion service, peer client/server and company sync payloads. (An earlier wording
+      here said "encrypted" payloads: they carry no application-layer encryption, only
+      Tor's transport encryption — see the sealing item below.)
 - [x] Multi-company data model and company logos
 - [x] **Peers never converged, and could overwrite each other's edits.** Merges are
       last-writer-wins on `updated_at`, but the merge wrote variants with `insert_variant`/
@@ -343,7 +575,9 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [ ] The sync payload carries platform auth tokens and plugin configuration protected only
       by Tor's transport encryption. Decide whether that is enough, or whether sensitive
       sections should be sealed with a key derived from the company secret as the at-rest
-      company config already is.
+      company config already is. The iroh move below changes the question: QUIC to an
+      endpoint id proven in the handshake is a stronger channel than "anyone who holds the
+      secret", so revisit this after the transport lands rather than before.
 - [ ] **`[company].enabled` is never read.** `CompanyConfig::enabled` is parsed, but
       `init_company_context` starts the Tor onion service and periodic P2P sync for every
       company unconditionally, so `enabled = false` (the default in
@@ -361,6 +595,8 @@ The capability matrix is the queue. Current state per `capabilities()`:
       address to the sender's (`update_peer_onion_address`). `/api/address-update` repoints
       any peer with no check that the caller is that peer. Needs a per-peer credential:
       Tor onion-service client authorization, or requests signed with a per-peer key.
+      **Resolved by the iroh transport below** — each peer's Ed25519 endpoint id is proven
+      in the QUIC handshake, so authorization keys off the connection, not the body.
 - [ ] Enforce roles on the caller. `check_admin` checks the receiving node's own role, so on
       an admin's node every secret holder can add, approve and remove peers and change
       roles. Depends on the item above — a caller's role means nothing until the caller is
@@ -373,19 +609,275 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `MergeSummary::rejected_timestamps`.
 - [ ] Consider a hybrid/logical clock for merges instead of wall time: even bounded,
       last-writer-wins on wall clocks lets a peer with a fast clock win ties it should lose.
+      Planned as part of Sync v2, Step 2 (per-field registers on a hybrid logical clock).
 - [x] Compare the company secret in constant time in `auth_middleware` (was `==`).
 - [x] Auth tokens ping-ponged like variants did: `upsert_auth_token` stamped `now` on
       receipt, so a received token flowed straight back re-stamped, and a stale copy could
       overwrite a token the other peer had just refreshed — an auth failure on the next
       sync. Merges now use `upsert_auth_token_from_peer`, which keeps the edit's timestamp.
 - [ ] Key rotation for the company secret, with a migration path for existing peers.
-      `/api/rotate-secret` exists but is a stub that only acknowledges the request.
+      `/api/rotate-secret` exists but is a stub that only acknowledges the request. Under
+      iroh this becomes per-peer revocation (drop an endpoint id from the allow list), and
+      the shared secret only seals company config at rest — see below.
 - [x] Conflict resolution for P2P merges was `merge_remote_payload`'s implicit policy. It is
       now written down per section in the README and pinned by `tests/round_trip.rs`
       (newer-wins both ways, tombstones, idempotence, two-way convergence) — which is how
       the convergence bug above was found.
 - [ ] Offline/rejoin behaviour after a peer has been away for longer than the retention window
-- [ ] Bounded payload sizes — a full sync payload currently grows with the whole catalog
+- [ ] Bounded payload sizes — a full sync payload currently grows with the whole catalog.
+      Answered by Sync v2's op log and compaction (Step 4 below), which also covers the
+      offline/rejoin item above.
+
+### Today's P2P (Tor) — what the 2026-10-19 review found
+
+On the PR #2 branch, P2P company sync is **not functional end to end**: the join flow
+cannot produce a syncing pair, and platform-sync coordination is never invoked. Sync v2
+replaces this transport. Fix the data-loss and secret-loss items now, have the README say
+P2P is experimental, and do not repair the Tor join path.
+
+- [ ] **Leaving a legacy-migrated company deletes the app database.** At startup the legacy
+      company is registered with `config.database.path` (`main.rs` ~150–151), which is the
+      app registry database. Leaving the company then runs `remove_file` on that path
+      (`commands/company.rs` ~327–330).
+- [ ] **The legacy company secret can be lost.** Startup replaces the stored secret with
+      its hash even when saving it to the keyring failed (`main.rs` ~143–148).
+- [ ] **Join cannot produce a syncing pair.** `join_company` appends `.onion` to a name that
+      onyums already suffixes (`company.rs` ~247), so the admin stores `x.onion.onion`. The
+      member stores the admin only in `company_peers_v2`, under a random peer id, while
+      `sync_all_peers` reads the legacy `company_peers` table (`p2p/src/lib.rs` ~126). The
+      member therefore never starts a sync, and `handle_sync`'s lookups miss for the admin.
+- [ ] **Platform-sync round-robin is dead code.** `is_our_turn_to_sync` and
+      `record_platform_sync_and_push` have no callers. Every peer pushes to the marketplaces
+      on its own timer, with credentials shared over P2P, and XMR order dedup converges only
+      at the P2P interval, so a sale can be processed twice. Sync v2 needs a single writer
+      per platform regardless (Step 2).
+- [ ] **One onion identity for all companies, tied to the launch directory.** Every company
+      calls `onyums::serve(router, "nisaba")`. onyums keeps one global `ONION_NAME` and
+      state under `./tor/onyums/state` (artiqwest under `./tor/arti`), so a second company
+      saves the first company's address as its own. A packaged build launched from `/` or
+      Program Files may be unable to write the state, and a different launch directory
+      means a new address.
+- [ ] Hard 2 MiB request limit and no client timeout. `handle_sync` takes
+      `Json<SyncRequest>` under axum's default 2 MiB body limit, so once a catalog's
+      payload outgrows it, every sync fails with 413. artiqwest sets no timeout, so one
+      hung peer stalls the sequential peer loop.
+- [ ] The merge is not transactional. Each row is applied with `?`, so the first error
+      leaves earlier sections applied and skips the rest (config, tokens, plugins,
+      variants). A mapping UPDATE that collides with `idx_mappings_platform_item` then
+      fails the same way every cycle.
+- [ ] No onion-service lifecycle. `start_onion_service` returns before Tor has
+      bootstrapped, with no retry. `Stop` ends only the sync loop, so a company that was
+      left keeps serving its database. Companies created or joined at runtime drop sync
+      and P2P events and get no vendor-sync hook until restart.
+- [ ] Product and variant deletes are hard deletes (`db.rs` ~769–797, ~892–912), so a merge
+      re-inserts them from any peer that still has them. They also orphan rows in
+      `listing_descriptions`, `listing_photos`, `pricing_snapshots` and `cached_listings`.
+      Sync v2's observed-remove sets cover the P2P half; the orphans need fixing now.
+- [ ] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
+      not exist and have no admin check, unlike `get_company_secret` (`company.rs` ~438+).
+- [ ] README still says "AES-GCM encrypted payloads" (`README.md:27`); payloads have no
+      application-layer encryption.
+
+### Sync v2: CRDT replication over iroh
+
+Owner direction 2026-10-19: replace today's sync with a CRDT replication layer carried over
+[iroh](https://github.com/n0-computer/iroh). Today's sync sends the full payload every time,
+merges whole rows by last-writer-wins on wall-clock `updated_at`, and travels over a Tor
+onion service.
+
+**Why the current model has to go, from the code.** `merge_remote_payload` (`sync.rs`)
+replaces a whole product or variant row whenever the remote `updated_at` is newer.
+Two edits made concurrently on different peers therefore lose one of them, even when they
+touch different fields: a rename on one peer and a threshold change on another, or two
+on-hand stock changes to the same variant (each peer moves 10 → 9; the merged result is 9,
+not 8). The other open items above follow from the same design: wall-clock ties, payloads
+that grow with the catalog, and rejoin after a long absence.
+
+**What iroh brings.** iroh 1.0 shipped 2026-06-15 (1.3.0 on 2026-09-28). Each install gets
+an Ed25519 *endpoint id*, and QUIC connections are authenticated against that key. iroh
+connects directly through NAT and falls back to a relay when it cannot. Two endpoints can
+also run on loopback with relays off, which makes the transport testable in CI. Today's
+transport is `onyums` (an axum router served as an onion service) plus `artiqwest` (HTTP
+over Tor), and only `crates/p2p/src/{lib,server,client}.rs` use them.
+
+**What the move retires:** the self-asserted `sender_peer_id`/`sender_onion` (above),
+`/api/address-update` and `update_peer_onion_address` (endpoint ids are stable), the 120 s
+onion-publication poll, the on-hold `onyums 0.5` item (Phase 0), and the arti dependency
+tree that carries the `proc-macro-error2` warning (Cross-cutting).
+
+#### Step 0: decisions before code
+
+- [ ] **Privacy model.** Tor hides each peer's IP address from the other peers and from
+      network observers; iroh does not. Direct connections show IPs to peers. Relays and
+      discovery see endpoint ids, IPs and connection timing, though not content, which is
+      end-to-end encrypted. If you keep the defaults, those relays and discovery are n0's
+      public infrastructure. For a tool whose users sell on XMR Bazaar, that is a real
+      downgrade. Options:
+      (a) iroh only, with a self-hosted `iroh-relay` and peers found through invite tickets
+      instead of public discovery;
+      (b) iroh by default, with Tor kept as a per-company opt-in transport (keeps
+      `onyums`/`artiqwest` and their maintenance);
+      (c) iroh on n0's public relays.
+      Record the choice in the README's P2P section and in `SECURITY.md`.
+- [ ] **CRDT design doc** (`docs/sync-v2.md`) covering every synced section of
+      `SyncPayload`: which CRDT each field uses, how stock works, and what stays outside
+      the CRDT (below). Code starts after it is agreed.
+- [ ] **Engine spike.** Build one product with variants, mappings and stock events in each
+      candidate. Judge them on: delta export since a version vector; compaction (garbage
+      collection of history); schema evolution; queryability from the Tauri commands, which
+      all read SQLite today; and memory at catalog scale.
+      - Hand-rolled per-table CRDTs over the existing turso/SQLite schema, the way cr-sqlite
+        does it: per-column clocks, an op log and version vectors. SQLite stays the source
+        of truth and the change is confined to write paths. cr-sqlite itself is a C
+        loadable extension for SQLite and will not load into turso.
+      - [Loro](https://loro.dev) 1.16: Rust-native; Map, List, MovableList, Tree and Counter
+        containers; version vectors; export of updates since a version; shallow snapshots
+        for garbage collection. It makes the CRDT document the source of truth, with SQLite
+        as a projection of it — an inversion of today's architecture.
+      - Automerge 0.12: Rust core, JSON document model, a mature sync protocol, and the same
+        inversion as Loro.
+      Lean: per-table over SQLite, unless the spike shows a document engine's projection
+      is cheap enough to justify the inversion.
+
+#### Step 1: transport — today's protocol over iroh
+
+Do this first. It gives per-peer authentication on its own, independent of the CRDT design.
+
+- [ ] Persist each install's iroh secret key in the OS keyring, next to the company secret.
+      Losing it means a new identity, so export/import and moving to a new machine must
+      carry it, or document that the peer re-joins.
+- [ ] Use a `nisaba/sync/1` ALPN with an `iroh::protocol::Router` handler in place of the
+      axum router: one bidirectional stream per request, with length-prefixed JSON for
+      `SyncRequest`, join, ping, company info and peer administration. Leave `sync.rs`
+      untouched so `tests/round_trip.rs` keeps pinning the merge while only the wire changes.
+- [ ] Authorize by the connection's remote endpoint id. Add an `endpoint_id` column to the
+      peers table (a migration) and drop `sender_peer_id`/`sender_onion` from the request
+      types.
+- [ ] Join by ticket. The admin issues an invite with its endpoint address and a one-time
+      join token, shared by copy-paste or QR; approval binds the joiner's endpoint id. The
+      company secret then never crosses the wire and stops being a bearer credential.
+- [ ] Enforce roles on the caller's endpoint id. This replaces `check_admin`'s check of the
+      node's own role.
+- [ ] Revocation instead of rotation. Removing a peer drops its endpoint id and takes effect
+      on its next connection; retire the `/api/rotate-secret` stub.
+- [ ] Elect the designated peer (`is_our_turn_to_sync`) on endpoint ids instead of onion
+      addresses.
+- [ ] Resolve `[company].enabled` (above) as "keep this install off P2P" rather than "off
+      Tor".
+- [ ] Transport tests on loopback endpoints with relays off: join by ticket, sync both
+      ways, and refuse an unknown endpoint id, a revoked peer, and a non-admin caller on
+      admin routes. These replace "the Tor transport is untested" in Phase 1.
+
+#### Step 2: the CRDT data layer
+
+- [ ] Scalar fields — name, SKU, threshold, image, sort order, attributes, company config,
+      logo — become **per-field last-writer-wins registers** stamped with a **hybrid
+      logical clock** plus the endpoint id as tie-breaker. This replaces whole-row,
+      wall-clock comparison and closes the hybrid-clock item above. Keep a bound on how far
+      ahead a peer's physical clock may be, as `plausible_timestamp` does today.
+- [ ] Collections — a product's variants, platform mappings, vendor plugins and the peer
+      list — become **add-wins observed-remove sets** keyed by stable UUIDs. A delete that
+      races an edit then resolves the same way on every peer, and tombstones can be
+      compacted once every peer has seen them.
+- [ ] **Stock is not a register.** Model it as a grow-only set of uniquely identified stock
+      events, with quantity = the sum of the events:
+      - a sale, keyed by platform + order id, so two peers that detect the same sale count
+        it once (this generalizes today's `xmr_processed_orders` dedup table);
+      - a restock;
+      - a manual adjustment, keyed by UUID.
+      A manual "set on-hand to N" is recorded as an adjustment computed against the
+      writer's current view. Two concurrent sets therefore both apply, so surface the pair
+      for review instead of summing them silently.
+      This is the same ledger Phase 4 builds on a single machine (*Stock correctness*);
+      Sync v2 replicates it rather than inventing a second model.
+- [ ] **Marketplace writes stay outside the CRDT.** Replicas converge on local state, not
+      on what eBay or Squarespace hold. Pushes stay with the designated peer and must be
+      idempotent. `platform_snapshots` and the version tags become per-peer local state.
+      If peers need to see them, replicate them as observations, never as commands.
+- [ ] **Secrets stay out of the replicated log in plaintext.** That covers auth tokens,
+      plugin `secret: true` fields and the iroh key. Seal them with a company key, or
+      distribute them out of band. This closes the sealing item above and the
+      plugin-secrets item in Phase 3.
+- [ ] Sign every op with its author's endpoint key, and validate it before applying: the
+      signature, the author's role at that point, the schema, and value bounds. Because ops
+      are attributed, revoking a compromised peer can also undo its ops since a chosen
+      point.
+
+#### Step 3: oversell protection — escrow over the stock CRDT
+
+Convergence and correctness are different guarantees. The stock CRDT ensures every peer
+ends up agreeing on the same quantity. It cannot keep that quantity at or above zero:
+two peers that each sell the last unit while partitioned will both apply the sale, and
+the merged stock is −1. Holding a numeric invariant without coordinating every write is
+what **escrow**, or a **bounded counter**, does (the Bounded Counter CRDT, Balegas et al.,
+SRDS 2015). Each peer holds a share of the stock as *rights*. A peer spends only its own
+rights, so no interleaving of sales can drive the total below zero, and coordination is
+needed only when a peer's rights run out. Today's sync engine never goes negative only
+because platform sync runs on a single designated peer. Escrow keeps that guarantee once
+any peer can record a sale.
+
+- [ ] Rights state per variant: a matrix of `rights[from][to]` transfers plus each peer's
+      spent count. Both only ever grow, so the matrix is itself a CRDT. A peer's available
+      rights are what it was given, minus what it gave away, minus what it spent. Stock
+      remains the sum of stock events (Step 2); rights only limit who may *decrement* it.
+- [ ] Gate every decrement on available rights: a detected sale, a manual reduction, a
+      reservation. A restock adds rights to the peer that records it. A sale detected on a
+      marketplace has already happened, so it is recorded regardless. If it overdraws the
+      detecting peer's rights, it is an **oversell incident**: logged, surfaced in the UI,
+      and triggering the zero-stock push to the other platforms immediately rather than
+      at the next cycle.
+- [ ] Allocation policy for each peer's share. The starting point is to give the
+      designated peer, which runs platform sync and so sees every marketplace sale, all
+      the rights, and other peers request what they need for manual edits. A later step
+      can give each platform's poller a share proportional to that platform's recent sales
+      velocity.
+- [ ] Rights transfer: a peer short of rights asks peers with spare rights over the iroh
+      connection. A transfer is just another op, so it replicates and stays idempotent.
+      Define what the UI shows while a request is outstanding, and the timeout after
+      which an edit is refused as "not enough stock rights on this machine, others
+      offline".
+- [ ] Rebalancing: periodically move rights toward the peers that use them, and pull
+      rights back from a peer that has been offline longer than a threshold. Rights held
+      by an offline peer are stock that nobody else can sell.
+- [ ] Revocation and lost keys: when a peer is revoked or its iroh key is lost, its unspent
+      rights must return to the pool. Only an admin can reclaim them, recorded as a signed
+      op. Without this, revoking a peer quietly shrinks sellable stock.
+- [ ] Fold Phase 4's "oversell protection: a configurable reserve buffer" into this: a
+      reserve is a share of rights held back from every peer and released by an admin.
+- [ ] Tests: property tests in which concurrent decrements across N partitioned peers never
+      take stock below zero under any delivery order; rights stay conserved, meaning the
+      sum of available rights plus the sum of spent equals the sum of stock events; and an
+      overdraw from a marketplace sale is reported as an incident and never absorbed
+      silently.
+
+#### Step 4: replication protocol
+
+- [ ] A per-author op log with sequence numbers. A sync exchanges version vectors and sends
+      only the ops the other side lacks, so payloads are bounded by the difference instead
+      of the catalog. For state-based reconciliation, range-based set reconciliation
+      (`negentropy` 0.5, the approach `iroh-docs` uses) is the reference design.
+- [ ] Compaction. Ops older than the causal-stability frontier, meaning seen by every
+      active peer, fold into a snapshot. A peer away longer than retention receives the
+      snapshot plus newer ops. This closes the offline/rejoin and bounded-payload items
+      above.
+- [ ] Push on change: `iroh-gossip` announces new ops to online peers, who then pull, and a
+      periodic anti-entropy sync covers missed announcements.
+- [ ] Schema evolution: version the op format, have peers advertise the versions they
+      support, and make an unknown field round-trip instead of dropping it.
+
+#### Step 5: verification and migration
+
+- [ ] Property-based convergence tests with `proptest`: N replicas, random ops, and random
+      delivery order, duplication, loss and redelivery. Every replica must end in the same
+      state, stock must equal the sum of its events, and no delete may resurface. Add a
+      deterministic simulation of partitions and rejoins. Port the scenarios in
+      `tests/round_trip.rs`.
+- [ ] Migration. One peer turns the existing database into a genesis snapshot under
+      protocol v2; the other peers re-join from it by ticket. Once no supported release
+      speaks v1, remove the full-payload last-writer-wins path (`load_full_sync_payload`
+      and `merge_remote_payload`). Unless option (b) was chosen, also remove `onyums`,
+      `artiqwest` and the Tor startup path, re-run `cargo report
+      future-incompatibilities`, and close the `proc-macro-error2` item.
 
 ## Phase 6 — Release and distribution
 
@@ -403,7 +895,25 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `Plugin::extend_api` → `Plugin::run_invoke_handler`) and removes
       `Invoke::state`/`state_ref`. Nisaba stays on Tauri 2 until 3 is stable; this is the
       migration checklist's first entry. https://github.com/tauri-apps/tauri/releases
-- [ ] `.updater/latest.json` published from a real release workflow
+- [ ] `.updater/latest.json` published from a real release workflow. The Tauri CLI does not
+      write `latest.json`, so the workflow must assemble it from the `.sig` files.
+      Alternatively, point the endpoint at a release asset instead of a file on `master`.
+      Today the endpoint (`tauri.conf.json` ~47–49) is a raw file on `master`, so any commit
+      to that file is an update push.
+- [ ] Correction to the item above about pinning `createUpdaterArtifacts`: the key is not in
+      `tauri.conf.json` at all, so nothing produces `.sig` or `.app.tar.gz` files, and the
+      globs in `release.yml` for them can never match. Add the key (v2 format) together
+      with the signing key.
+- [ ] The updater checks a GitHub raw URL at launch and every 6 hours (`useUpdater.ts`
+      ~61–65), outside Tor and with no opt-out. Add a setting, and record the choice in the
+      Sync v2 privacy decision.
+- [ ] CI runners: every run carries Node 20 deprecation annotations for the actions, and
+      `ubuntu-latest` moves to Ubuntu 26 from 2026-10-19. Bump the action versions, and
+      check that the apt list (`libappindicator3-dev`, the WebKitGTK packages) still
+      resolves on the new image, or pin `ubuntu-24.04`.
+- [ ] CI has no macOS leg, although every release ships a universal macOS bundle, and
+      `release.yml` runs no tests before publishing. Add `macos-latest` to `ci.yml`, or a
+      test job that `publish` depends on.
 - [x] A `release.yml` that builds **Linux, Windows and macOS** bundles and attaches them to
       the tag's GitHub release — one matrix, `fail-fast: false`, Linux on `ubuntu-22.04` so
       bundles link against an older glibc, macOS as a `universal-apple-darwin` binary
@@ -437,17 +947,62 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [ ] Decide whether `crates/service` (headless sync daemon) and `crates/tui` ship as real
       products; they are tracked in git but excluded from `[workspace] members`, so they are
       not built, not tested and not covered by CI. Either restore them to the workspace and
-      fix whatever broke, or delete them.
+      fix whatever broke, or delete them. Restoring them is close to a rewrite. Neither has
+      changed since `1f3cdc7`. Both read platform credentials from `config.toml` and use the
+      app database, where the app now uses per-company encrypted config, and neither
+      supports Amazon, plugins or P2P. Phase 4's "dry run in the headless daemon" depends
+      on this decision.
 - [ ] Version consistency — `Cargo.toml`, `tauri.conf.json` and any updater manifest must be
       bumped together; add a check that fails CI when they disagree
 
 ## Phase 7 — Frontend and UX
 
-- [x] Nuxt 3 SPA with Tailwind + shadcn-vue, products/listings/vendors/inventory/companies
+- [x] Nuxt 3 SPA with Tailwind and shadcn-vue-style components (`components/ui/`, on
+      `radix-vue`), covering products, listings, vendors, inventory and companies. The
+      `shadcn-nuxt` module is a dependency but is not registered in `nuxt.config.ts`.
 - [x] Multi-tier pricing display, dealer price, UPC and weight on vendor cards
-- [ ] Empty and error states — the pages assume data exists
+- [ ] Empty and error states — the pages assume data exists. Named cases:
+      - Creating a product (`products/index.vue` ~254–264) has no validation and no
+        `catch`; a duplicate SKU hits the unique index and the user sees nothing.
+      - The dashboard's `Promise.all` (`pages/index.vue` ~14–22) has no `catch`.
+      - "Sync now" (`StatusBar.vue` ~40) gives no progress or error feedback.
+      - `inventory.vue` shows a load error as "No analytics data yet".
+- [ ] Confirm destructive actions, using one mechanism. Unlinking a mapping, removing a peer
+      and uninstalling a plugin act immediately. Import (`products/index.vue` ~309) does
+      `INSERT OR REPLACE` over live rows with no preview. The confirms that do exist use
+      three different mechanisms: `window.confirm`, the dialog plugin, and an in-app modal.
+- [ ] Sync status goes stale: each `useSync()` call creates its own `isRunning`, starting
+      at `true` (`useSync.ts:7`). Nothing refetches it on a company switch, so the dashboard
+      and sidebar disagree after a pause. Make it one shared store, updated from engine
+      events.
+- [ ] N+1 IPC calls. The dashboard, listings and products pages call `get_mappings`, and
+      sometimes `list_variants`, once per product, sequentially, on every change. Add batch
+      commands.
+- [ ] Type drift between TypeScript and Rust:
+      - `SyncEngineEvent` lacks `DryRunChange`;
+      - `MergeSummary` lacks `vendor_plugins_updated`, `variants_updated` and
+        `rejected_timestamps`;
+      - `ProductVariant` lacks `source_plugin_id` and `source_vendor_item_id`.
+      `company.vue` also ignores the merge summary, so rejected peer rows are never shown.
+      Generate the types from Rust (`ts-rs` or `specta`) instead of maintaining them by hand.
+- [ ] Dead code:
+      - `usePricing.ts` and `useTauriCommand.ts` are never imported, so `update_price` and
+        `get_pricing_history` cannot be reached from the UI.
+      - Five registered commands have no caller: `get_cached_images`, `get_ebay_auth_url`,
+        `get_product_cache_freshness`, `list_company_peers`, `update_variant_quantity`.
+      - Several npm dependencies are never imported: `chart.js`, `vue-chartjs`, `diff`,
+        `lucide-vue-next`, `class-variance-authority`, `clsx`, `tailwind-merge`,
+        `@tauri-apps/plugin-shell`.
+      Wire up or remove each one.
 - [ ] The publish flow (`products/[id]/publish.vue`) should show, per platform, exactly which
       fields will be written and which are unsupported, driven by `PlatformCapabilities`
+- [ ] The per-platform sales breakdown is always empty. `analytics.rs` (~76–91) groups by
+      `source_platform`, but every sync event is written with `"sync_engine"` there
+      (`sync_engine.rs` ~465, ~497, ~565, ~597), and `from_str_loose` drops those rows, so
+      `inventory.vue` always shows "—".
+- [ ] Startup failures are silent. `main.rs` (~72, ~84–86) calls `expect()` on loading the
+      config and opening the database, and a Windows release build has no console, so the
+      app just exits. Show a native error dialog and write a log file.
 - [ ] Accessibility pass: keyboard navigation, focus rings, and contrast against the
       Palenight surfaces
 - [ ] `frontend/public/guide/` is an empty directory with a `.gitkeep` — either ship the
@@ -463,8 +1018,14 @@ The capability matrix is the queue. Current state per `capabilities()`:
       `WEBKIT_DISABLE_DMABUF_RENDERER=1` there ("Error 71 (Protocol error) dispatching to
       Wayland display" otherwise).
 - [ ] Grow the UI smoke test beyond the marketplace — the product, listings and vendor
-      pages, and the empty states above — and decide whether it can run in CI (it needs a
-      display; `xvfb-run` on the Linux runner is the obvious route).
+      pages, and the empty states above. (Whether it can run in CI is settled: c99c566
+      added the job.)
+- [ ] **Fix the CI UI smoke job, which fails on PR #2** (run 36223531255).
+      `scripts/ui-smoke.py` builds the app path from a relative `--target-dir target`
+      without `abspath`. Its existence check passes from the repo root, but tauri-driver is
+      then started with `cwd` set to the temp fixture dir, so WebKitWebDriver cannot find
+      `target/debug/nisaba-tauri`. Locally it passes because the README passes an absolute
+      path. Fix: `os.path.abspath(args.target_dir)`.
 
 ## Cross-cutting
 
@@ -473,9 +1034,49 @@ The capability matrix is the queue. Current state per `capabilities()`:
 - [ ] Secret handling audit — `keyring` is a dependency, but confirm nothing (tokens, the
       company secret, plugin `secret: true` fields) is ever written to `config.toml`, logged,
       or included in an export. Plugin secrets already fail this — see Phase 3.
-- [ ] `export_import.rs` produces `ExportData`; document exactly what it contains and make
-      sure secrets are excluded
+- [ ] **`Db::open` deletes the WAL when turso panics** (`db.rs` ~50–64), and retries. The
+      comment protects only the main file, but a WAL can hold committed transactions not
+      yet checkpointed into it, so this can throw away recent writes. Back up the files and
+      surface the error instead of deleting.
+- [ ] Export/import is lossy. Export contains no secrets (verified 2026-10-19). But:
+      - import drops `on_hand_quantity`, `source_plugin_id` and `source_vendor_item_id`
+        (`db.rs` ~3414), and its `INSERT OR REPLACE` wipes them on variants that already
+        exist;
+      - export (`list_all_mappings`) includes soft-deleted mappings without `deleted_at`,
+        so import revives them as active and the engine pushes to them.
+      `ExportData` lives in `core/src/types.rs` (~397) and is built in
+      `tauri-app/src/commands/export_import.rs`. It has no tests.
+- [ ] Config settings that do nothing, and a save that writes secrets:
+      - `build_adapter_config` (`main.rs` ~450–457) resets every platform section, so
+        `[ebay]`, `[squarespace]`, `[xmrbazaar]` (including `endpoints`) and `[amazon]` in
+        `config.toml` are ignored by the app;
+      - `general.log_level` and `alerts.default_low_stock_threshold` are never read, though
+        the second is editable in `config.vue`;
+      - `get_config`/`update_config` still round-trip those sections, and `AppConfig::save`
+        (`config.rs` ~266) writes them back, along with any `NISABA_*` environment-variable
+        secrets merged in at ~259, non-atomically and with default file permissions.
+      Remove the dead sections, never persist environment-sourced secrets, and write
+      atomically with `0600`.
+- [ ] Swallowed errors: `cache_listing_detail` ignores four database writes
+      (`listings.rs` ~538–569), and the pricing snapshot hard-codes `"USD"` (~98).
+- [ ] **Untrusted HTML runs in a webview with full IPC access.** CSP is disabled
+      (`tauri.conf.json:31`, `"csp": null`). Marketplace listing descriptions
+      (`products/[id]/index.vue` ~1093) and vendor-plugin descriptions
+      (`DescriptionEditor.vue:143`, reached from `publish.vue`) are rendered with `v-html`.
+      Script in a supplier's, a plugin's or a marketplace listing's HTML can therefore call
+      any Tauri command, including `get_company_secret` and `get_config`, which returns
+      platform secrets. That is a way around the Deno sandbox from the other side. Set a
+      strict CSP with no inline script, sanitize every `v-html` sink (DOMPurify), and narrow
+      the Tauri capability set so the main window cannot read secrets it never displays.
+- [ ] Money is `f64` from end to end (`core/src/types.rs` ~258, ~313). The XMR and
+      Squarespace adapters serialize prices with `to_string()`, so a computed price can be
+      sent as `0.30000000000000004`. Use a decimal type, or integer minor units plus a
+      currency.
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults
+- [ ] Nuxt 4 migration. The lockfile pins Nuxt 3.21.1, `radix-vue` 1.9 and Tailwind 3.4.
+      Nuxt 3's maintenance window is closing, and `radix-vue` has been succeeded by
+      `reka-ui`. Plan the move to Nuxt 4 + `reka-ui` (and decide on Tailwind 4) as one
+      migration, behind the typecheck gate from Phase 0.
 - [ ] Dependency freshness pass — `reqwest 0.13`, `deno_core 0.389`, `zip 8` and Nuxt 3.16+
       all move fast; keep them current and green. `deno_core` is now 0.412 (2026-09-16), 23
       releases ahead of the tree, and its repo was archived in April 2026 and merged into
