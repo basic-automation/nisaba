@@ -9,7 +9,7 @@ const productId = route.params.id as string
 
 const { getProduct, getMappings, listVariants } = useProducts()
 const { diffListings, createListingOnPlatform, updateListingOnPlatform, ebayGetCategorySuggestions, ebayGetCategoryAspects, ebayGetBusinessPolicies } = useListings()
-const { config, capabilities: platformCapabilities, fetchCapabilities, fetchConfig } = useConfig()
+const { capabilities: platformCapabilities, fetchCapabilities } = useConfig()
 
 const platformLabels: Record<Platform, string> = {
   ebay: 'eBay',
@@ -802,13 +802,15 @@ async function initPublish() {
     vendorListings.value = vd
     variants.value = variantData
 
-    // Fetch capabilities + config in parallel
+    // Fetch capabilities + XMR payout address in parallel.
+    // N-2.7: get_config returns platform secrets and is denied on the main
+    // window — the publish page uses the narrow non-secret accessor instead.
     fetchCapabilities()
-    fetchConfig().then(() => {
-      if (config.value?.xmrbazaar?.monero_address) {
-        xmrMoneroAddress.value = config.value.xmrbazaar.monero_address
-      }
-    })
+    invoke<string>('get_xmrbazaar_monero_address')
+      .then((addr) => {
+        if (addr) xmrMoneroAddress.value = addr
+      })
+      .catch(() => {})
 
     if (maps.length === 0 && vd.length === 0 && !isEditMode.value) {
       // No source data at all — still allow publishing with just product name
