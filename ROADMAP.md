@@ -562,7 +562,7 @@ write surfaces as `Err`.
       top-level code gets no network at all (it runs at install time). A plugin that
       declares nothing stays unrestricted so existing installs keep working. The Rothco
       plugin now declares `www.rothco.com`. `tests/network.rs` (11).
-- [ ] **Updated plugin code runs without re-approval.** Re-importing or re-submitting a
+- [x] **Updated plugin code runs without re-approval.** Re-importing or re-submitting a
       plugin with the same `metadata.name` keeps the old `status`, `approved_by` and
       `config_json`, API secrets included (`commands/vendors.rs` ~576–586, ~694–704). The
       import then starts `run_vendor_sync_single`, which never checks status (~1485), even
