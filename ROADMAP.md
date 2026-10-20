@@ -477,12 +477,21 @@ write surfaces as `Err`.
       body before sending; a missing offer or a fetched offer lacking a
       required field is an explicit error, as is a tags edit eBay cannot
       represent.]
-- [ ] **Amazon PATCH bodies are double-wrapped, and failures report `Ok`.**
+- [x] **Amazon PATCH bodies are double-wrapped, and failures report `Ok`.**
       `AmazonPatch::value` is a `Vec<Value>`, and the client pushes `json!([{…}])` into it
       (`platform-amazon/src/client.rs` ~214, ~299), which serializes as `"value": [[{…}]]`.
       Even when Amazon marks the submission INVALID, `update_quantity` only warns
       (~252), `update_price` never reads the body, and `create_listing` discards the
       submission (`lib.rs` ~360).
+      [N-5.3: PATCH bodies are now built by `build_quantity_patch_request` /
+      `build_price_patch_request` with the attribute object directly in `value`
+      (`"value": [{…}]`, pinned by serialisation tests); all three write paths
+      parse the submission and pass it through `check_submission`, which
+      returns `Err` on an `INVALID` status or any `ERROR`-severity issue —
+      `update_price` now reads its response body and the adapter's
+      `create_listing` checks the submission instead of discarding it.
+      Fake-server tests prove a rejected write surfaces as `Err` for each of
+      `update_quantity`, `update_price` and `create_listing`.]
 - [ ] **Amazon pagination may read the wrong key.** `types.rs:17` expects a top-level
       `nextToken`. If `searchListingsItems` nests it under `pagination`, only the first 20
       SKUs per marketplace are ever read. The hand-built fixture encodes the same
