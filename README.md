@@ -27,6 +27,25 @@ Built with Rust + Tauri 2 and a Nuxt 3 frontend.
   onion services, with AES-GCM encrypted payloads and secrets held in the OS keyring.
 - **Analytics** — per-product history and time-windowed analytics, charted in the UI.
 
+## Sync cycle
+
+Each cycle polls every enabled platform, resolves a canonical quantity per
+product (per variant, where variants are mapped) from the summed deltas
+against the last-known snapshots, and pushes the resolved quantity back to
+any platform whose reading disagrees.
+
+**Partial-failure policy — never push to an unpolled platform.** A platform
+with no successful reading this cycle receives no pushes this cycle. For a
+numeric platform that means a poll that returned the listing's quantity; for
+a stock-mode platform (XMR Bazaar) it means a successful poll *and* a
+successful sale-detection pass, since sale detection is that platform's
+reading. One platform being down does not abort the cycle — the others still
+resolve and sync, and the failure is reported as a platform error — but the
+unread platform is never written to: pushing a canonical value resolved
+without any reading from it could overwrite live stock on a platform that was
+merely slow to answer. It is reconciled on the next cycle in which it can be
+read again.
+
 ## Repository layout
 
 ```
