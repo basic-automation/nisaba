@@ -756,11 +756,18 @@ is used only when no platform reports.
       and each platform's reading, per variant. This fixes every item above. It is also the
       exact data model Sync v2 replicates (Phase 5, Step 2), so build it here first, on one
       machine, and replicate it later.
-- [ ] Pruning is never wired. `prune_old_sync_events` and `downsample_old_history` have no
+- [x] Pruning is never wired. `prune_old_sync_events` and `downsample_old_history` have no
       callers. `record_inventory_history` writes a row per tracked product every cycle even
       when nothing changed (~354–363), which is 288 rows per product per day at the default
       5-minute schedule. Also, `execute_write` (`db.rs` ~134) returns the row count of
       `COMMIT` rather than of the statement, and commits even when the statement failed.
+      Fixed in N-4.7: the engine's `run_housekeeping` (startup + daily in
+      `SyncEngine::run`) is now the caller — sync events are pruned after 90 days and
+      history is downsampled to one row per product per day after 30 days.
+      `record_inventory_history` inserts only when the quantity differs from the last
+      recorded row, and the engine no longer calls it on unchanged cycles.
+      `execute_write` runs the statement first, commits only on success (a failure
+      rolls back), and returns the statement's affected-row count.
 - [ ] The vendor sync blocks the platform sync loop: the engine awaits the vendor run inline
       (`sync_engine.rs` ~736, ~750). Plugin limits now go up to 12 h, and Pause and Sync Now
       wait for the whole run. Run it as its own task.
