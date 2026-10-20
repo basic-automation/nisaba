@@ -9,10 +9,11 @@ use crate::error::SyncError;
 use crate::types::{
     AuthToken, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto, NewSyncEvent,
     Platform, PlatformMapping, PlatformSnapshot, PricingSnapshot, Product, ProductVariant,
-    SyncEvent, VendorListingCache, VendorPluginInstall, VendorPluginRow, XmrProcessedOrder,
+    StockEvent, StockEventKind, SyncEvent, VendorListingCache, VendorPluginInstall,
+    VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 19;
+const CURRENT_SCHEMA_VERSION: i64 = 20;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -355,8 +356,8 @@ impl Db {
     /// * **A file's number is not its schema version.** The `NNN_` prefixes and
     ///   `PRAGMA user_version` drifted apart as inline steps were added:
     ///   `migrations/014_cached_platform_listings.sql` is applied at
-    ///   `version < 17`. The `if version < N` gate is the authority; the
-    ///   filename is a label.
+    ///   `version < 17`, and `migrations/020_stock_ledger.sql` at `version < 20`.
+    ///   The `if version < N` gate is the authority; the filename is a label.
     ///
     /// Adding a step means bumping [`CURRENT_SCHEMA_VERSION`] and appending a
     /// new `if version < N` block. Never edit or renumber a step that shipped.
@@ -822,6 +823,17 @@ impl Db {
                 debug!("Applied migration 019: vendor_plugin_installs.timeout_minutes");
             }
 
+            if version < 20 {
+                // Stock ledger: the stock_ledger table holds every stock change as
+                // a uniquely keyed event; canonical quantity is the sum of deltas.
+                conn.execute_batch(include_str!("../../../migrations/020_stock_ledger.sql"))
+                    .await?;
+                // Backfill one opening event per existing variant so the ledger
+                // sum equals the quantities already stored.
+                self.backfill_ledger_opening_events().await?;
+                debug!("Applied migration 020: stock_ledger table + opening backfill");
+            }
+
             // Set the new schema version
             conn.execute_batch(&format!(
                 "PRAGMA user_version = {};",
@@ -1078,6 +1090,150 @@ impl Db {
         self.execute_write(
             "UPDATE product_variants SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
             params![qty, variant_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    // ── Stock ledger (N-4.1) ────────────────────────────────────────
+    //
+    // Every stock change is a row in `stock_ledger` with a UNIQUE `event_key`:
+    // sales are keyed `sale:<platform>:<order_id>`, every other kind carries a
+    // UUID (or the deterministic `opening:<variant_id>` of the backfilled
+    // starting balance). Canonical quantity per variant is the SUM of its
+    // events' deltas; `product_variants.quantity` stays a cached copy refreshed
+    // by [`Db::refresh_variant_quantity_from_ledger`].
+
+    /// Record one stock event. Idempotent: if an event with the same
+    /// `event_key` is already in the ledger (a retried sale, a re-run
+    /// backfill), the row is left alone and this returns `false`.
+    pub async fn record_stock_event(&self, event: &StockEvent) -> Result<bool, SyncError> {
+        // INSERT OR IGNORE ... then SELECT changes() on the same connection:
+        // `execute_write` reports the row count of COMMIT, not of the
+        // statement, so it cannot tell an ignored duplicate from a new row.
+        let sql = "INSERT OR IGNORE INTO stock_ledger
+            (event_key, product_id, variant_id, event_kind, delta, platform, source_order_id, note)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+        let p = to_params(params![
+            event.event_key.clone(),
+            event.product_id.clone(),
+            event.variant_id.clone(),
+            event.kind.as_str(),
+            event.delta,
+            event.platform.clone(),
+            event.source_order_id.clone(),
+            event.note.clone(),
+        ]);
+
+        let conn = self.connect().await?;
+        for attempt in 0..5u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => {}
+                Err(ref e) if is_retryable(e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    continue;
+                }
+                Err(e) => return Err(SyncError::DatabaseError(e.to_string())),
+            }
+
+            let insert_changed: Result<i64, TursoError> = async {
+                conn.execute(sql, p.clone()).await?;
+                let mut rows = conn.query("SELECT changes()", ()).await?;
+                let n: i64 = rows
+                    .next()
+                    .await?
+                    .ok_or_else(|| TursoError::Error("changes() returned no rows".into()))?
+                    .get(0)?;
+                Ok(n)
+            }
+            .await;
+            let commit = match insert_changed {
+                Ok(n) => conn.execute("COMMIT", ()).await.map(|_| n),
+                Err(e) => Err(e),
+            };
+
+            match commit {
+                Ok(n) => return Ok(n > 0),
+                Err(ref e) if is_retryable(e) => {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                }
+                Err(e) => {
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    return Err(SyncError::DatabaseError(e.to_string()));
+                }
+            }
+        }
+        Err(SyncError::DatabaseError(
+            "record_stock_event failed after 5 retries".to_string(),
+        ))
+    }
+
+    /// Canonical quantity for a variant: the sum of its ledger events' deltas.
+    /// A variant with no events has canonical quantity 0.
+    pub async fn canonical_variant_quantity(&self, variant_id: &str) -> Result<i64, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(SUM(delta), 0) FROM stock_ledger WHERE variant_id = ?1",
+                params![variant_id],
+            )
+            .await?;
+        let qty: i64 = rows
+            .next()
+            .await?
+            .ok_or_else(|| SyncError::DatabaseError("SUM query returned no rows".into()))?
+            .get(0)?;
+        Ok(qty)
+    }
+
+    /// All ledger events for one variant, oldest first.
+    pub async fn stock_events_for_variant(
+        &self,
+        variant_id: &str,
+    ) -> Result<Vec<StockEvent>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, event_key, product_id, variant_id, event_kind, delta, platform, source_order_id, note, created_at
+                 FROM stock_ledger WHERE variant_id = ?1 ORDER BY id",
+                params![variant_id],
+            )
+            .await?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().await? {
+            events.push(parse_stock_event(&row)?);
+        }
+        Ok(events)
+    }
+
+    /// Recompute a variant's cached `quantity` from its ledger events and
+    /// return the canonical value.
+    pub async fn refresh_variant_quantity_from_ledger(
+        &self,
+        variant_id: &str,
+    ) -> Result<i64, SyncError> {
+        let canonical = self.canonical_variant_quantity(variant_id).await?;
+        self.execute_write(
+            "UPDATE product_variants SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![canonical, variant_id],
+        )
+        .await?;
+        Ok(canonical)
+    }
+
+    /// Backfill migration helper: one `opening` event per variant, keyed
+    /// `opening:<variant_id>`, with the variant's currently stored quantity.
+    /// INSERT OR IGNORE makes re-runs (e.g. an interrupted migration that did
+    /// not bump `user_version`) a no-op instead of double-counting.
+    pub async fn backfill_ledger_opening_events(&self) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT OR IGNORE INTO stock_ledger
+                (event_key, product_id, variant_id, event_kind, delta)
+             SELECT 'opening:' || pv.id, pv.product_id, pv.id, 'opening', pv.quantity
+             FROM product_variants pv",
+            (),
         )
         .await?;
         Ok(())
@@ -3828,6 +3984,25 @@ fn parse_product(row: &turso::Row) -> Result<Product, SyncError> {
     })
 }
 
+fn parse_stock_event(row: &turso::Row) -> Result<StockEvent, SyncError> {
+    let kind_str: String = row.get(4)?;
+    let kind = StockEventKind::from_str_loose(&kind_str).ok_or_else(|| {
+        SyncError::DatabaseError(format!("unknown stock event kind `{kind_str}`"))
+    })?;
+    Ok(StockEvent {
+        id: row.get::<i64>(0)?,
+        event_key: row.get::<String>(1)?,
+        product_id: row.get::<String>(2)?,
+        variant_id: row.get::<String>(3)?,
+        kind,
+        delta: row.get::<i64>(5)?,
+        platform: row.get::<Option<String>>(6)?,
+        source_order_id: row.get::<Option<String>>(7)?,
+        note: row.get::<Option<String>>(8)?,
+        created_at: row.get::<String>(9)?,
+    })
+}
+
 fn parse_mapping(row: &turso::Row) -> Result<PlatformMapping, SyncError> {
     Ok(PlatformMapping {
         id: row.get::<i64>(0)?,
@@ -3902,6 +4077,7 @@ mod tests {
         "products",
         "product_variants",
         "product_vendor_data",
+        "stock_ledger",
         "sync_events",
         "vendor_listings_cache",
         "vendor_plugin_installs",
@@ -4444,5 +4620,167 @@ mod tests {
             std::fs::read(backups[0].join("nisaba.db-wal")).unwrap(),
             b"uncheckpointed"
         );
+    }
+
+    // ── Stock ledger (N-4.1) ──────────────────────────────────────
+
+    fn ledger_product(id: &str, quantity: i64) -> Product {
+        Product {
+            id: id.to_string(),
+            canonical_sku: format!("SKU-{id}"),
+            name: format!("Product {id}"),
+            quantity,
+            low_stock_threshold: None,
+            is_tracked: true,
+            has_variants: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn ledger_variant(id: &str, product_id: &str, quantity: i64) -> ProductVariant {
+        ProductVariant {
+            id: id.to_string(),
+            product_id: product_id.to_string(),
+            sku: format!("SKU-{id}"),
+            name: format!("Variant {id}"),
+            attributes: std::collections::HashMap::new(),
+            quantity,
+            on_hand_quantity: quantity,
+            image_url: None,
+            sort_order: 0,
+            source_plugin_id: None,
+            source_vendor_item_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    async fn open_migrated_ledger_db(name: &str) -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn duplicate_sale_key_is_a_noop() {
+        let (_dir, db) = open_migrated_ledger_db("ledger-dup.db").await;
+        db.insert_product(&ledger_product("p1", 10)).await.unwrap();
+        db.insert_variant(&ledger_variant("v1", "p1", 10))
+            .await
+            .unwrap();
+        // Variants created after migration have no opening event yet; record
+        // one explicitly so the ledger starts at the current quantity.
+        assert!(db
+            .record_stock_event(&StockEvent::opening("p1", "v1", 10))
+            .await
+            .unwrap());
+
+        let sale = StockEvent::sale("ebay", "ORDER-1", "p1", "v1", 3);
+        assert!(db.record_stock_event(&sale).await.unwrap());
+        // Recording the very same sale again (same platform + order id) must
+        // not change the ledger.
+        assert!(!db.record_stock_event(&sale).await.unwrap());
+
+        let events = db.stock_events_for_variant("v1").await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(db.canonical_variant_quantity("v1").await.unwrap(), 7);
+
+        let refreshed = db.refresh_variant_quantity_from_ledger("v1").await.unwrap();
+        assert_eq!(refreshed, 7);
+        assert_eq!(db.get_product("p1").await.unwrap().unwrap().quantity, 10);
+    }
+
+    #[tokio::test]
+    async fn mixed_event_kinds_sum_correctly() {
+        let (_dir, db) = open_migrated_ledger_db("ledger-mixed.db").await;
+        db.insert_product(&ledger_product("p1", 10)).await.unwrap();
+        db.insert_variant(&ledger_variant("v1", "p1", 10))
+            .await
+            .unwrap();
+
+        assert!(db
+            .record_stock_event(&StockEvent::opening("p1", "v1", 10))
+            .await
+            .unwrap());
+        assert!(db
+            .record_stock_event(&StockEvent::sale("squarespace", "ORD-9", "p1", "v1", 3))
+            .await
+            .unwrap());
+        let mut restock = StockEvent::keyed(StockEventKind::Restock, "p1", "v1", 5);
+        restock.platform = Some("manual".to_string());
+        assert!(db.record_stock_event(&restock).await.unwrap());
+        let mut adjust = StockEvent::keyed(StockEventKind::Adjustment, "p1", "v1", -1);
+        adjust.note = Some("damaged unit".to_string());
+        assert!(db.record_stock_event(&adjust).await.unwrap());
+        let vendor = StockEvent::keyed(StockEventKind::VendorUpdate, "p1", "v1", 2);
+        assert!(db.record_stock_event(&vendor).await.unwrap());
+
+        // 10 - 3 + 5 - 1 + 2 = 13
+        assert_eq!(db.canonical_variant_quantity("v1").await.unwrap(), 13);
+
+        let events = db.stock_events_for_variant("v1").await.unwrap();
+        let kinds: Vec<StockEventKind> = events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                StockEventKind::Opening,
+                StockEventKind::Sale,
+                StockEventKind::Restock,
+                StockEventKind::Adjustment,
+                StockEventKind::VendorUpdate,
+            ]
+        );
+        assert_eq!(events[1].source_order_id.as_deref(), Some("ORD-9"));
+
+        let refreshed = db.refresh_variant_quantity_from_ledger("v1").await.unwrap();
+        assert_eq!(refreshed, 13);
+        let variant = db.get_variant("v1").await.unwrap().unwrap();
+        assert_eq!(variant.quantity, 13);
+    }
+
+    #[tokio::test]
+    async fn backfill_preserves_current_quantities() {
+        // Variants that already exist when migration 020 runs get one opening
+        // event each, so the ledger sum equals the stored quantity.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger-backfill.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity, is_tracked, has_variants)
+             VALUES ('p1', 'SKU-p1', 'P1', 7, 1, 1), ('p2', 'SKU-p2', 'P2', 0, 1, 1)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, sort_order)
+             VALUES ('v1', 'p1', 'SKU-v1', 'V1', '{}', 7, 7, 0),
+                    ('v2', 'p2', 'SKU-v2', 'V2', '{}', 4, 4, 0)",
+            (),
+        )
+        .await
+        .unwrap();
+        // Simulate a pre-020 database: reset the version, then migrate again.
+        conn.execute("PRAGMA user_version = 19", ()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        assert_eq!(db.canonical_variant_quantity("v1").await.unwrap(), 7);
+        assert_eq!(db.canonical_variant_quantity("v2").await.unwrap(), 4);
+
+        // Re-running the backfill must not double-count the opening events.
+        db.backfill_ledger_opening_events().await.unwrap();
+        assert_eq!(db.canonical_variant_quantity("v1").await.unwrap(), 7);
+        assert_eq!(db.canonical_variant_quantity("v2").await.unwrap(), 4);
+
+        let events = db.stock_events_for_variant("v1").await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, StockEventKind::Opening);
+        assert_eq!(events[0].event_key, "opening:v1");
+        assert_eq!(events[0].delta, 7);
     }
 }
