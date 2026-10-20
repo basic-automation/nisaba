@@ -484,12 +484,15 @@ write surfaces as `Err`.
 
 ### Adapter correctness
 
-- [ ] The in-memory order dedup in the XMR adapter consumes sales: orders are marked seen
+- [x] The in-memory order dedup in the XMR adapter consumes sales: orders are marked seen
       before the engine processes them (`platform-xmrbazaar/src/lib.rs` ~121), and
       `run_cycle` calls `detect_sales` in dry-run too (`sync_engine.rs` ~189). A dry run can
       then make the next real cycle skip a sale, which breaks Phase 4's dry-run guarantee.
       A cycle that errors mid-batch also loses its sales. The DB dedup table already exists,
-      so remove the in-memory set.
+      so remove the in-memory set. [N-4.4: removed `seen_orders`; the engine now defers
+      order marks and applies them in the same transaction as the stock write that
+      consumes the sale (`Db::apply_stock_and_consume_xmr_sales`); a dry run consumes
+      nothing and a failed cycle can no longer lose a sale.]
 - [ ] XMR orders always count as one unit (`scraper.rs` ~778, pinned by `sales_page.rs:71`).
       Confirm whether XMR Bazaar allows multi-unit orders in unlimited-stock mode; if it
       does, read the quantity.

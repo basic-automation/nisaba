@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::conflict::resolve_deltas;
-use crate::db::Db;
+use crate::db::{ConsumedXmrOrder, Db};
 use crate::error::SyncError;
 use crate::traits::PlatformAdapter;
 use crate::types::{NewSyncEvent, Platform, PlatformMapping, ProductVariant, QuantityDelta};
@@ -199,6 +199,21 @@ impl SyncEngine {
         let mut injected_deltas: HashMap<(String, Option<String>), Vec<QuantityDelta>> =
             HashMap::new();
 
+        // XMR orders whose sales were injected above, keyed like the deltas.
+        // An order is marked processed only in the same transaction as the
+        // stock write that applies its sale (the group resolution below) —
+        // never here. Marking here, ahead of the write, is what used to lose
+        // sales when a cycle failed between the two, and it is what let a
+        // dry run consume a sale the next real cycle then skipped.
+        let mut pending_xmr_sales: HashMap<(String, Option<String>), Vec<ConsumedXmrOrder>> =
+            HashMap::new();
+
+        let tracked_product_ids: HashSet<String> = products
+            .iter()
+            .filter(|p| p.is_tracked)
+            .map(|p| p.id.clone())
+            .collect();
+
         for (platform, adapter) in adapters.iter() {
             if !adapter.capabilities().has_stock_mode_inventory {
                 continue;
@@ -234,6 +249,21 @@ impl SyncEngine {
                             continue;
                         };
 
+                        // A sale on an untracked product is neither applied
+                        // nor consumed: the quantity resolution below skips
+                        // untracked products, so marking the order processed
+                        // would lose the sale. It stays pending and is picked
+                        // up once the product is tracked.
+                        if !tracked_product_ids.contains(&mapping.product_id) {
+                            debug!(
+                                platform = %platform,
+                                product_id = %mapping.product_id,
+                                order_id,
+                                "Sale detected for untracked product, leaving it unconsumed"
+                            );
+                            continue;
+                        }
+
                         info!(
                             platform = %platform,
                             product_id = %mapping.product_id,
@@ -258,7 +288,7 @@ impl SyncEngine {
                             None => None,
                         };
                         injected_deltas
-                            .entry((mapping.product_id.clone(), delta_variant_id))
+                            .entry((mapping.product_id.clone(), delta_variant_id.clone()))
                             .or_default()
                             .push(QuantityDelta {
                                 product_id: mapping.product_id.clone(),
@@ -268,18 +298,21 @@ impl SyncEngine {
                                 delta: -sale.units_sold,
                             });
 
-                        // Mark order as processed in DB. A dry run must not:
-                        // consuming the order here would make the real cycle
-                        // that follows skip the very sale it previewed.
-                        if !order_id.is_empty() && !self.dry_run {
-                            self.db
-                                .mark_xmr_order_processed(
-                                    order_id,
-                                    Some(&mapping.product_id),
-                                    &sale.platform_item_id,
-                                    sale.units_sold,
-                                )
-                                .await?;
+                        // Defer the order mark: it lands in the same
+                        // transaction as the stock write that applies this
+                        // sale (the group resolution below). A dry run never
+                        // reaches that write, so a previewed order stays
+                        // available to the next real cycle.
+                        if !order_id.is_empty() {
+                            pending_xmr_sales
+                                .entry((mapping.product_id.clone(), delta_variant_id.clone()))
+                                .or_default()
+                                .push(ConsumedXmrOrder {
+                                    order_id: order_id.to_string(),
+                                    product_id: Some(mapping.product_id.clone()),
+                                    listing_id: sale.platform_item_id.clone(),
+                                    quantity: sale.units_sold,
+                                });
                         }
                     }
                 }
@@ -445,6 +478,13 @@ impl SyncEngine {
                     deltas.extend(xmr_deltas);
                 }
 
+                // The XMR orders behind those deltas. They are consumed at
+                // this group's write points below — in the same transaction
+                // as the stock write that applies their sales.
+                let group_xmr_sales = pending_xmr_sales
+                    .remove(&(product.id.clone(), group_variant_id.map(str::to_string)))
+                    .unwrap_or_default();
+
                 let resolved = resolve_deltas(&product.id, canonical_old, deltas);
                 // `new_canonical` is the fully resolved canonical for the
                 // shared tail below (XMR deltas already folded in).
@@ -461,6 +501,30 @@ impl SyncEngine {
                             .record_inventory_history(&product.id, canonical_old, &cycle_id)
                             .await?;
                     }
+
+                    // The sales were folded into the resolution even though
+                    // the quantity did not move (already at the floor), so
+                    // consume their orders here — in their own transaction,
+                    // since there is no stock write to share one with.
+                    if !self.dry_run && !group_xmr_sales.is_empty() {
+                        if let Some(v) = variant {
+                            self.db
+                                .apply_variant_stock_and_consume_xmr_sales(
+                                    &v.id,
+                                    None,
+                                    &group_xmr_sales,
+                                )
+                                .await?;
+                        } else {
+                            self.db
+                                .apply_stock_and_consume_xmr_sales(
+                                    &product.id,
+                                    None,
+                                    &group_xmr_sales,
+                                )
+                                .await?;
+                        }
+                    }
                 } else {
                     if resolved.total_delta != 0 {
                         info!(
@@ -475,15 +539,27 @@ impl SyncEngine {
                     }
 
                     // Update canonical quantity in DB: the variant row for a
-                    // variant group, the product row for the product-level group.
+                    // variant group, the product row for the product-level
+                    // group. The XMR orders whose sales this write applies
+                    // are marked processed in the same transaction — either
+                    // both commit or neither does, so a failed cycle can
+                    // never consume an order whose sale it did not apply.
                     if !self.dry_run {
                         if let Some(v) = variant {
                             self.db
-                                .update_variant_quantity(&v.id, new_canonical)
+                                .apply_variant_stock_and_consume_xmr_sales(
+                                    &v.id,
+                                    Some(new_canonical),
+                                    &group_xmr_sales,
+                                )
                                 .await?;
                         } else {
                             self.db
-                                .update_product_quantity(&product.id, new_canonical)
+                                .apply_stock_and_consume_xmr_sales(
+                                    &product.id,
+                                    Some(new_canonical),
+                                    &group_xmr_sales,
+                                )
                                 .await?;
                         }
                     }
@@ -2184,6 +2260,122 @@ mod tests {
         assert!(
             !harness.db.is_xmr_order_processed("order-42").await.unwrap(),
             "a previewed order must still be available to the next real cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_leaves_an_xmr_sale_for_the_real_cycle() {
+        // The end-to-end dry-run guarantee for stock-mode sales: the preview
+        // changes nothing and consumes nothing, so the real cycle that
+        // follows applies the sale exactly once.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 2, "order-42")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        let harness = harness.into_dry_run();
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 5, "dry run changes nothing");
+        assert!(
+            !harness.db.is_xmr_order_processed("order-42").await.unwrap(),
+            "a previewed order must still be available to the next real cycle"
+        );
+
+        // The fake consumes its sales once, like an order aging out of the
+        // scrape; re-arm to model the next cycle seeing the order again.
+        // (The real adapter returns its recent sales on every scrape — it
+        // keeps no in-memory set, the DB dedup table is the only authority.)
+        harness
+            .adapter(Platform::XmrBazaar)
+            .arm_sales(vec![sale("X-1", 2, "order-42")]);
+
+        // Same DB, same adapters, same canned readings — but for real.
+        let (tx, _rx) = mpsc::channel(256);
+        let real = SyncEngine::new(harness.db.clone(), harness.engine.adapters.clone(), tx, 0);
+        real.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            3,
+            "the sale the dry run previewed must be applied by the real cycle"
+        );
+        assert!(
+            harness.db.is_xmr_order_processed("order-42").await.unwrap(),
+            "the real cycle consumes the order it applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_xmr_sale_past_zero_stock_is_consumed_not_lost() {
+        // Quantity cannot go below zero, but the sale was still observed and
+        // folded into the resolution — the order must be consumed in the
+        // same cycle, or the next cycle would re-apply it forever.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 5, "order-7")])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 2, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            0,
+            "the sale is floored at zero, not driven negative"
+        );
+        assert!(
+            harness.db.is_xmr_order_processed("order-7").await.unwrap(),
+            "the order must be consumed even though no stock was left to take"
+        );
+
+        // Replay: the dedup table must swallow it.
+        harness
+            .adapter(Platform::XmrBazaar)
+            .arm_sales(vec![sale("X-1", 5, "order-7")]);
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_sale_on_an_untracked_product_is_neither_applied_nor_consumed() {
+        // Untracked products are skipped by quantity resolution, so their
+        // sales must stay pending: consuming the order without applying the
+        // sale would lose it, and it can be applied once the product is
+        // tracked.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::XmrBazaar)
+                .with_stock_mode()
+                .with_sales(vec![sale("X-1", 2, "order-untracked")])],
+            0,
+        )
+        .await;
+        harness
+            .add_untracked_product("p1", 5, &[(Platform::XmrBazaar, "X-1")])
+            .await;
+
+        harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 5);
+        assert!(
+            !harness
+                .db
+                .is_xmr_order_processed("order-untracked")
+                .await
+                .unwrap(),
+            "an untracked sale must not be consumed, so it can be applied once the product is tracked"
         );
     }
 
