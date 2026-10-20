@@ -10,8 +10,11 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
+    "core:window:allow-set-focus",
     "dialog:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "core:webview:allow-create-webview-window",
+    "main-window"
   ]
 }

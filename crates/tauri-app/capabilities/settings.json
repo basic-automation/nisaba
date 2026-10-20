@@ -1,0 +1,20 @@
+{
+  "description": "Nisaba settings window capabilities - the only window allowed to invoke secret-returning commands (get_company_secret, get_config, get_company_platform_config). Hosts the settings views that legitimately display secrets and never renders untrusted HTML.",
+  "identifier": "settings",
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized",
+    "dialog:default",
+    "updater:default",
+    "process:default",
+    "settings-window"
+  ],
+  "windows": [
+    "nisaba-settings"
+  ]
+}
