@@ -78,7 +78,19 @@ impl EbayAdapter {
     }
 
     /// Complete the OAuth flow by exchanging an authorization code.
-    pub async fn complete_auth(&self, code: &str) -> Result<(), SyncError> {
+    ///
+    /// `returned_state` is the `state` query parameter eBay sent back on the
+    /// redirect callback. It is verified against the value issued with the
+    /// authorize URL *before* any token exchange; a missing or mismatched
+    /// state rejects the attempt, so a code observed from any other page —
+    /// or a replayed callback — cannot be redeemed.
+    pub async fn complete_auth(
+        &self,
+        code: &str,
+        returned_state: Option<&str>,
+    ) -> Result<(), SyncError> {
+        self.auth.verify_callback_state(returned_state)?;
+
         let token = self.auth.exchange_code(self.client.http(), code).await?;
 
         let expires_at = Utc::now() + chrono::Duration::seconds(token.expires_in);
@@ -698,5 +710,53 @@ impl PlatformAdapter for EbayAdapter {
             can_create_listing: true,
             has_stock_mode_inventory: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> EbayConfig {
+        EbayConfig {
+            enabled: true,
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-client-secret".to_string(),
+            redirect_uri: "https://localhost/callback".to_string(),
+            environment: "sandbox".to_string(),
+        }
+    }
+
+    async fn test_adapter() -> (EbayAdapter, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        let db = Arc::new(Db::open(db_path.to_str().unwrap()).await.expect("open db"));
+        db.migrate().await.expect("migrate db");
+        let adapter = EbayAdapter::new(&test_config(), db).await.expect("adapter");
+        (adapter, dir)
+    }
+
+    /// The adapter-level callback rejects a code whose state does not match
+    /// the issued attempt — before any network call is made.
+    #[tokio::test]
+    async fn complete_auth_rejects_mismatched_state() {
+        let (adapter, _dir) = test_adapter().await;
+        adapter.authorization_url(); // issues and stores a state for this attempt
+        let err = adapter
+            .complete_auth("attacker-observed-code", Some("forged-state"))
+            .await
+            .expect_err("a mismatched state must reject the callback");
+        assert!(
+            err.to_string().contains("state"),
+            "error should mention the state check, got: {err}"
+        );
+    }
+
+    /// A callback with no state at all is rejected as well.
+    #[tokio::test]
+    async fn complete_auth_rejects_missing_state() {
+        let (adapter, _dir) = test_adapter().await;
+        adapter.authorization_url();
+        assert!(adapter.complete_auth("some-code", None).await.is_err());
     }
 }
