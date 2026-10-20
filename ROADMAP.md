@@ -453,16 +453,30 @@ write surfaces as `Err`.
       carries no `offerId` (`client.rs:633`), and the 200/207 body is never parsed. When
       `availability` is absent, the same path falls back to quantity `0` (`lib.rs:454`), so
       a price edit can zero stock. Verify against the Inventory API docs and a sandbox.
-- [ ] **eBay read-modify-write erases fields it doesn't model.** `EbayInventoryItem`
+- [x] **eBay read-modify-write erases fields it doesn't model.** `EbayInventoryItem`
       (`types.rs` ~16–31) carries only title, description, imageUrls, aspects, condition and
       quantity. `createOrReplaceInventoryItem` is a full replace, so every description edit
       (`client.rs` ~406, ~756) drops brand, MPN, UPC, `packageWeightAndSize` and
       `conditionDescriptors`, and on the `set_description` path `conditionDescription`
       too. It also writes back a quantity read earlier, which may be stale by then. Model
       the item losslessly by carrying unknown fields through, or switch to a partial
-      update.
-- [ ] **eBay `update_listing` sends a partial body to `updateOffer`**, which is also a full
+      update. [N-5.2: `EbayInventoryItem`/`EbayProductInfo`/`EbayAvailability`
+      now model brand/MPN/UPC/EAN/ISBN/ePID, `conditionDescription`,
+      `conditionDescriptors` and `packageWeightAndSize` explicitly and carry
+      every other field through `#[serde(flatten)]` extra maps;
+      `build_inventory_item_put_body` rebuilds the full-replace body from the
+      just-fetched item, applies only the caller's overrides, and omits
+      quantity entirely so a stale read can never resurrect sold stock
+      (fixture tests in `tests/read_modify_write.rs`).]
+- [x] **eBay `update_listing` sends a partial body to `updateOffer`**, which is also a full
       replace (`lib.rs` ~543–568): it drops price and quantity, or is rejected.
+      [N-5.2: `update_listing` now goes through
+      `update_offer_fields` — fetch the complete offer, rebuild a complete
+      body losslessly via `build_offer_put_body`, PUT that — and
+      `update_offer` itself validates completeness and refuses a partial
+      body before sending; a missing offer or a fetched offer lacking a
+      required field is an explicit error, as is a tags edit eBay cannot
+      represent.]
 - [ ] **Amazon PATCH bodies are double-wrapped, and failures report `Ok`.**
       `AmazonPatch::value` is a `Vec<Value>`, and the client pushes `json!([{…}])` into it
       (`platform-amazon/src/client.rs` ~214, ~299), which serializes as `"value": [[{…}]]`.
