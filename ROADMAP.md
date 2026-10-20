@@ -885,18 +885,26 @@ P2P is experimental, and do not repair the Tor join path.
       `Json<SyncRequest>` under axum's default 2 MiB body limit, so once a catalog's
       payload outgrows it, every sync fails with 413. artiqwest sets no timeout, so one
       hung peer stalls the sequential peer loop.
-- [ ] The merge is not transactional. Each row is applied with `?`, so the first error
-      leaves earlier sections applied and skips the rest (config, tokens, plugins,
-      variants). A mapping UPDATE that collides with `idx_mappings_platform_item` then
-      fails the same way every cycle.
+- [x] The merge is not transactional. Each row was applied with `?`, so the first error
+      left earlier sections applied and skipped the rest (config, tokens, plugins,
+      variants), and the same payload failed the same way every cycle.
+      `merge_remote_payload` now plans every write from the local state first, then
+      applies the batch in a single transaction (`Db::execute_write_batch`): any
+      error rolls the whole merge back and leaves the database unchanged. Pinned by
+      `a_failing_merge_leaves_the_database_unchanged` in `tests/round_trip.rs`.
 - [ ] No onion-service lifecycle. `start_onion_service` returns before Tor has
       bootstrapped, with no retry. `Stop` ends only the sync loop, so a company that was
       left keeps serving its database. Companies created or joined at runtime drop sync
       and P2P events and get no vendor-sync hook until restart.
-- [ ] Product and variant deletes are hard deletes (`db.rs` ~769–797, ~892–912), so a merge
-      re-inserts them from any peer that still has them. They also orphan rows in
-      `listing_descriptions`, `listing_photos`, `pricing_snapshots` and `cached_listings`.
-      Sync v2's observed-remove sets cover the P2P half; the orphans need fixing now.
+- [x] Product and variant deletes orphaned rows in `listing_descriptions`,
+      `listing_photos`, `pricing_snapshots` and `cached_listings`. `delete_product`
+      now removes those tables too (with the dependents it already removed) in its
+      transaction, and `delete_variant`/`delete_variants_for_product` also remove
+      `product_vendor_data`, so a delete leaves no rows pointing at a product or
+      variant that no longer exists.
+- [ ] Product and variant deletes are hard deletes (`db.rs` `delete_product`,
+      `delete_variant`), so a merge re-inserts them from any peer that still has
+      them. Sync v2's observed-remove sets cover this half.
 - [ ] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
       not exist and have no admin check, unlike `get_company_secret` (`company.rs` ~438+).
 - [ ] README still says "AES-GCM encrypted payloads" (`README.md:27`); payloads have no
