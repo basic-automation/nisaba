@@ -72,6 +72,11 @@ pub enum SyncCommand {
 /// Callback invoked after each sync cycle to refresh vendor plugin data.
 /// The closure returns a future that runs all approved vendor plugins,
 /// updates product_vendor_data, and recalculates quantities.
+///
+/// The engine never awaits this future inline: [`SyncEngine::run`] spawns
+/// it as its own task (see `spawn_vendor_sync`), because a plugin run may
+/// last hours and must not stall the platform sync loop — Pause and Sync
+/// Now stay responsive while it runs.
 pub type VendorSyncFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// How long sync events are kept before the engine's housekeeping prunes
@@ -143,9 +148,32 @@ impl SyncEngine {
     }
 
     /// Attach a callback to run vendor plugin syncs after each platform cycle.
+    /// The callback is spawned as an independent task, never awaited inline.
     pub fn with_vendor_sync(mut self, f: VendorSyncFn) -> Self {
         self.vendor_sync_fn = Some(f);
         self
+    }
+
+    /// Trigger a vendor refresh as its own task, without awaiting it.
+    ///
+    /// At most one engine-triggered vendor run is in flight at a time: if
+    /// the previous spawned run has not finished, this trigger is skipped
+    /// (the vendor callback itself — `run_vendor_sync_all` in the app —
+    /// also refuses overlapping runs). A dry run never triggers one.
+    fn spawn_vendor_sync(&self, slot: &mut Option<tokio::task::JoinHandle<()>>) {
+        if self.dry_run {
+            return;
+        }
+        let Some(sync_fn) = &self.vendor_sync_fn else {
+            return;
+        };
+        if let Some(handle) = slot.as_ref() {
+            if !handle.is_finished() {
+                debug!("Vendor sync already running as its own task, skipping trigger");
+                return;
+            }
+        }
+        *slot = Some(tokio::spawn((sync_fn)()));
     }
 
     /// Run a single sync cycle: poll → detect → resolve → push → record.
@@ -170,8 +198,16 @@ impl SyncEngine {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         info!(cycle_id = %cycle_id, "Starting sync cycle");
 
-        // Snapshot the current adapters for this cycle
-        let adapters = self.adapters.read().await;
+        // Clone the adapter handles out of the shared map, then release
+        // the lock before any network work begins. Holding the read lock
+        // for the whole cycle (polls, retries and pushes included) made
+        // every writer — saving config rebuilds the map under the write
+        // lock — wait for the cycle to finish. The handles are `Arc`s, so
+        // the clone is cheap, and a config save that swaps the map mid-cycle
+        // does not disturb this cycle: it finishes on the handles it
+        // started with, and the next cycle picks up the new map.
+        let adapters: HashMap<Platform, Arc<dyn PlatformAdapter>> =
+            self.adapters.read().await.clone();
 
         if adapters.is_empty() {
             info!("No platforms enabled, skipping sync cycle");
@@ -906,7 +942,8 @@ impl SyncEngine {
             }
         }
 
-        // Drop the read lock before sending event
+        // The cloned adapter snapshot is dropped here; the shared map's
+        // lock was already released before the cycle's network work began.
         drop(adapters);
 
         info!(
@@ -1039,6 +1076,11 @@ impl SyncEngine {
         }
 
         let mut paused = false;
+        // The in-flight vendor refresh, spawned as its own task after each
+        // cycle. The loop never awaits it, so commands (Pause, Sync Now)
+        // are processed while a vendor run — which may last hours — is
+        // still going.
+        let mut vendor_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         // Don't try to catch up missed ticks
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1056,11 +1098,7 @@ impl SyncEngine {
                         if let Err(e) = self.run_cycle().await {
                             error!(error = %e, "Sync cycle failed");
                         }
-                        if let Some(ref sync_fn) = self.vendor_sync_fn {
-                            if !self.dry_run {
-                                (sync_fn)().await;
-                            }
-                        }
+                        self.spawn_vendor_sync(&mut vendor_task);
                     }
                 }
                 cmd = cmd_rx.recv() => {
@@ -1070,11 +1108,7 @@ impl SyncEngine {
                             if let Err(e) = self.run_cycle().await {
                                 error!(error = %e, "Manual sync cycle failed");
                             }
-                            if let Some(ref sync_fn) = self.vendor_sync_fn {
-                                if !self.dry_run {
-                                    (sync_fn)().await;
-                                }
-                            }
+                            self.spawn_vendor_sync(&mut vendor_task);
                         }
                         Some(SyncCommand::Pause) => {
                             info!("Sync paused");
@@ -1166,6 +1200,9 @@ mod tests {
         sales_error: Mutex<Option<String>>,
         /// When set, every `set_quantity` fails with this message.
         push_error: Mutex<Option<String>>,
+        /// When set, every poll sleeps this long first, modelling a slow
+        /// network (and, with retries, a long cycle).
+        poll_delay: Mutex<Option<std::time::Duration>>,
         pushes: Mutex<Vec<(String, i64)>>,
         poll_calls: AtomicUsize,
         refresh_calls: AtomicUsize,
@@ -1181,6 +1218,7 @@ mod tests {
                 sales: Mutex::new(Vec::new()),
                 sales_error: Mutex::new(None),
                 push_error: Mutex::new(None),
+                poll_delay: Mutex::new(None),
                 pushes: Mutex::new(Vec::new()),
                 poll_calls: AtomicUsize::new(0),
                 refresh_calls: AtomicUsize::new(0),
@@ -1221,6 +1259,12 @@ mod tests {
             self
         }
 
+        /// Make every poll sleep before answering, as a slow network would.
+        fn with_poll_delay(self, delay: std::time::Duration) -> Self {
+            *self.poll_delay.lock().unwrap() = Some(delay);
+            self
+        }
+
         /// Flip push failures on or off mid-test, so one harness can run a
         /// fail-then-retry sequence across cycles.
         fn set_push_error(&self, message: Option<&str>) {
@@ -1248,6 +1292,10 @@ mod tests {
 
         async fn fetch_inventory(&self) -> Result<Vec<PlatformInventoryItem>, SyncError> {
             self.poll_calls.fetch_add(1, Ordering::SeqCst);
+            let poll_delay = *self.poll_delay.lock().unwrap();
+            if let Some(delay) = poll_delay {
+                tokio::time::sleep(delay).await;
+            }
             let next = {
                 let mut queue = self.polls.lock().unwrap();
                 if queue.len() > 1 {
@@ -2849,5 +2897,143 @@ mod tests {
         harness.engine.run_cycle().await.unwrap();
 
         assert_eq!(harness.quantity("p1").await, 4);
+    }
+
+    // ── Adapter lock & vendor task (N-4.8) ────────────────────
+
+    #[tokio::test]
+    async fn a_running_cycle_does_not_block_the_adapter_write_lock() {
+        // Config saving rebuilds the adapter map under the write lock
+        // (`update_config` / `update_company_platform_config` in the app).
+        // The cycle used to hold the read lock from its first poll to its
+        // last push — retries included — so a save waited for the whole
+        // cycle. Now the handles are cloned out and the lock released
+        // before the network work begins: with a poll that sleeps for
+        // 30 s, the write lock must still be granted effectively at once.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay)
+                .with_quantities(&[("E-1", 5)])
+                .with_poll_delay(std::time::Duration::from_secs(30))],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let shared = harness.engine.adapters.clone();
+        let adapter = harness.adapter(Platform::Ebay);
+        let cycle = tokio::spawn(async move {
+            let _ = harness.engine.run_cycle().await;
+            harness
+        });
+
+        // Wait until the cycle is inside its (sleeping) poll.
+        for _ in 0..200 {
+            if adapter.poll_calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            adapter.poll_calls.load(Ordering::SeqCst) > 0,
+            "the cycle never started polling"
+        );
+
+        // This is what saving config waits on. If the cycle still held
+        // the read lock, this would block until the 30 s poll finished.
+        let acquired =
+            tokio::time::timeout(std::time::Duration::from_millis(500), shared.write()).await;
+        assert!(
+            acquired.is_ok(),
+            "the adapter write lock (config save) was blocked by a running cycle"
+        );
+        drop(acquired);
+
+        cycle.abort();
+    }
+
+    #[tokio::test]
+    async fn vendor_sync_runs_as_its_own_task_and_does_not_block_the_engine_loop() {
+        // The vendor callback blocks until the test releases it — the
+        // stand-in for a plugin run that may last hours. The engine used
+        // to await it inline after each cycle, so Pause / Sync Now queued
+        // behind the whole run. Now it is spawned: the loop must process a
+        // Sync Now (and complete another cycle) while the first vendor
+        // run is still blocked, and must not spawn a second overlapping
+        // vendor run.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 5)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::Ebay, "E-1")])
+            .await;
+
+        let vendor_calls = Arc::new(AtomicUsize::new(0));
+        let vendor_started = Arc::new(tokio::sync::Notify::new());
+        let vendor_release = Arc::new(tokio::sync::Notify::new());
+        let vendor_fn: VendorSyncFn = {
+            let calls = vendor_calls.clone();
+            let started = vendor_started.clone();
+            let release = vendor_release.clone();
+            Arc::new(move || {
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    // Block until released (the test never releases
+                    // before its assertions; runtime shutdown cleans up).
+                    release.notified().await;
+                })
+            })
+        };
+
+        let Harness {
+            engine, mut events, ..
+        } = harness;
+        let engine = engine.with_vendor_sync(vendor_fn);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let run_task = tokio::spawn(engine.run(cmd_rx, 3600));
+
+        // The startup tick runs a cycle, then triggers the vendor run.
+        tokio::time::timeout(std::time::Duration::from_secs(5), vendor_started.notified())
+            .await
+            .expect("the vendor sync was never triggered");
+        assert_eq!(vendor_calls.load(Ordering::SeqCst), 1);
+
+        // First CycleComplete (from the startup tick) is already queued.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no CycleComplete from the startup cycle");
+        assert!(matches!(first, Some(SyncEngineEvent::CycleComplete { .. })));
+
+        // While the vendor run is still blocked, Sync Now must be
+        // processed and its cycle must complete.
+        cmd_tx.send(SyncCommand::SyncNow).await.unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("Sync Now was blocked behind the running vendor sync");
+        // A QuantityUpdated could precede it only if quantities moved;
+        // they agree here, so the next event is the cycle's completion —
+        // but skip anything else defensively until CycleComplete arrives.
+        let mut event = second;
+        while !matches!(event, Some(SyncEngineEvent::CycleComplete { .. })) {
+            event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("Sync Now cycle never completed behind the vendor run");
+        }
+
+        assert_eq!(
+            vendor_calls.load(Ordering::SeqCst),
+            1,
+            "a second vendor run must not be spawned while one is in flight"
+        );
+
+        vendor_release.notify_one();
+        run_task.abort();
     }
 }
