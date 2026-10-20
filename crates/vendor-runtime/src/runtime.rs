@@ -13,7 +13,9 @@ use deno_core::{
 use deno_error::JsErrorBox;
 use tracing::debug;
 
-use crate::ops::{BatchCallback, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult};
+use crate::ops::{
+    BatchCallback, BlockPrivateHosts, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult,
+};
 use crate::types::{PluginMetadata, VendorListing};
 
 /// Custom module loader that transpiles TypeScript on the fly.
@@ -124,6 +126,10 @@ pub struct PluginLimits {
     pub max_output_bytes: usize,
     /// Ceiling on any single `Nisaba.fetch` response body.
     pub max_response_bytes: usize,
+    /// Test-fixture escape hatch: permit `Nisaba.fetch` to hosts resolving to
+    /// loopback/private/link-local addresses, so fake servers on 127.0.0.1 can
+    /// serve responses. Always `false` in production — the SSRF guard is on.
+    pub allow_private_fetch: bool,
 }
 
 impl Default for PluginLimits {
@@ -135,6 +141,7 @@ impl Default for PluginLimits {
             max_heap_bytes: 1024 * 1024 * 1024,
             max_output_bytes: 256 * 1024 * 1024,
             max_response_bytes: 64 * 1024 * 1024,
+            allow_private_fetch: false,
         }
     }
 }
@@ -147,6 +154,7 @@ impl PluginLimits {
             max_heap_bytes: 128 * 1024 * 1024,
             max_output_bytes: 1024 * 1024,
             max_response_bytes: 1024 * 1024,
+            allow_private_fetch: false,
         }
     }
 }
@@ -299,6 +307,7 @@ impl VendorRuntime {
             None,
             &PluginLimits::metadata(),
             FetchPolicy::Deny,
+            false,
         )
         .await?;
 
@@ -354,6 +363,7 @@ impl VendorRuntime {
             batch_callback,
             limits,
             fetch_policy,
+            limits.allow_private_fetch,
         )
         .await?;
 
@@ -380,6 +390,7 @@ impl VendorRuntime {
         batch_callback: Option<BatchCallback>,
         limits: &PluginLimits,
         fetch_policy: FetchPolicy,
+        allow_private_fetch: bool,
     ) -> Result<JsRuntime> {
         tokio::fs::write(wrapper_path, wrapper_code).await?;
 
@@ -421,6 +432,9 @@ impl VendorRuntime {
             });
             op_state.put(MaxResponseBytes(limits.max_response_bytes));
             op_state.put(fetch_policy);
+            // The SSRF guard is on unless the caller explicitly opted out for
+            // loopback test fixtures (`PluginLimits::allow_private_fetch`).
+            op_state.put(BlockPrivateHosts(!allow_private_fetch));
             if let Some(cb) = batch_callback {
                 op_state.put(cb);
             }

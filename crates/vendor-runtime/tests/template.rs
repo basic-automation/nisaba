@@ -6,12 +6,21 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
-use nisaba_vendor_runtime::{BatchCallback, VendorRuntime};
+use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
 
 fn template_source() -> String {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/template/index.ts");
     std::fs::read_to_string(path).unwrap()
+}
+
+/// Fixture-server tests bind 127.0.0.1, which the production SSRF guard refuses;
+/// this is the explicit test opt-out (`allow_private_fetch`).
+fn fixture_limits() -> PluginLimits {
+    PluginLimits {
+        allow_private_fetch: true,
+        ..PluginLimits::default()
+    }
 }
 
 /// The template aimed at a loopback server instead of api.example.com.
@@ -134,10 +143,11 @@ async fn the_template_imports_a_paged_catalog() {
     let counter = batches.clone();
     let cb = BatchCallback(Box::new(move |_| *counter.lock().unwrap() += 1));
 
-    let listings = VendorRuntime::execute_plugin_from_files(
+    let listings = VendorRuntime::execute_plugin_from_files_with_limits(
         &template_against(port),
         config("k-123"),
         Some(cb),
+        fixture_limits(),
     )
     .await
     .unwrap();
@@ -185,16 +195,25 @@ async fn the_template_imports_a_paged_catalog() {
 
 #[tokio::test]
 async fn the_template_explains_a_missing_or_rejected_key() {
-    let err = VendorRuntime::execute_plugin_from_files(&template_against(1), config("  "), None)
-        .await
-        .unwrap_err();
+    let err = VendorRuntime::execute_plugin_from_files_with_limits(
+        &template_against(1),
+        config("  "),
+        None,
+        fixture_limits(),
+    )
+    .await
+    .unwrap_err();
     assert!(format!("{err:#}").contains("Set an API key"), "{err:#}");
 
     let (port, _) = fake_api(|_, _| (401, "", String::new()));
-    let err =
-        VendorRuntime::execute_plugin_from_files(&template_against(port), config("bad"), None)
-            .await
-            .unwrap_err();
+    let err = VendorRuntime::execute_plugin_from_files_with_limits(
+        &template_against(port),
+        config("bad"),
+        None,
+        fixture_limits(),
+    )
+    .await
+    .unwrap_err();
     assert!(
         format!("{err:#}").contains("rejected the API key"),
         "{err:#}"

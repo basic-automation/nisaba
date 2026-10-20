@@ -8,7 +8,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nisaba_vendor_runtime::{BatchCallback, VendorListing, VendorRuntime};
+use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorListing, VendorRuntime};
 
 const METADATA: &str = r#"export const metadata = { name: "fixture", version: "1.0.0" };"#;
 
@@ -22,7 +22,14 @@ async fn run_with(
     cb: Option<BatchCallback>,
 ) -> anyhow::Result<Vec<VendorListing>> {
     let code = format!("{METADATA}\nexport async function fetchListings(config) {{ {body} }}");
-    VendorRuntime::execute_plugin(&code, config, cb).await
+    let files = HashMap::from([("index.ts".to_string(), code)]);
+    // Fixture servers bind 127.0.0.1, which the production SSRF guard refuses;
+    // this helper is the explicit test opt-out (`allow_private_fetch`).
+    let limits = PluginLimits {
+        allow_private_fetch: true,
+        ..PluginLimits::default()
+    };
+    VendorRuntime::execute_plugin_from_files_with_limits(&files, config, cb, limits).await
 }
 
 fn listing(id: &str) -> String {

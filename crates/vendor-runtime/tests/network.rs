@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nisaba_vendor_runtime::{FetchPolicy, VendorRuntime};
+use nisaba_vendor_runtime::{FetchPolicy, PluginLimits, VendorRuntime};
 
 /// A loopback server that answers every connection with `response` and records whether
 /// it was ever contacted.
@@ -54,7 +54,28 @@ fn redirect_to(location: String) -> impl Fn(u16) -> String {
 
 /// Run a plugin with the given `allowed_hosts` literal (or none) that fetches `url` and
 /// reports either the body or the error message.
+///
+/// The fixture servers live on loopback, so the SSRF guard is opted out here via
+/// `PluginLimits::allow_private_fetch` — production never sets it. Tests that assert
+/// the guard's behavior use `fetch_as_guarded` instead.
 async fn fetch_as(allowed_hosts: Option<&str>, url: &str) -> (String, String) {
+    let limits = PluginLimits {
+        allow_private_fetch: true,
+        ..Default::default()
+    };
+    fetch_with_limits(allowed_hosts, url, limits).await
+}
+
+/// Like `fetch_as`, but with production limits: the post-DNS SSRF guard is on.
+async fn fetch_as_guarded(allowed_hosts: Option<&str>, url: &str) -> (String, String) {
+    fetch_with_limits(allowed_hosts, url, PluginLimits::default()).await
+}
+
+async fn fetch_with_limits(
+    allowed_hosts: Option<&str>,
+    url: &str,
+    limits: PluginLimits,
+) -> (String, String) {
     let hosts = allowed_hosts
         .map(|h| format!("allowed_hosts: {h},"))
         .unwrap_or_default();
@@ -69,9 +90,11 @@ async fn fetch_as(allowed_hosts: Option<&str>, url: &str) -> (String, String) {
                }}
            }}"#
     );
-    let listings = VendorRuntime::execute_plugin(&code, HashMap::new(), None)
-        .await
-        .unwrap();
+    let files = HashMap::from([("index.ts".to_string(), code)]);
+    let listings =
+        VendorRuntime::execute_plugin_from_files_with_limits(&files, HashMap::new(), None, limits)
+            .await
+            .unwrap();
     (
         listings[0].vendor_item_id.clone(),
         listings[0].title.clone(),
@@ -119,6 +142,44 @@ async fn a_plugin_without_an_allowlist_is_unrestricted() {
     let server = serve(ok("legacy"));
     let (kind, body) = fetch_as(None, &format!("http://127.0.0.1:{}/", server.port)).await;
     assert_eq!((kind.as_str(), body.as_str()), ("ok", "legacy"));
+}
+
+#[tokio::test]
+async fn a_loopback_literal_is_refused_after_dns_resolution() {
+    // The allowlist names 127.0.0.1 — the host-name check passes — but the post-DNS
+    // SSRF guard refuses loopback anyway, before any connection is made.
+    let server = serve(ok("secret"));
+    let (kind, msg) = fetch_as_guarded(
+        Some(r#"["127.0.0.1"]"#),
+        &format!("http://127.0.0.1:{}/", server.port),
+    )
+    .await;
+    assert_eq!(kind, "err");
+    assert!(msg.contains("non-public"), "{msg}");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !server.contacted.load(Ordering::SeqCst),
+        "the refused loopback host was contacted"
+    );
+}
+
+#[tokio::test]
+async fn a_hostname_resolving_to_loopback_is_refused() {
+    // `localhost` resolves via /etc/hosts to 127.0.0.1 — the name-based allowlist
+    // cannot tell, but the post-DNS check can.
+    let server = serve(ok("secret"));
+    let (kind, msg) = fetch_as_guarded(
+        Some(r#"["localhost"]"#),
+        &format!("http://localhost:{}/", server.port),
+    )
+    .await;
+    assert_eq!(kind, "err");
+    assert!(msg.contains("non-public"), "{msg}");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !server.contacted.load(Ordering::SeqCst),
+        "the refused loopback host was contacted"
+    );
 }
 
 #[tokio::test]

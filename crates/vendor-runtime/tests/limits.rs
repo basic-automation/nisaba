@@ -17,6 +17,7 @@ fn tight() -> PluginLimits {
         max_heap_bytes: 64 * 1024 * 1024,
         max_output_bytes: 4 * 1024,
         max_response_bytes: 16 * 1024,
+        allow_private_fetch: false,
     }
 }
 
@@ -214,13 +215,17 @@ fn serve_body(size: usize, declare_length: bool) -> String {
 }
 
 async fn fetch_size(url: &str) -> anyhow::Result<Vec<VendorListing>> {
+    let limits = PluginLimits {
+        allow_private_fetch: true,
+        ..tight()
+    };
     run(
         &format!(
             r#"try {{ const r = await Nisaba.fetch("{url}");
                      return [{{ vendor_item_id: "len", title: String(r.text().length) }}]; }}
                catch (e) {{ return [{{ vendor_item_id: "err", title: e.message }}]; }}"#
         ),
-        tight(),
+        limits,
         None,
     )
     .await

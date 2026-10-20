@@ -575,7 +575,7 @@ write surfaces as `Err`.
       the new code. A new version that drops `allowed_hosts` therefore becomes
       Unrestricted without anyone seeing the badge. A changed code hash or allowlist must
       reset the plugin to pending and show the diff, and the run paths must check status.
-- [ ] Host-side fetches bypass the plugin allowlist. `cache_images` (`commands/images.rs`
+- [x] Host-side fetches bypass the plugin allowlist. `cache_images` (`commands/images.rs`
       ~190–265) fetches any URL the webview hands it, including plugin `image_url` values
       and variants received from peers, with no host filter and no size cap
       (`resp.bytes()`), and writes the result to disk. Separately, `FetchPolicy`

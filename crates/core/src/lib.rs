@@ -4,6 +4,7 @@ pub mod conflict;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod net_guard;
 pub mod sync_engine;
 pub mod traits;
 pub mod types;
