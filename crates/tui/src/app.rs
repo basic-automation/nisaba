@@ -554,12 +554,6 @@ fn build_config_fields(config: &AppConfig) -> Vec<ConfigField> {
             secret: false,
         },
         ConfigField {
-            label: "Log Level".into(),
-            key: "general.log_level".into(),
-            value: config.general.log_level.clone(),
-            secret: false,
-        },
-        ConfigField {
             label: "Database Path".into(),
             key: "database.path".into(),
             value: config.database.path.clone(),

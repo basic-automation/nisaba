@@ -1462,7 +1462,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
         so import revives them as active and the engine pushes to them.
       `ExportData` lives in `core/src/types.rs` (~397) and is built in
       `tauri-app/src/commands/export_import.rs`. It has no tests.
-- [ ] Config settings that do nothing, and a save that writes secrets:
+- [x] Config settings that do nothing, and a save that writes secrets:
       - `build_adapter_config` (`main.rs` ~450–457) resets every platform section, so
         `[ebay]`, `[squarespace]`, `[xmrbazaar]` (including `endpoints`) and `[amazon]` in
         `config.toml` are ignored by the app;

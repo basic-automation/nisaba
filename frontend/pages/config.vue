@@ -390,16 +390,6 @@ async function handleToggleDropship(include: boolean) {
             <input v-model="editConfig.general.sync_schedule" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:border-accent/50 transition-colors">
           </div>
           <div>
-            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Log level</label>
-            <select v-model="editConfig.general.log_level" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors appearance-none">
-              <option value="error" class="bg-background">Error</option>
-              <option value="warn" class="bg-background">Warn</option>
-              <option value="info" class="bg-background">Info</option>
-              <option value="debug" class="bg-background">Debug</option>
-              <option value="trace" class="bg-background">Trace</option>
-            </select>
-          </div>
-          <div>
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Max retries</label>
             <input v-model.number="editConfig.general.max_retries" type="number" min="0" max="10" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
           </div>

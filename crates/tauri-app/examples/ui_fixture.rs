@@ -39,7 +39,6 @@ async fn main() {
             r#"# Throwaway UI-test install. Every platform is disabled.
 [general]
 sync_schedule = "0 */600 * * * *"
-log_level = "info"
 max_retries = 0
 
 [database]

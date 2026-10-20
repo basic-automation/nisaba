@@ -42,18 +42,12 @@ pub struct AppConfig {
 pub struct GeneralConfig {
     #[serde(default = "default_sync_schedule")]
     pub sync_schedule: String,
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
 }
 
 fn default_sync_schedule() -> String {
     "0 */5 * * * *".to_string()
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
 }
 
 fn default_max_retries() -> u32 {
@@ -263,12 +257,24 @@ impl AppConfig {
     }
 
     /// Save current config to a TOML file.
+    ///
+    /// The write is atomic — the content goes to a temporary file in the same
+    /// directory, which is then renamed over the target — so a crash can never
+    /// leave a half-written `config.toml` behind. On Unix the new file is
+    /// created with `0600` permissions (owner read/write only); renaming over
+    /// an existing file replaces its permissions too.
+    ///
+    /// Values currently sourced from `NISABA_*` environment variables are
+    /// never written back: they are stripped from the serialized document
+    /// first, so a save cannot persist an env-provided secret (for example
+    /// `NISABA_EBAY__CLIENT_SECRET`) to disk in plaintext.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), SyncError> {
+        let mut doc =
+            toml::Value::try_from(self).map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        strip_env_sourced(&mut doc);
         let content =
-            toml::to_string_pretty(self).map_err(|e| SyncError::ConfigError(e.to_string()))?;
-        std::fs::write(path.as_ref(), content)
-            .map_err(|e| SyncError::ConfigError(e.to_string()))?;
-        Ok(())
+            toml::to_string_pretty(&doc).map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        atomic_write_secure(path.as_ref(), content.as_bytes())
     }
 
     /// Create a default config. Database path is relative to the data directory.
@@ -280,7 +286,6 @@ impl AppConfig {
         Self {
             general: GeneralConfig {
                 sync_schedule: default_sync_schedule(),
-                log_level: default_log_level(),
                 max_retries: default_max_retries(),
             },
             database: DatabaseConfig { path: db_path },
@@ -306,15 +311,131 @@ fn dirs_fallback() -> Option<std::path::PathBuf> {
         })
 }
 
+/// Remove every value currently provided through a `NISABA_*` environment
+/// variable from a serialized config document.
+///
+/// This mirrors the mapping [`AppConfig::load`] uses —
+/// `Env::prefixed("NISABA_").split("__")` with figment's default lower-casing:
+/// the prefix is stripped, `__` becomes one nesting level, and the key is
+/// ASCII-lower-cased, so `NISABA_EBAY__CLIENT_SECRET` addresses
+/// `ebay.client_secret`. Variables figment itself would ignore (for example
+/// ones producing an empty path segment) are ignored here as well.
+fn strip_env_sourced(doc: &mut toml::Value) {
+    for path in env_sourced_key_paths() {
+        remove_dotted_path(doc, &path);
+    }
+}
+
+fn env_sourced_key_paths() -> Vec<Vec<String>> {
+    std::env::vars_os()
+        .filter(|(k, _)| !k.is_empty())
+        .filter_map(|(k, _)| {
+            let key = k.to_string_lossy();
+            let rest = key.trim().strip_prefix("NISABA_")?.trim();
+            let dotted = rest.replace("__", ".");
+            if dotted.split('.').any(|s| s.is_empty()) {
+                return None;
+            }
+            Some(
+                dotted
+                    .to_ascii_lowercase()
+                    .split('.')
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+fn remove_dotted_path(value: &mut toml::Value, path: &[String]) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut current = value;
+    for segment in parents {
+        match current {
+            toml::Value::Table(table) => match table.get_mut(segment) {
+                Some(next) => current = next,
+                None => return,
+            },
+            _ => return,
+        }
+    }
+    if let toml::Value::Table(table) = current {
+        table.remove(last);
+    }
+}
+
+/// Atomically write `content` to `path` with owner-only permissions.
+///
+/// The bytes go to a temporary file in the same directory (so the final
+/// rename is atomic on one filesystem). On Unix the temp file is restricted
+/// to `0600` *before* any bytes are written, so secrets are never briefly
+/// world-readable, then it is `fsync`ed and renamed over the target. The temp
+/// file is removed if any step fails.
+fn atomic_write_secure(path: &Path, content: &[u8]) -> Result<(), SyncError> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let tmp_name = format!(".{file_name}.tmp-{}", std::process::id());
+    let tmp_path = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(tmp_name),
+        _ => std::path::PathBuf::from(tmp_name),
+    };
+
+    let write = (|| {
+        let mut file =
+            std::fs::File::create(&tmp_path).map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        }
+        use std::io::Write;
+        file.write_all(content)
+            .map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        drop(file);
+        std::fs::rename(&tmp_path, path).map_err(|e| SyncError::ConfigError(e.to_string()))?;
+        Ok::<(), SyncError>(())
+    })();
+
+    if write.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sets an env var for the duration of a test, removing it on drop so a
+    /// panic cannot leak it into other tests running in the same process.
+    struct EnvGuard {
+        key: &'static str,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            std::env::set_var(key, value);
+            Self { key }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.key);
+        }
+    }
 
     #[test]
     fn test_load_example_config() {
         let config = AppConfig::load("../../config.example.toml").unwrap();
         assert_eq!(config.general.sync_schedule, "0 */5 * * * *");
-        assert_eq!(config.general.log_level, "info");
         assert_eq!(config.general.max_retries, 3);
         assert_eq!(config.database.path, "./nisaba.db");
         assert!(config.ebay.enabled);
@@ -329,5 +450,105 @@ mod tests {
         let config = AppConfig::load("../../config.example.toml").unwrap();
         let serialized = toml::to_string_pretty(&config).unwrap();
         let _: AppConfig = toml::from_str(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_save_does_not_persist_env_sourced_secret() {
+        // A secret merged in from NISABA_* at load time must never be written
+        // back to config.toml.
+        let _guard = EnvGuard::set("NISABA_EBAY__CLIENT_SECRET", "env-supplied-super-secret");
+        let config = AppConfig::load("../../config.example.toml").unwrap();
+        assert_eq!(config.ebay.client_secret, "env-supplied-super-secret");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("env-supplied-super-secret"),
+            "env-sourced secret was persisted to {}",
+            path.display()
+        );
+
+        // Loading the saved file still resolves the secret from the
+        // environment — stripping only affected what hit the disk.
+        let reloaded = AppConfig::load(&path).unwrap();
+        assert_eq!(reloaded.ebay.client_secret, "env-supplied-super-secret");
+    }
+
+    #[test]
+    fn test_save_does_not_persist_env_sourced_non_secret_values() {
+        // The rule is not limited to secrets: no NISABA_*-sourced value may be
+        // written back.
+        let _guard = EnvGuard::set("NISABA_EBAY__ENVIRONMENT", "production");
+        let config = AppConfig::load("../../config.example.toml").unwrap();
+        assert_eq!(config.ebay.environment, "production");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("environment = \"production\""),
+            "env-sourced value was persisted to {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn test_save_roundtrip_keeps_user_values() {
+        let mut config = AppConfig::load("../../config.example.toml").unwrap();
+        config.general.sync_schedule = "0 */10 * * * *".to_string();
+        config.alerts.default_low_stock_threshold = 9;
+        config.squarespace.api_key = "file-api-key".to_string();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+
+        let reloaded = AppConfig::load(&path).unwrap();
+        assert_eq!(reloaded.general.sync_schedule, "0 */10 * * * *");
+        assert_eq!(reloaded.alerts.default_low_stock_threshold, 9);
+        assert_eq!(reloaded.squarespace.api_key, "file-api-key");
+
+        // Atomic write leaves no temp files behind.
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].as_ref().unwrap().file_name().to_str(),
+            Some("config.toml")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_save_creates_file_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        AppConfig::default_config().save(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "saved config.toml must be owner-only");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_save_tightens_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Simulate a config.toml created earlier with lax permissions.
+        std::fs::write(&path, "[general]\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        AppConfig::default_config().save(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "re-saving must tighten existing permissions");
     }
 }

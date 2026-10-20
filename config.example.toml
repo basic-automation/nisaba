@@ -1,6 +1,5 @@
 [general]
 sync_schedule = "0 */5 * * * *"    # Every 5 minutes
-log_level = "info"
 max_retries = 3
 
 [database]
