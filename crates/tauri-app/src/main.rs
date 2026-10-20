@@ -414,7 +414,7 @@ async fn init_company_context(
         })
     }));
 
-    let interval_secs = parse_interval(&config.general.sync_schedule);
+    let interval_secs = configured_interval_secs(&config.general.sync_schedule);
 
     // Spawn sync engine
     tokio::spawn(engine.run(cmd_rx, interval_secs));
@@ -516,17 +516,19 @@ fn build_adapter_config(base: &AppConfig, company_config: &Option<serde_json::Va
     config
 }
 
-/// Parse the sync schedule string to an interval in seconds.
-/// Supports "0 */N * * * *" format or falls back to 300s (5min).
-fn parse_interval(schedule: &str) -> u64 {
-    let parts: Vec<&str> = schedule.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let minute_part = parts[1];
-        if let Some(stripped) = minute_part.strip_prefix("*/") {
-            if let Ok(minutes) = stripped.parse::<u64>() {
-                return minutes * 60;
-            }
+/// Resolve a sync schedule string to the engine interval in seconds.
+///
+/// Saving config through the app validates the schedule and rejects
+/// anything unsupported (including `*/0`), so this fallback only guards
+/// startup against a hand-edited `config.toml`: log the problem and run on
+/// the default interval rather than refusing to start — or worse, handing
+/// the engine a zero period that would panic its timer and kill the task.
+fn configured_interval_secs(schedule: &str) -> u64 {
+    match nisaba_core::config::parse_sync_interval(schedule) {
+        Ok(secs) => secs,
+        Err(e) => {
+            warn!("{e}; falling back to the default sync interval");
+            nisaba_core::config::DEFAULT_SYNC_INTERVAL_SECS
         }
     }
-    300 // default 5 minutes
 }
