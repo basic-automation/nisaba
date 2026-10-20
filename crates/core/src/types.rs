@@ -403,6 +403,133 @@ pub struct NewSyncEvent<'a> {
     pub error_message: Option<&'a str>,
 }
 
+/// The kind of a stock-ledger event. Every stock change is recorded as one of
+/// these with a unique key; canonical quantity per variant is the sum of its
+/// events' deltas (N-4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StockEventKind {
+    /// Backfilled starting balance: one per variant, keyed `opening:<variant_id>`.
+    Opening,
+    /// Units sold on a platform, keyed `sale:<platform>:<order_id>`.
+    Sale,
+    /// Stock added back (purchase order received, returns, ...).
+    Restock,
+    /// Manual user adjustment (positive or negative delta).
+    Adjustment,
+    /// Vendor plugin inventory sync pushed into canonical stock.
+    VendorUpdate,
+}
+
+impl StockEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StockEventKind::Opening => "opening",
+            StockEventKind::Sale => "sale",
+            StockEventKind::Restock => "restock",
+            StockEventKind::Adjustment => "adjustment",
+            StockEventKind::VendorUpdate => "vendor_update",
+        }
+    }
+
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s {
+            "opening" => Some(StockEventKind::Opening),
+            "sale" => Some(StockEventKind::Sale),
+            "restock" => Some(StockEventKind::Restock),
+            "adjustment" => Some(StockEventKind::Adjustment),
+            "vendor_update" => Some(StockEventKind::VendorUpdate),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for StockEventKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One uniquely keyed stock event in the ledger (`stock_ledger` table).
+///
+/// `event_key` is the idempotency key: sales are keyed by platform + order id,
+/// every other kind carries a UUID (or the deterministic `opening:<variant_id>`
+/// for backfilled starting balances). Re-recording an event with an existing
+/// key is a no-op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StockEvent {
+    pub id: i64,
+    pub event_key: String,
+    pub product_id: String,
+    pub variant_id: String,
+    pub kind: StockEventKind,
+    pub delta: i64,
+    pub platform: Option<String>,
+    pub source_order_id: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+impl StockEvent {
+    /// A sale of `units_sold` on `platform` for `order_id`. Recording the same
+    /// order twice is a no-op because the key is deterministic.
+    pub fn sale(
+        platform: &str,
+        order_id: &str,
+        product_id: &str,
+        variant_id: &str,
+        units_sold: i64,
+    ) -> Self {
+        Self {
+            id: 0,
+            event_key: format!("sale:{platform}:{order_id}"),
+            product_id: product_id.to_string(),
+            variant_id: variant_id.to_string(),
+            kind: StockEventKind::Sale,
+            delta: -units_sold,
+            platform: Some(platform.to_string()),
+            source_order_id: Some(order_id.to_string()),
+            note: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// A restock, manual adjustment or vendor update with a fresh UUID key.
+    /// Callers that need a deterministic key (e.g. retries) should set
+    /// `event_key` themselves after construction.
+    pub fn keyed(kind: StockEventKind, product_id: &str, variant_id: &str, delta: i64) -> Self {
+        Self {
+            id: 0,
+            event_key: uuid::Uuid::new_v4().to_string(),
+            product_id: product_id.to_string(),
+            variant_id: variant_id.to_string(),
+            kind,
+            delta,
+            platform: None,
+            source_order_id: None,
+            note: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// The backfilled starting balance for a variant. The migration writes these
+    /// as SQL; this constructor is for tests and manual repair.
+    pub fn opening(product_id: &str, variant_id: &str, quantity: i64) -> Self {
+        Self {
+            id: 0,
+            event_key: format!("opening:{variant_id}"),
+            product_id: product_id.to_string(),
+            variant_id: variant_id.to_string(),
+            kind: StockEventKind::Opening,
+            delta: quantity,
+            platform: None,
+            source_order_id: None,
+            note: None,
+            created_at: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportData {
     pub version: u32,
