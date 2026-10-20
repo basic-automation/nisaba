@@ -102,6 +102,12 @@ pub struct PlatformSnapshot {
     pub id: i64,
     pub product_id: String,
     pub platform: Platform,
+    /// Which product variant this snapshot belongs to. Snapshots are keyed
+    /// per (product, platform, variant) so restock detection and pushes are
+    /// variant-aware. `None` (stored as `''`) means the product-level row.
+    /// `#[serde(default)]` keeps payloads from older peers deserializable.
+    #[serde(default)]
+    pub variant_id: Option<String>,
     pub last_known_quantity: i64,
     pub last_polled_at: String,
     pub last_pushed_at: Option<String>,

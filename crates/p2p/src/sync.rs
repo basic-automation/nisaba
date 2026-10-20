@@ -370,9 +370,18 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
 
     // ── Platform Snapshots: newer last_polled_at wins ─────────
     let local_snapshots = db.list_all_snapshots().await?;
-    let local_snap_map: HashMap<(String, String), &PlatformSnapshot> = local_snapshots
+    let local_snap_map: HashMap<(String, String, String), &PlatformSnapshot> = local_snapshots
         .iter()
-        .map(|s| ((s.product_id.clone(), s.platform.as_str().to_string()), s))
+        .map(|s| {
+            (
+                (
+                    s.product_id.clone(),
+                    s.platform.as_str().to_string(),
+                    s.variant_id.clone().unwrap_or_default(),
+                ),
+                s,
+            )
+        })
         .collect();
 
     for remote_snap in &remote.platform_snapshots {
@@ -385,9 +394,11 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         ) {
             continue;
         }
+        let vkey = remote_snap.variant_id.clone().unwrap_or_default();
         let key = (
             remote_snap.product_id.clone(),
             remote_snap.platform.as_str().to_string(),
+            vkey,
         );
         let should_apply = match local_snap_map.get(&key) {
             Some(local) => remote_snap.last_polled_at > local.last_polled_at,
@@ -396,14 +407,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         if should_apply {
             // The same upsert `Db::upsert_snapshot` runs.
             writes.push((
-                "INSERT INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(product_id, platform) DO UPDATE
-                 SET last_known_quantity = ?3, last_polled_at = ?4"
+                "INSERT INTO platform_snapshots (product_id, platform, variant_id, last_known_quantity, last_polled_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(product_id, platform, variant_id) DO UPDATE
+                 SET last_known_quantity = ?4, last_polled_at = ?5"
                     .to_string(),
                 owned_params(params![
                     remote_snap.product_id.clone(),
                     remote_snap.platform.as_str(),
+                    remote_snap.variant_id.clone().unwrap_or_default(),
                     remote_snap.last_known_quantity,
                     remote_snap.last_polled_at.clone()
                 ]),

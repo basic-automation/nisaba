@@ -81,7 +81,7 @@ async fn seed_peer_a(db: &Db) {
     db.insert_mapping("p1", "ebay", "ITEM-1", Some("CAN-OD"), "v1")
         .await
         .unwrap();
-    db.upsert_snapshot("p1", "ebay", 7, "2026-09-25 12:00:00")
+    db.upsert_snapshot("p1", "ebay", None, 7, "2026-09-25 12:00:00")
         .await
         .unwrap();
     db.mark_xmr_order_processed("ord-1", Some("p1"), "L-1", 1)
@@ -174,7 +174,7 @@ async fn a_full_payload_round_trips_into_an_empty_peer() {
     assert!(*active && deleted_at.is_none());
 
     let snap = b
-        .get_snapshot("p1", "ebay")
+        .get_snapshot("p1", "ebay", None)
         .await
         .unwrap()
         .expect("snapshot merged");
