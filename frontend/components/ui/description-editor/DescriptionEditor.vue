@@ -140,7 +140,7 @@ function isActive(name: string, attrs?: Record<string, any>) {
         <!-- Plain text preview for XMR Bazaar -->
         <pre v-if="outputFormat === 'text'" class="desc-editor__preview-text">{{ previewText }}</pre>
         <!-- Rendered HTML preview for other platforms -->
-        <div v-else class="desc-editor__preview-html" v-html="model" />
+        <div v-else class="desc-editor__preview-html" v-html="sanitizeHtml(model)" />
       </template>
 
       <Button
