@@ -441,18 +441,19 @@ impl Db {
     /// Two things about the numbering are worth knowing before adding a step,
     /// because neither is obvious from `migrations/`:
     ///
+    /// * **A file-backed step's number is its schema version.** Step N runs
+    ///   when `version < N`, and a step whose whole body is SQL lives in
+    ///   `migrations/NNN_<name>.sql` with that same N — the `NNN_` prefix and
+    ///   the `if version < N` gate must agree, so `migrations/` is the
+    ///   complete, unambiguous list of file-backed steps.
     /// * **Not every step has a `.sql` file, and the `008` gap is deliberate.**
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
-    ///   inline in Rust instead — `004` (company logo columns), `008` (repairing
-    ///   the columns migration 007 dropped when it rebuilt `platform_mappings`),
-    ///   `010`, `012`, `015`–`016` and `018`–`019` are all inline. `migrations/` holds only
-    ///   the steps whose whole body is SQL, so its filenames are not, and were
-    ///   never meant to be, a complete list.
-    /// * **A file's number is not its schema version.** The `NNN_` prefixes and
-    ///   `PRAGMA user_version` drifted apart as inline steps were added:
-    ///   `migrations/014_cached_platform_listings.sql` is applied at
-    ///   `version < 17`. The match arm below is the authority; the
-    ///   filename is a label.
+    ///   inline in Rust instead — `004` (company logo columns), `008`
+    ///   (repairing the columns migration 007 dropped when it rebuilt
+    ///   `platform_mappings`), `010`, `012`, `014`–`016` and `018`–`019` are
+    ///   all inline. The inline step is the single authority for these
+    ///   numbers: an orphan `.sql` file with an inline step's number must not
+    ///   exist (three such orphans were deleted by N-3.2).
     ///
     /// Adding a step means bumping [`CURRENT_SCHEMA_VERSION`] and appending a
     /// new match arm here. Never edit or renumber a step that shipped.
@@ -587,7 +588,7 @@ impl Db {
                         (),
                     )
                     .await;
-                debug!("Applied migration 012_variant_vendor_source.sql");
+                debug!("Applied migration 012: product_variants vendor source columns");
             }
             13 => {
                 conn.execute_batch(include_str!(
@@ -858,7 +859,7 @@ impl Db {
             }
             17 => {
                 conn.execute_batch(include_str!(
-                    "../../../migrations/014_cached_platform_listings.sql"
+                    "../../../migrations/017_cached_platform_listings.sql"
                 ))
                 .await?;
                 debug!("Applied migration 017: cached_platform_listings table");
