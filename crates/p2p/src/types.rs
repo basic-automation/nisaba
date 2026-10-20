@@ -150,6 +150,12 @@ pub struct SyncableVendorPlugin {
     pub icon: Option<String>,
     #[serde(default)]
     pub include_vendor_stock: bool,
+    /// The sender's cached fetch allowlist as JSON, computed from the plugin's files
+    /// (`["host", …]`, or JSON `null` for unrestricted). Carried so the receiver can
+    /// detect allowlist changes for re-approval; the receiver's own install path still
+    /// recomputes it from the files. `None` for payloads from older peers.
+    #[serde(default)]
+    pub allowed_hosts_json: Option<String>,
     pub updated_at: String,
 }
 
