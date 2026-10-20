@@ -768,10 +768,11 @@ is used only when no platform reports.
       recorded row, and the engine no longer calls it on unchanged cycles.
       `execute_write` runs the statement first, commits only on success (a failure
       rolls back), and returns the statement's affected-row count.
-- [ ] The vendor sync blocks the platform sync loop: the engine awaits the vendor run inline
+- [x] The vendor sync blocks the platform sync loop: the engine awaits the vendor run inline
+
       (`sync_engine.rs` ~736, ~750). Plugin limits now go up to 12 h, and Pause and Sync Now
       wait for the whole run. Run it as its own task.
-- [ ] `run_cycle` holds the adapters' read lock for the whole cycle, network retries
+- [x] `run_cycle` holds the adapters' read lock for the whole cycle, network retries
       included (~135–629), so saving config waits for the cycle to finish. Several
       commands (`listings.rs` ~66–76, `photos.rs`) hold it across fetches too. Clone the
       adapter handles out, then release the lock.
