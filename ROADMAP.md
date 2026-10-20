@@ -1282,34 +1282,91 @@ cost.
 
 ### Marketplace and storefront integrations
 
-Shipping today: eBay, Squarespace, XMR Bazaar, and Amazon (Beta for 1.0). Next candidates,
-in recommended order. All of them use per-store keys or tokens the customer creates
-themselves, so none needs a broker:
+Shipping today: eBay, Squarespace, XMR Bazaar, and Amazon (Beta for 1.0). Every candidate
+below uses keys or tokens the customer creates for their own account, so none needs a
+broker. Which ones are worth building depends on two facts this list does not have: where
+customers' sales actually come from, and whether they sell in person. Ask before building
+past the *Should* group.
+
+**Should** — clear fit for the current channels, in recommended order:
 
 - [ ] **Shopify** — the largest small-business storefront. The GraphQL Admin API has
       first-class inventory levels per location. A custom app created in the store's admin
       gives an access token with no app review. This is the strongest next adapter.
+- [ ] **Google Merchant Center** — sellers with their own store (Squarespace today) can
+      list its products in Google's free Shopping listings. Merchant Center disapproves
+      items whose availability does not match the store page, so accurate stock is exactly
+      what it needs. Build on the new Merchant API, not the Content API for Shopping it
+      replaces; check the Content API's sunset date first.
 - [ ] **WooCommerce** — self-hosted WordPress stores, using REST API keys generated in the
       store. It is common with sellers who take crypto (BTCPay Server has a WooCommerce
       plugin), which fits the XMR Bazaar audience.
+- [ ] **Square POS — if customers sell in person** (shows, a shop). A sale at a table is an
+      oversell Nisaba cannot see today. Square issues a personal access token for the
+      seller's own account, which fits bring-your-own keys. Square is unrelated to
+      Squarespace.
 - [ ] **Walmart Marketplace** — a large marketplace, but sellers must be approved by
       Walmart first. Its API keys are per seller.
-- [ ] Etsy only if the catalog fits. Etsy's seller policy is built around handmade,
-      vintage and craft supplies, so reselling a wholesale catalog such as Rothco's
-      is likely a policy problem rather than a technical one.
-- [ ] Other crypto-native marketplaces besides XMR Bazaar — ask current customers which
-      ones they actually sell on before building one.
-- [ ] Build the next one as a **marketplace plugin** rather than a new Rust crate (Phase 3,
+- [ ] Build these as **marketplace plugins** rather than new Rust crates (Phase 3,
       *Plugin kinds after 1.0*). A new marketplace then ships without an app release, and
       Shopify is the proof that the plugin bridge is general. This supersedes the
       "fifth adapter" item in Phase 2.
 
-### Ancillary integrations (plugin-shaped, after 1.0)
+**Could** — build when a customer actually sells there:
 
+- [ ] **BigCommerce** — a storefront like Shopify, with store-level API tokens.
+- [ ] **Meta (Facebook/Instagram) catalog** — catalog and availability sync only. Meta
+      moved US Shops checkout to sellers' own websites, so this channel sends traffic
+      rather than taking sales. Check the current state of Shops checkout before
+      building.
+- [ ] **TikTok Shop** — a growing channel, but it needs partner app approval, the same
+      risk that sank Nisaba's own Amazon application (*1.0 release*).
+- [ ] **BTCPay Server store and point-of-sale apps** — a crypto-native storefront that
+      tracks item inventory; the audience matches XMR Bazaar's. Confirm that the Greenfield
+      API exposes item inventory for read and write.
+- [ ] **GunBroker** — only if customers' catalogs lean toward tactical accessories. It has
+      an API.
+- [ ] Other crypto-native marketplaces besides XMR Bazaar — ask current customers which
+      ones they sell on.
+
+**Not building, and why:**
+
+- **Mercari and Poshmark** — neither offers a public API for sellers, and automating
+  their apps would break their terms.
+- **Etsy** — its seller policy is built around handmade, vintage and craft supplies, so
+  reselling a wholesale catalog such as Rothco's is a policy problem, not a technical one.
+  Revisit only for a customer whose catalog qualifies.
+- **Faire** — a marketplace for selling *to* retailers at wholesale; Nisaba's customers
+  buy at wholesale and sell at retail.
+
+### Ancillary integrations
+
+**Should:**
+
+- [ ] **A generic CSV/XML feed vendor plugin**, built in, with a screen that maps a
+      supplier's columns to `VendorListing` fields and reads the feed over a URL or SFTP.
+      Most wholesalers publish a feed rather than an API, so this covers suppliers without
+      anyone writing a plugin. It depends on Phase 3's feed-supplier item (`parseCsv`,
+      `parseXml`, the SFTP decision).
+- [ ] **Off-site encrypted backups**, to a destination the customer chooses: an
+      S3-compatible bucket (e.g. Backblaze B2) or a folder synced elsewhere (a NAS,
+      Syncthing). Encrypt with a key the customer holds before anything leaves the machine.
+      Local backups are a 1.0 gate (*Gate: data safety*); this is the step after.
 - [ ] Notifications — low stock, an oversell incident, credentials about to expire, sync
       failing — to ntfy, email, Matrix, Slack or Discord (Phase 3, notification plugins).
 - [ ] Dropship ordering with suppliers that support it, starting with Rothco (Phase 3,
       order plugins).
+
+**Could:**
+
+- [ ] **UPC/product-data lookup** — fill in brand, MPN, images and dimensions when creating
+      a listing from a bare UPC. These are paid APIs with per-customer keys.
+- [ ] **Shipping labels** (Shippo, EasyPost, ShipStation) and **accounting** (QuickBooks,
+      Xero) — these would turn Nisaba into an order-management tool, which is a product
+      decision more than an integration. If accounting is wanted, start with a CSV export
+      of sales and stock valuation rather than an API integration; QuickBooks and Xero
+      both require app review for production access, the hurdle the Amazon application
+      failed.
 
 ## Cross-cutting
 
