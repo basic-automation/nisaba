@@ -46,8 +46,67 @@ pub struct GeneralConfig {
     pub max_retries: u32,
 }
 
+/// The schedule used when none is configured: sync every five minutes.
+pub const DEFAULT_SYNC_SCHEDULE: &str = "0 */5 * * * *";
+
+/// Interval (in seconds) the sync engine falls back to when the configured
+/// schedule cannot be parsed — e.g. a hand-edited `config.toml`. Saving a
+/// config with an invalid schedule is rejected instead (see
+/// [`parse_sync_interval`]); this fallback only guards startup paths, so a
+/// bad stored value can never stop the engine from running.
+pub const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300;
+
 fn default_sync_schedule() -> String {
-    "0 */5 * * * *".to_string()
+    DEFAULT_SYNC_SCHEDULE.to_string()
+}
+
+/// Parse a sync schedule into the interval between sync cycles, in seconds.
+///
+/// The only supported form is `0 */N * * * *` — a cron expression whose
+/// minute field steps every `N` minutes and whose other fields are fixed.
+/// Anything else is rejected rather than silently reinterpreted: a cron
+/// string the engine does not understand must surface as an error at save
+/// time, not as a surprise interval — and `*/0` must never reach the
+/// engine, where a zero period panics `tokio::time::interval` and kills
+/// the sync task.
+pub fn parse_sync_interval(schedule: &str) -> Result<u64, SyncError> {
+    let invalid = |reason: &str| {
+        SyncError::ConfigError(format!(
+            "Invalid sync schedule {schedule:?}: {reason}. \
+             Use the form \"0 */N * * * *\" with N a whole number of minutes (at least 1)."
+        ))
+    };
+
+    let parts: Vec<&str> = schedule.split_whitespace().collect();
+    if parts.len() != 6 {
+        return Err(invalid("expected 6 cron fields"));
+    }
+    if parts[0] != "0" {
+        return Err(invalid("the seconds field must be 0"));
+    }
+    let Some(step) = parts[1].strip_prefix("*/") else {
+        return Err(invalid("the minute field must be */N"));
+    };
+    let minutes: u64 = step
+        .parse()
+        .map_err(|_| invalid("the minute step N is not a whole number"))?;
+    if minutes == 0 {
+        return Err(invalid("the interval must not be zero"));
+    }
+    if parts[2..].iter().any(|field| *field != "*") {
+        return Err(invalid("the hour, day, month and weekday fields must be *"));
+    }
+    minutes
+        .checked_mul(60)
+        .ok_or_else(|| invalid("the interval is too large"))
+}
+
+impl GeneralConfig {
+    /// The configured sync interval in seconds, or an error describing why
+    /// the schedule is not one the sync engine supports.
+    pub fn sync_interval_secs(&self) -> Result<u64, SyncError> {
+        parse_sync_interval(&self.sync_schedule)
+    }
 }
 
 fn default_max_retries() -> u32 {
@@ -256,7 +315,23 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Check the config values the rest of the app relies on being sane.
+    ///
+    /// Currently this validates the sync schedule: it must name an interval
+    /// the sync engine actually supports (see [`parse_sync_interval`]).
+    /// Loading stays permissive — a hand-edited `config.toml` with a bad
+    /// schedule still loads, and the engine falls back to
+    /// [`DEFAULT_SYNC_INTERVAL_SECS`] — but saving such a config is
+    /// rejected so the bad value is fixed instead of persisted.
+    pub fn validate(&self) -> Result<(), SyncError> {
+        self.general.sync_interval_secs()?;
+        Ok(())
+    }
+
     /// Save current config to a TOML file.
+    ///
+    /// The config is validated first ([`AppConfig::validate`]); an invalid
+    /// config is rejected and nothing is written.
     ///
     /// The write is atomic — the content goes to a temporary file in the same
     /// directory, which is then renamed over the target — so a crash can never
@@ -269,6 +344,7 @@ impl AppConfig {
     /// first, so a save cannot persist an env-provided secret (for example
     /// `NISABA_EBAY__CLIENT_SECRET`) to disk in plaintext.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), SyncError> {
+        self.validate()?;
         let mut doc =
             toml::Value::try_from(self).map_err(|e| SyncError::ConfigError(e.to_string()))?;
         strip_env_sourced(&mut doc);
@@ -550,5 +626,78 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "re-saving must tighten existing permissions");
+    }
+
+    #[test]
+    fn test_parse_sync_interval_accepts_supported_forms() {
+        assert_eq!(parse_sync_interval("0 */1 * * * *").unwrap(), 60);
+        assert_eq!(parse_sync_interval("0 */5 * * * *").unwrap(), 300);
+        assert_eq!(parse_sync_interval("0 */10 * * * *").unwrap(), 600);
+        assert_eq!(parse_sync_interval("0 */60 * * * *").unwrap(), 3600);
+        assert_eq!(parse_sync_interval("0 */1440 * * * *").unwrap(), 86_400);
+        // Surrounding and repeated whitespace is fine.
+        assert_eq!(parse_sync_interval("  0   */5   * * * * ").unwrap(), 300);
+        // The default schedule is a supported form.
+        assert_eq!(
+            AppConfig::default_config()
+                .general
+                .sync_interval_secs()
+                .unwrap(),
+            DEFAULT_SYNC_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn test_parse_sync_interval_rejects_zero() {
+        // */0 used to produce a 0 s period that panicked
+        // tokio::time::interval and killed the sync engine task.
+        let err = parse_sync_interval("0 */0 * * * *").unwrap_err();
+        assert!(
+            err.to_string().contains("must not be zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_sync_interval_rejects_garbage() {
+        for schedule in [
+            "garbage",
+            "",
+            "every five minutes",
+            "*/5 * * * *",      // missing the seconds field
+            "0 */5 * * *",      // too few fields
+            "0 */5 * * * * *",  // too many fields
+            "5 */5 * * * *",    // seconds field must be 0
+            "0 5 * * * *",      // minute field must be */N
+            "0 */five * * * *", // N must be a number
+            "0 */-5 * * * *",   // N must be unsigned
+            "0 */5 2 * * *",    // hour field must be *
+            "0 */5 * * * MON",  // weekday field must be *
+        ] {
+            assert!(
+                parse_sync_interval(schedule).is_err(),
+                "schedule {schedule:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_rejects_invalid_sync_schedule() {
+        for schedule in ["0 */0 * * * *", "not a schedule"] {
+            let mut config = AppConfig::default_config();
+            config.general.sync_schedule = schedule.to_string();
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let err = config.save(&path).unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid sync schedule"),
+                "unexpected error for {schedule:?}: {err}"
+            );
+            assert!(
+                !path.exists(),
+                "an invalid config must not be written to disk"
+            );
+        }
     }
 }

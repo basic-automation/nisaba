@@ -33,6 +33,15 @@ pub async fn get_xmrbazaar_monero_address(state: State<'_, AppState>) -> Result<
 
 #[tauri::command]
 pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
+    // Reject a sync schedule the engine does not support (including a zero
+    // interval) before anything is written or rebuilt; the error surfaces
+    // in the UI as a failed save. `config.save` validates again as a
+    // backstop for other callers.
+    let interval_secs = config
+        .general
+        .sync_interval_secs()
+        .map_err(|e| e.to_string())?;
+
     config.save(&state.config_path).map_err(|e| e.to_string())?;
 
     // Rebuild adapters overlaying company config on the new TOML config
@@ -46,9 +55,10 @@ pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Res
         *adapters = new_adapters;
     }
 
-    // Notify sync engine
+    // Notify sync engine — the reload carries the new interval so a
+    // schedule change takes effect without a restart.
     if let Ok(tx) = state.active_sync_tx().await {
-        let _ = tx.send(SyncCommand::Reload).await;
+        let _ = tx.send(SyncCommand::Reload { interval_secs }).await;
     }
 
     *state.config.write().await = config;
@@ -151,9 +161,12 @@ pub async fn update_company_platform_config(
         *adapters = new_adapters;
     }
 
-    // Notify sync engine
+    // Notify sync engine. The sync schedule lives in the local config,
+    // which this command does not change, so the reload re-sends the
+    // currently configured interval.
     if let Ok(tx) = state.active_sync_tx().await {
-        let _ = tx.send(SyncCommand::Reload).await;
+        let interval_secs = crate::configured_interval_secs(&base_config.general.sync_schedule);
+        let _ = tx.send(SyncCommand::Reload { interval_secs }).await;
     }
 
     info!("Company platform config updated and adapters rebuilt");

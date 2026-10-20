@@ -63,8 +63,10 @@ pub enum SyncCommand {
     Pause,
     /// Resume the sync scheduler.
     Resume,
-    /// Reload config and adapters.
-    Reload,
+    /// Reload config and adapters, applying `interval_secs` as the new
+    /// period between automatic sync cycles. A zero interval is ignored:
+    /// it would panic the timer and kill the engine task.
+    Reload { interval_secs: u64 },
 }
 
 // ── Sync Engine ───────────────────────────────────────────────
@@ -1076,6 +1078,18 @@ impl SyncEngine {
         }
 
         let mut paused = false;
+        // A zero period makes `tokio::time::interval` panic, which would
+        // kill the engine task outright. Callers validate the configured
+        // schedule before it gets here; this is a backstop so no caller
+        // bug can take the engine down.
+        let mut interval_secs = interval_secs;
+        if interval_secs == 0 {
+            warn!(
+                fallback_secs = crate::config::DEFAULT_SYNC_INTERVAL_SECS,
+                "Sync interval of 0s requested; falling back to the default"
+            );
+            interval_secs = crate::config::DEFAULT_SYNC_INTERVAL_SECS;
+        }
         // The in-flight vendor refresh, spawned as its own task after each
         // cycle. The loop never awaits it, so commands (Pause, Sync Now)
         // are processed while a vendor run — which may last hours — is
@@ -1118,8 +1132,33 @@ impl SyncEngine {
                             info!("Sync resumed");
                             paused = false;
                         }
-                        Some(SyncCommand::Reload) => {
-                            info!("Config reloaded — adapters will be used on next cycle");
+                        Some(SyncCommand::Reload { interval_secs: new_interval_secs }) => {
+                            if new_interval_secs == 0 {
+                                // Reject rather than panic: a zero period
+                                // would kill this task (see the backstop in
+                                // `run`'s setup). The current cadence stays.
+                                warn!("Ignoring config reload with a zero sync interval");
+                            } else if new_interval_secs != interval_secs {
+                                info!(
+                                    interval_secs = new_interval_secs,
+                                    "Config reloaded — sync interval updated"
+                                );
+                                interval_secs = new_interval_secs;
+                                interval = tokio::time::interval(
+                                    std::time::Duration::from_secs(new_interval_secs),
+                                );
+                                // Don't try to catch up missed ticks
+                                interval.set_missed_tick_behavior(
+                                    tokio::time::MissedTickBehavior::Skip,
+                                );
+                                // A fresh interval's first tick completes
+                                // immediately; reset it so the new period
+                                // runs from now instead of firing a cycle
+                                // the moment the config is saved.
+                                interval.reset();
+                            } else {
+                                info!("Config reloaded — adapters will be used on next cycle");
+                            }
                         }
                         None => {
                             info!("Command channel closed, shutting down sync engine");
@@ -3034,6 +3073,59 @@ mod tests {
         );
 
         vendor_release.notify_one();
+        run_task.abort();
+    }
+
+    #[tokio::test]
+    async fn reload_applies_new_interval_and_ignores_zero() {
+        // Start on an interval so long it would never tick during the
+        // test. A reload carrying a 1 s interval must start cycles on the
+        // new cadence without a restart; a reload carrying 0 must neither
+        // panic (a zero period kills the engine task) nor change the
+        // cadence. (One adapter and product are registered because a cycle
+        // with no adapters returns before emitting CycleComplete.)
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 5)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 5, &[(Platform::Ebay, "E-1")])
+            .await;
+        let Harness {
+            engine, mut events, ..
+        } = harness;
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let run_task = tokio::spawn(engine.run(cmd_rx, 3600));
+
+        // The startup tick fires one cycle immediately; drain it.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no CycleComplete from the startup cycle");
+        assert!(matches!(first, Some(SyncEngineEvent::CycleComplete { .. })));
+
+        // Zero interval: ignored — no panic, no extra cycle, engine alive.
+        cmd_tx
+            .send(SyncCommand::Reload { interval_secs: 0 })
+            .await
+            .unwrap();
+        let extra =
+            tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await;
+        assert!(
+            extra.is_err(),
+            "a zero-interval reload must not trigger a cycle"
+        );
+
+        // New 1 s interval: a cycle completes on the new cadence.
+        cmd_tx
+            .send(SyncCommand::Reload { interval_secs: 1 })
+            .await
+            .unwrap();
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("reload did not apply the new 1s interval");
+        assert!(matches!(next, Some(SyncEngineEvent::CycleComplete { .. })));
+
         run_task.abort();
     }
 }

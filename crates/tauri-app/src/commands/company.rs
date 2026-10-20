@@ -117,7 +117,7 @@ pub async fn create_company(
         event_tx,
         max_retries,
     );
-    let interval_secs = super::super::parse_interval(&sync_schedule);
+    let interval_secs = super::super::configured_interval_secs(&sync_schedule);
     tokio::spawn(engine.run(cmd_rx, interval_secs));
 
     let mut ctx = CompanyContext {
@@ -209,7 +209,7 @@ pub async fn join_company(
         event_tx,
         max_retries,
     );
-    let interval_secs = super::super::parse_interval(&sync_schedule);
+    let interval_secs = super::super::configured_interval_secs(&sync_schedule);
     tokio::spawn(engine.run(cmd_rx, interval_secs));
 
     let mut ctx = CompanyContext {

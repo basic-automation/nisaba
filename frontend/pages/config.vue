@@ -202,6 +202,53 @@ watch(config, (val) => {
   }
 }, { immediate: true })
 
+// Sync interval picker. The backend only supports schedules of the form
+// `0 */N * * * *` (every N minutes) and rejects anything else on save —
+// including */0, which used to kill the sync engine — so the UI offers a
+// fixed set of intervals instead of a free-form cron field.
+const SYNC_INTERVAL_MINUTE_OPTIONS = [1, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]
+
+function parseScheduleMinutes(schedule: string): number | null {
+  const match = schedule.trim().match(/^0 \*\/(\d+) \* \* \* \*$/)
+  if (!match) return null
+  const minutes = Number.parseInt(match[1], 10)
+  return minutes >= 1 ? minutes : null
+}
+
+function formatIntervalMinutes(minutes: number): string {
+  if (minutes < 60) return minutes === 1 ? '1 minute' : `${minutes} minutes`
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60
+    return hours === 1 ? '1 hour' : `${hours} hours`
+  }
+  return `${minutes} minutes`
+}
+
+const syncIntervalOptions = computed(() => {
+  const options = [...SYNC_INTERVAL_MINUTE_OPTIONS]
+  const current = editConfig.value
+    ? parseScheduleMinutes(editConfig.value.general.sync_schedule)
+    : null
+  // Keep an off-list stored value selectable so opening the page never
+  // silently rewrites it; it is replaced only when the user picks another.
+  if (current !== null && !options.includes(current)) {
+    options.push(current)
+    options.sort((a, b) => a - b)
+  }
+  return options
+})
+
+const syncIntervalMinutes = computed({
+  get: () => {
+    if (!editConfig.value) return 5
+    return parseScheduleMinutes(editConfig.value.general.sync_schedule) ?? 5
+  },
+  set: (minutes: number) => {
+    if (!editConfig.value || !Number.isFinite(minutes) || minutes < 1) return
+    editConfig.value.general.sync_schedule = `0 */${Math.trunc(minutes)} * * * *`
+  },
+})
+
 async function handleEbayAuth() {
   ebayAuthLoading.value = true
   ebayAuthMessage.value = ''
@@ -403,8 +450,11 @@ async function handleToggleDropship(include: boolean) {
         <h3 class="text-xs font-medium tracking-widest uppercase text-muted/60 mb-5">General</h3>
         <div class="grid grid-cols-3 gap-x-8 gap-y-5">
           <div>
-            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Sync schedule</label>
-            <input v-model="editConfig.general.sync_schedule" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground font-mono focus:outline-none focus:border-accent/50 transition-colors">
+            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Sync interval</label>
+            <select v-model.number="syncIntervalMinutes" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors appearance-none">
+              <option v-for="opt in syncIntervalOptions" :key="opt" :value="opt" class="bg-background">Every {{ formatIntervalMinutes(opt) }}</option>
+            </select>
+            <p class="mt-1.5 text-[11px] text-muted/40">Applies on save, no restart needed.</p>
           </div>
           <div>
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Max retries</label>
