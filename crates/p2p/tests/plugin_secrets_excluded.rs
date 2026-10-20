@@ -43,6 +43,7 @@ fn plugin_row() -> VendorPluginRow {
         created_at: now_ts(),
         updated_at: now_ts(),
         allowed_hosts_json: None,
+        code_hash: None,
     }
 }
 
@@ -142,6 +143,7 @@ async fn incoming_plugin_secrets_are_stripped_before_storage() {
         category: "vendor".to_string(),
         icon: None,
         include_vendor_stock: false,
+        allowed_hosts_json: None,
         updated_at: now_ts(),
     };
     let payload = SyncPayload {
