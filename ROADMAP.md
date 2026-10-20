@@ -677,14 +677,14 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
 
 ## Phase 4 — Sync engine depth
 
-- [ ] ~~Quantity deltas and conflict resolution (`resolve_deltas`)~~ — was ticked, but
-      **`resolve_deltas` has no callers**. `conflict.rs` and its 6 tests are dead code; the
-      engine resolves stock its own way (see *Stock correctness* below).
+- [x] ~~Quantity deltas and conflict resolution (`resolve_deltas`)~~ — `resolve_deltas`
+      is now the engine's resolution path: each cycle builds per-platform `QuantityDelta`s
+      against the snapshots and sums them onto the canonical quantity.
 - [x] Cache-first listing loads and live/cached merge
-- [x] Per-sync-cycle vendor data refresh. It updates `products.quantity`, which does not
-      reach the platforms today (see *Stock correctness*).
-- [ ] `conflict.rs` exposes one strategy, which the engine does not use. Fold this into the
-      stock ledger below, rather than making a dead strategy user-selectable.
+- [x] Per-sync-cycle vendor data refresh. It updates `products.quantity`, which the ledger
+      now carries to the platforms on the next cycle (see *Stock correctness*).
+- [x] `conflict.rs` exposes one strategy, which the engine now uses as its resolution
+      path (folded into the ledger below), rather than a dead user-selectable strategy.
 
 ### Stock correctness
 
@@ -693,18 +693,17 @@ Found by the 2026-10-19 review and still present on PR #2. The engine derives ne
 platforms, or the maximum plus total decreases when any platform went up. `product.quantity`
 is used only when no platform reports.
 
-- [ ] **Sales on two platforms in one cycle are undercounted.** eBay 10 → 8 and Squarespace
-      10 → 9 resolve to the minimum, 8; true stock is 7. Summing the deltas is what
-      `resolve_deltas` does, and it is not called.
-- [ ] **Stock changed in Nisaba never reaches the platforms.** A restock typed into the app,
-      or vendor stock added by `recalc_product_quantity`, is overwritten by the platform
-      minimum on the next cycle; the startup comment at ~707 acknowledges this. Nothing
-      else calls `set_quantity`.
-- [ ] **A failed push is never retried, and a newly mapped listing is never corrected.** The
-      push step is skipped when resolved stock equals stored stock (~354). After a failed
-      push to Squarespace, its snapshot already holds what it reported, so the next cycle
-      sees no change. A new mapping showing 10 against a canonical 3 keeps showing 10. Push
-      whenever a platform's *reading* differs from canonical, not when canonical changed.
+- [x] **Sales on two platforms in one cycle are undercounted.** eBay 10 → 8 and Squarespace
+      10 → 9 now resolve to the summed deltas, 7: each platform's reading becomes a delta
+      against its snapshot and `resolve_deltas` sums them onto canonical.
+- [x] **Stock changed in Nisaba never reaches the platforms.** A restock typed into the app,
+      or vendor stock added by `recalc_product_quantity`, now survives the cycle (deltas are
+      computed against snapshots, not re-derived from readings) and is pushed to every
+      platform whose reading differs from canonical.
+- [x] **A failed push is never retried, and a newly mapped listing is never corrected.** The
+      engine now pushes whenever a platform's *reading* differs from canonical, not only when
+      canonical changed — so a failed push is retried on the next cycle and a new mapping is
+      corrected to canonical. A platform with no reading this cycle is never pushed to.
 - [ ] **Variants are ignored.** Mappings carry `variant_id`, but the engine pushes the
       product's total to every mapping (~432, ~545) and takes the minimum across different
       variants' listings, so each variant listing advertises the whole product's stock.
