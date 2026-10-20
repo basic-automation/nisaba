@@ -20,6 +20,17 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
     Ok(state.config.read().await.clone())
 }
 
+/// Non-secret accessor for the XMR Bazaar payout address.
+///
+/// The publish page needs this single value to pre-fill the listing form, but it
+/// must not be able to invoke `get_config` (which returns platform secrets and is
+/// therefore denied on the main window by the Tauri ACL). A Monero address is
+/// published on listings anyway, so exposing it alone is safe.
+#[tauri::command]
+pub async fn get_xmrbazaar_monero_address(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.config.read().await.xmrbazaar.monero_address.clone())
+}
+
 #[tauri::command]
 pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
     config.save(&state.config_path).map_err(|e| e.to_string())?;

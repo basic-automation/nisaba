@@ -5,6 +5,15 @@ import type { PlatformCapabilities } from '~/types'
 const { activeCompanyId, activeCompany, companiesInitialized } = useCompanyContext()
 const route = useRoute()
 
+// N-2.7: the dedicated settings window (label `nisaba-settings`) is the only
+// context allowed to invoke secret-returning Tauri commands. It hosts just the
+// settings views; the target view arrives via the URL hash (#settings:config).
+const inSettingsWindow = isSettingsWindow()
+if (inSettingsWindow) {
+  const { view, query } = parseSettingsHash()
+  navigateTo({ path: view === 'setup' ? '/setup' : `/${view}`, query })
+}
+
 // Pre-load image cache manifest immediately so cached images resolve instantly
 // on all pages without waiting for per-page IPC calls.
 const { loadManifest } = useImageCache()
@@ -25,6 +34,8 @@ async function remountPages() {
 
 /** Redirect to setup wizard if active company has no platforms configured. */
 async function checkPlatformConfig() {
+  // The settings window never nudges anywhere — the user opened it deliberately.
+  if (inSettingsWindow) return
   const id = activeCompanyId.value
   const company = activeCompany.value
   if (!id || !company) return
@@ -35,7 +46,9 @@ async function checkPlatformConfig() {
     const caps = await invoke<Record<string, PlatformCapabilities>>('get_platform_capabilities')
     if (Object.keys(caps).length === 0) {
       dismissedSetupIds.add(id)
-      navigateTo({ path: '/setup', query: { companyId: id, companyName: company.name } })
+      // Platform credentials are secrets: configuring them happens in the
+      // dedicated settings window, the only context allowed to read them.
+      await openSettingsWindow('setup', { companyId: id, companyName: company.name })
     }
   } catch {
     // ignore
@@ -64,7 +77,7 @@ watch(companiesInitialized, async (ready) => {
 </script>
 
 <template>
-  <NuxtLayout>
+  <NuxtLayout :name="inSettingsWindow ? 'settings' : 'default'">
     <NuxtPage v-if="showPage" />
   </NuxtLayout>
 </template>

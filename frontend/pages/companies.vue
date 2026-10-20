@@ -103,14 +103,14 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Link to active company peer management -->
-      <NuxtLink
+      <!-- Link to active company peer management (dedicated settings window) -->
+      <button
         v-if="activeCompany"
-        to="/company"
         class="inline-block mt-4 text-xs text-muted/40 hover:text-muted/60 transition-colors"
+        @click="openSettingsWindow('company')"
       >
         Manage peers &amp; settings for {{ activeCompany.name }}
-      </NuxtLink>
+      </button>
     </section>
 
     <div v-else class="mb-14">

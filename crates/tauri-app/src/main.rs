@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod acl_check;
 mod commands;
 mod events;
 mod log_capture;
@@ -231,6 +233,7 @@ fn main() {
             commands::listings::ebay_get_business_policies,
             // Config
             commands::config::get_config,
+            commands::config::get_xmrbazaar_monero_address,
             commands::config::update_config,
             commands::config::get_company_platform_config,
             commands::config::update_company_platform_config,

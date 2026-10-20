@@ -1,15 +1,28 @@
 <script setup lang="ts">
 const route = useRoute()
 
+// N-2.7: the existing-company platform-setup flow is hosted in the dedicated
+// settings window (the only context allowed to read platform secrets), so
+// finishing there closes the window instead of navigating the main window.
+const inSettings = isSettingsWindow()
+
 // Query params for configuring an existing company (skips step 1)
 const existingId = (route.query.companyId as string) || undefined
 const existingName = (route.query.companyName as string) || undefined
 
-function onComplete() {
+async function onComplete() {
+  if (inSettings) {
+    await closeCurrentWindow()
+    return
+  }
   navigateTo('/')
 }
 
-function onCancel() {
+async function onCancel() {
+  if (inSettings) {
+    await closeCurrentWindow()
+    return
+  }
   navigateTo('/companies')
 }
 </script>

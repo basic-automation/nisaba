@@ -2,7 +2,7 @@
 const { fetchCompanies } = useCompanyContext()
 const { unreadCount } = useNotifications()
 
-const navItems = [
+const navItems: { label: string; path: string; icon: string; settingsView?: SettingsView }[] = [
   { label: 'Dashboard', path: '/', icon: 'dashboard' },
   { label: 'Products', path: '/products', icon: 'package' },
   { label: 'Listings', path: '/listings', icon: 'listings' },
@@ -10,7 +10,10 @@ const navItems = [
   { label: 'Marketplace', path: '/marketplace', icon: 'marketplace' },
   { label: 'Inventory', path: '/inventory', icon: 'chart' },
   { label: 'Companies', path: '/companies', icon: 'company' },
-  { label: 'Config', path: '/config', icon: 'gear' },
+  // N-2.7: Config lives in the dedicated settings window (the only context
+  // allowed to invoke secret-returning commands) — opens on click instead of
+  // in-app routing.
+  { label: 'Config', path: '/config', icon: 'gear', settingsView: 'config' as const },
   { label: 'Notifications', path: '/notifications', icon: 'bell' },
   { label: 'Logs', path: '/logs', icon: 'document' },
 ]
@@ -19,6 +22,14 @@ const route = useRoute()
 
 function isActive(item: { path: string }) {
   return route.path === item.path || (item.path !== '/' && route.path.startsWith(item.path))
+}
+
+/** Settings views open in the dedicated settings window, not in-app. */
+function onNavClick(e: Event, item: { settingsView?: SettingsView }) {
+  if (item.settingsView) {
+    e.preventDefault()
+    void openSettingsWindow(item.settingsView)
+  }
 }
 
 onMounted(() => {
@@ -47,6 +58,7 @@ onMounted(() => {
               ? 'active text-foreground'
               : 'text-muted/40 hover:text-muted'
           ]"
+          @click="(e) => onNavClick(e, item)"
         >
           <!-- Active indicator -->
           <span
