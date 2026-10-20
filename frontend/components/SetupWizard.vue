@@ -211,10 +211,27 @@ async function handleEbayAuth() {
 }
 
 async function handleEbayManualComplete() {
-  if (!ebayAuthCode.value.trim()) return
+  const raw = ebayAuthCode.value.trim()
+  if (!raw) return
+  // The backend verifies the OAuth `state` issued with the authorize URL, so
+  // the manual fallback needs the full redirect URL (code + state), not just
+  // a bare code.
+  let code = raw
+  let returnedState: string | null = null
+  try {
+    const parsed = new URL(raw)
+    const urlCode = parsed.searchParams.get('code')
+    if (urlCode) {
+      code = urlCode
+      returnedState = parsed.searchParams.get('state')
+    }
+  } catch {
+    // Not a URL; a bare code is passed through and rejected by the
+    // backend's state check.
+  }
   ebayAuthMessage.value = ''
   try {
-    await invoke('complete_ebay_auth', { code: ebayAuthCode.value.trim() })
+    await invoke('complete_ebay_auth', { code, returned_state: returnedState })
     ebayAuthenticated.value = true
     ebayAuthMessage.value = 'Connected'
     showManualCode.value = false
@@ -487,16 +504,16 @@ onUnmounted(() => {
                 class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors"
                 @click="showManualCode = !showManualCode"
               >
-                {{ showManualCode ? 'Hide manual entry' : 'Paste code manually' }}
+                {{ showManualCode ? 'Hide manual entry' : 'Paste redirect URL manually' }}
               </button>
 
               <div v-if="showManualCode" class="mt-3 space-y-2">
-                <p class="text-[11px] text-muted/30">Paste the authorization code from the eBay redirect URL:</p>
+                <p class="text-[11px] text-muted/30">Paste the full eBay redirect URL (it carries the authorization code and the state for verification):</p>
                 <div class="flex items-center gap-3">
                   <input
                     v-model="ebayAuthCode"
                     type="text"
-                    placeholder="Authorization code..."
+                    placeholder="https://...?code=...&state=..."
                     class="flex-1 bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground font-mono placeholder-muted/20 focus:outline-none focus:border-accent/50 transition-colors"
                     @keydown.enter.prevent="handleEbayManualComplete"
                   >
