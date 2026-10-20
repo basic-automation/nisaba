@@ -453,25 +453,30 @@ impl PlatformAdapter for EbayAdapter {
     ) -> Result<(), SyncError> {
         let token = self.get_access_token().await?;
 
-        // Fetch current quantity so we don't change it
-        let item = self
-            .client
-            .fetch_inventory_item(&token, platform_item_id)
-            .await?;
-        let quantity = item
-            .availability
-            .as_ref()
-            .and_then(|a| a.ship_to_location_availability.as_ref())
-            .and_then(|s| s.quantity)
-            .unwrap_or(0);
+        // A price update must target a real offer: without an offerId
+        // eBay cannot apply it. Fail loudly instead of sending an
+        // untargeted offer entry that silently does nothing.
+        let offers = self.client.fetch_offers(&token, platform_item_id).await?;
+        let offer_id = offers
+            .iter()
+            .find_map(|o| o.offer_id.clone())
+            .ok_or_else(|| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!(
+                    "No eBay offer found for SKU {platform_item_id}; cannot set price without an offerId"
+                ),
+            })?;
 
+        // Never fetch or write a quantity on the price path: the bulk
+        // request carries only the price for the targeted offer, so a
+        // price edit can never zero stock.
         self.client
             .bulk_update_price_quantity(
                 &token,
                 platform_item_id,
+                &offer_id,
                 price.amount,
                 &price.currency,
-                quantity,
             )
             .await
     }
@@ -758,5 +763,166 @@ mod tests {
         let (adapter, _dir) = test_adapter().await;
         adapter.authorization_url();
         assert!(adapter.complete_auth("some-code", None).await.is_err());
+    }
+
+    // --- Fake-server helpers for write-path tests ---
+
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(header_end) = find_subslice(&buf, b"\r\n\r\n") {
+                let header_text = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length: usize = header_text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if buf.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            match socket.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// Handler returns (status, body) for a raw request.
+    async fn spawn_routing_server<F>(handler: F) -> (String, std::sync::Arc<Mutex<Vec<String>>>)
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured: std::sync::Arc<Mutex<Vec<String>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let handler = std::sync::Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured_inner = captured_clone.clone();
+                let handler_inner = handler.clone();
+                tokio::spawn(async move {
+                    let req = read_request(&mut socket).await;
+                    let (status, body) = handler_inner(&req);
+                    captured_inner.lock().unwrap().push(req);
+                    let reason = match status {
+                        200 => "OK",
+                        207 => "Multi-Status",
+                        _ => "Status",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), captured)
+    }
+
+    async fn adapter_for_server(base: String) -> (EbayAdapter, tempfile::TempDir) {
+        let (mut adapter, dir) = test_adapter().await;
+        adapter.client = EbayClient::with_api_base(base);
+        *adapter.access_token.write().await = Some("test-token".to_string());
+        (adapter, dir)
+    }
+
+    const REJECTED_BULK: &str = r#"{"responses":[{"sku":"SKU-1","statusCode":400,"errors":[{"errorId":25021,"message":"Rejected by eBay"}]}]}"#;
+
+    /// set_quantity: a rejected per-SKU write must surface as Err.
+    #[tokio::test]
+    async fn set_quantity_rejected_write_surfaces_as_err() {
+        let (base, _captured) = spawn_routing_server(|_req| (207, REJECTED_BULK.to_string())).await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let err = adapter
+            .set_quantity("SKU-1", 3)
+            .await
+            .expect_err("rejected set_quantity must be Err");
+        assert!(err.to_string().contains("SKU-1"), "got: {err}");
+    }
+
+    /// set_price: a rejected per-SKU write must surface as Err, the bulk
+    /// request must target the fetched offerId, and it must not write
+    /// any quantity.
+    #[tokio::test]
+    async fn set_price_rejected_write_surfaces_as_err() {
+        let (base, captured) = spawn_routing_server(|req| {
+            if req.starts_with("GET") {
+                (
+                    200,
+                    r#"{"offers":[{"offerId":"offer-99","sku":"SKU-1"}],"total":1}"#.to_string(),
+                )
+            } else {
+                (207, REJECTED_BULK.to_string())
+            }
+        })
+        .await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let err = adapter
+            .set_price(
+                "SKU-1",
+                ListingPrice {
+                    amount: 19.99,
+                    currency: "USD".to_string(),
+                },
+            )
+            .await
+            .expect_err("rejected set_price must be Err");
+        assert!(err.to_string().contains("SKU-1"), "got: {err}");
+        let requests = captured.lock().unwrap();
+        let post = requests
+            .iter()
+            .find(|r| r.starts_with("POST"))
+            .expect("bulk POST should have been sent");
+        let body = post.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.contains("\"offerId\":\"offer-99\""), "body: {body}");
+        assert!(
+            !body.contains("quantity"),
+            "price path must never write quantity, body: {body}"
+        );
+        assert!(!body.contains("shipToLocationAvailability"), "body: {body}");
+    }
+
+    /// set_price with no offer for the SKU fails instead of sending an
+    /// untargeted price (and never touches quantity).
+    #[tokio::test]
+    async fn set_price_without_offer_returns_err_and_sends_no_write() {
+        let (base, captured) =
+            spawn_routing_server(|_req| (200, r#"{"offers":[],"total":0}"#.to_string())).await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        assert!(adapter
+            .set_price(
+                "SKU-1",
+                ListingPrice {
+                    amount: 9.99,
+                    currency: "USD".to_string(),
+                },
+            )
+            .await
+            .is_err());
+        let requests = captured.lock().unwrap();
+        assert!(
+            requests.iter().all(|r| !r.starts_with("POST")),
+            "no write should be sent without an offerId: {requests:?}"
+        );
     }
 }
