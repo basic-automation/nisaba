@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use tracing::{debug, info, warn};
 use turso::params;
+use turso::params::Params;
 
 use nisaba_core::db::Db;
-use nisaba_core::types::{Platform, Product};
+use nisaba_core::types::{Platform, PlatformSnapshot, Product, ProductVariant};
 
 use crate::error::P2PError;
 use crate::types::{
@@ -196,11 +197,29 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     })
 }
 
+/// Convert a `params!` value into an owned, cloneable [`Params`] for a planned
+/// write in [`merge_remote_payload`]'s batch.
+fn owned_params(p: impl turso::params::IntoParams) -> Params {
+    p.into_params().expect("param conversion should not fail")
+}
+
 /// Merge a remote peer's payload into our local database.
 /// Returns a summary of what changed.
+///
+/// The merge is planned in two phases so it applies transactionally. Phase one
+/// reads the local state and decides every write the payload implies, without
+/// writing anything. Phase two applies the planned writes in a single
+/// transaction ([`Db::execute_write_batch`]): if any write fails, the whole
+/// merge rolls back and the database is left exactly as it was — instead of the
+/// old behaviour, where each row was applied with `?` in its own transaction,
+/// so the first error left a half-applied merge that failed the same way on
+/// every later sync cycle. The only step after the transaction is recomputing
+/// derived quantities for products whose variants changed; that stays
+/// best-effort derived-data repair, as it was before.
 pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<MergeSummary, P2PError> {
     let mut summary = MergeSummary::default();
     let now = Utc::now();
+    let mut writes: Vec<(String, Params)> = Vec::new();
 
     // ── Products: last-write-wins by updated_at ──────────────
     let local_products = db.list_products().await?;
@@ -220,12 +239,12 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         match local_map.get(&remote_product.id) {
             Some(local) => {
                 if remote_product.updated_at > local.updated_at {
-                    let conn = db.connect().await?;
-                    conn.execute(
+                    writes.push((
                         "UPDATE products SET canonical_sku = ?1, name = ?2, quantity = ?3,
                          low_stock_threshold = ?4, is_tracked = ?5, has_variants = ?6, updated_at = ?7
-                         WHERE id = ?8",
-                        params![
+                         WHERE id = ?8"
+                            .to_string(),
+                        owned_params(params![
                             remote_product.canonical_sku.clone(),
                             remote_product.name.clone(),
                             remote_product.quantity,
@@ -234,9 +253,8 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                             remote_product.has_variants,
                             remote_product.updated_at.clone(),
                             remote_product.id.clone()
-                        ],
-                    )
-                    .await?;
+                        ]),
+                    ));
                     summary.products_updated += 1;
                     debug!(
                         product_id = %remote_product.id,
@@ -245,11 +263,11 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                 }
             }
             None => {
-                let conn = db.connect().await?;
-                conn.execute(
+                writes.push((
                     "INSERT INTO products (id, canonical_sku, name, quantity, low_stock_threshold, is_tracked, has_variants, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                        .to_string(),
+                    owned_params(params![
                         remote_product.id.clone(),
                         remote_product.canonical_sku.clone(),
                         remote_product.name.clone(),
@@ -259,9 +277,8 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                         remote_product.has_variants,
                         remote_product.created_at.clone(),
                         remote_product.updated_at.clone()
-                    ],
-                )
-                .await?;
+                    ]),
+                ));
                 summary.products_created += 1;
                 debug!(product_id = %remote_product.id, "Created product from remote");
             }
@@ -303,12 +320,12 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         match local_mapping_map.get(&key) {
             Some((local_id, _local_deleted, local_updated)) => {
                 if remote_mapping.updated_at > *local_updated {
-                    let conn = db.connect().await?;
-                    conn.execute(
+                    writes.push((
                         "UPDATE platform_mappings SET platform_item_id = ?1, platform_sku = ?2,
                          is_active = ?3, deleted_at = ?4, updated_at = ?5, variant_id = ?6
-                         WHERE id = ?7",
-                        params![
+                         WHERE id = ?7"
+                            .to_string(),
+                        owned_params(params![
                             remote_mapping.platform_item_id.clone(),
                             remote_mapping.platform_sku.clone(),
                             remote_mapping.is_active,
@@ -316,18 +333,17 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                             remote_mapping.updated_at.clone(),
                             remote_mapping.variant_id.clone(),
                             *local_id
-                        ],
-                    )
-                    .await?;
+                        ]),
+                    ));
                     summary.mappings_updated += 1;
                 }
             }
             None => {
-                let conn = db.connect().await?;
-                conn.execute(
+                writes.push((
                     "INSERT OR IGNORE INTO platform_mappings (product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                        .to_string(),
+                    owned_params(params![
                         remote_mapping.product_id.clone(),
                         remote_mapping.platform.as_str(),
                         remote_mapping.platform_item_id.clone(),
@@ -336,15 +352,20 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                         remote_mapping.deleted_at.clone(),
                         remote_mapping.updated_at.clone(),
                         remote_mapping.variant_id.clone()
-                    ],
-                )
-                .await?;
+                    ]),
+                ));
                 summary.mappings_updated += 1;
             }
         }
     }
 
     // ── Platform Snapshots: newer last_polled_at wins ─────────
+    let local_snapshots = db.list_all_snapshots().await?;
+    let local_snap_map: HashMap<(String, String), &PlatformSnapshot> = local_snapshots
+        .iter()
+        .map(|s| ((s.product_id.clone(), s.platform.as_str().to_string()), s))
+        .collect();
+
     for remote_snap in &remote.platform_snapshots {
         if implausible(
             &mut summary,
@@ -355,47 +376,52 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         ) {
             continue;
         }
-        let local_snap = db
-            .get_snapshot(&remote_snap.product_id, remote_snap.platform.as_str())
-            .await?;
-
-        match local_snap {
-            Some(local) => {
-                if remote_snap.last_polled_at > local.last_polled_at {
-                    db.upsert_snapshot(
-                        &remote_snap.product_id,
-                        remote_snap.platform.as_str(),
-                        remote_snap.last_known_quantity,
-                        &remote_snap.last_polled_at,
-                    )
-                    .await?;
-                    summary.snapshots_updated += 1;
-                }
-            }
-            None => {
-                db.upsert_snapshot(
-                    &remote_snap.product_id,
+        let key = (
+            remote_snap.product_id.clone(),
+            remote_snap.platform.as_str().to_string(),
+        );
+        let should_apply = match local_snap_map.get(&key) {
+            Some(local) => remote_snap.last_polled_at > local.last_polled_at,
+            None => true,
+        };
+        if should_apply {
+            // The same upsert `Db::upsert_snapshot` runs.
+            writes.push((
+                "INSERT INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(product_id, platform) DO UPDATE
+                 SET last_known_quantity = ?3, last_polled_at = ?4"
+                    .to_string(),
+                owned_params(params![
+                    remote_snap.product_id.clone(),
                     remote_snap.platform.as_str(),
                     remote_snap.last_known_quantity,
-                    &remote_snap.last_polled_at,
-                )
-                .await?;
-                summary.snapshots_updated += 1;
-            }
+                    remote_snap.last_polled_at.clone()
+                ]),
+            ));
+            summary.snapshots_updated += 1;
         }
     }
 
     // ── XMR Processed Orders: union (insert if missing) ──────
+    let local_orders = db.list_xmr_processed_orders().await?;
+    let processed_orders: std::collections::HashSet<&str> =
+        local_orders.iter().map(|o| o.order_id.as_str()).collect();
+
     for remote_order in &remote.xmr_processed_orders {
-        let already = db.is_xmr_order_processed(&remote_order.order_id).await?;
-        if !already {
-            db.mark_xmr_order_processed(
-                &remote_order.order_id,
-                remote_order.product_id.as_deref(),
-                &remote_order.listing_id,
-                remote_order.quantity,
-            )
-            .await?;
+        if !processed_orders.contains(remote_order.order_id.as_str()) {
+            // The same insert `Db::mark_xmr_order_processed` runs.
+            writes.push((
+                "INSERT OR IGNORE INTO xmr_processed_orders (order_id, product_id, listing_id, quantity)
+                 VALUES (?1, ?2, ?3, ?4)"
+                    .to_string(),
+                owned_params(params![
+                    remote_order.order_id.clone(),
+                    remote_order.product_id.clone(),
+                    remote_order.listing_id.clone(),
+                    remote_order.quantity
+                ]),
+            ));
             summary.orders_added += 1;
         }
     }
@@ -421,9 +447,20 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             None => true,
         };
         if should_update {
-            db.set_p2p_meta("last_platform_sync_at", remote_at).await?;
+            // The same upsert `Db::set_p2p_meta` runs.
+            writes.push((
+                "INSERT INTO p2p_meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = ?2"
+                    .to_string(),
+                owned_params(params!["last_platform_sync_at", remote_at.as_str()]),
+            ));
             if let Some(ref by) = remote.platform_sync_meta.last_platform_sync_by {
-                db.set_p2p_meta("last_platform_sync_by", by).await?;
+                writes.push((
+                    "INSERT INTO p2p_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = ?2"
+                        .to_string(),
+                    owned_params(params!["last_platform_sync_by", by.as_str()]),
+                ));
             }
         }
     }
@@ -440,8 +477,17 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             None => true,
         };
         if should_update {
-            db.set_company_config(&remote_config.config_json, &remote_config.updated_at)
-                .await?;
+            // The same upsert `Db::set_company_config` runs.
+            writes.push((
+                "INSERT INTO company_config (id, config_json, updated_at)
+                 VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET config_json = ?1, updated_at = ?2"
+                    .to_string(),
+                owned_params(params![
+                    remote_config.config_json.clone(),
+                    remote_config.updated_at.clone()
+                ]),
+            ));
             debug!("Updated company config from remote");
         }
     }
@@ -463,15 +509,23 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             None => true,
         };
         if should_update {
-            db.upsert_auth_token_from_peer(
-                &remote_token.platform,
-                &remote_token.access_token,
-                remote_token.refresh_token.as_deref(),
-                remote_token.expires_at.as_deref(),
-                remote_token.cookies.as_deref(),
-                &remote_token.updated_at,
-            )
-            .await?;
+            // The same upsert `Db::upsert_auth_token_from_peer` runs, keeping the
+            // peer's `updated_at`.
+            writes.push((
+                "INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at, cookies, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(platform) DO UPDATE
+                 SET access_token = ?2, refresh_token = ?3, expires_at = ?4, cookies = ?5, updated_at = ?6"
+                    .to_string(),
+                owned_params(params![
+                    remote_token.platform.clone(),
+                    remote_token.access_token.clone(),
+                    remote_token.refresh_token.clone(),
+                    remote_token.expires_at.clone(),
+                    remote_token.cookies.clone(),
+                    remote_token.updated_at.clone()
+                ]),
+            ));
             debug!(platform = %remote_token.platform, "Updated auth token from remote");
         }
     }
@@ -488,8 +542,15 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             None => true,
         };
         if should_update {
-            db.set_company_logo(&remote_logo.logo, &remote_logo.updated_at)
-                .await?;
+            // The same update `Db::set_company_logo` runs.
+            writes.push((
+                "UPDATE company SET logo = ?1, logo_updated_at = ?2, updated_at = datetime('now')"
+                    .to_string(),
+                owned_params(params![
+                    remote_logo.logo.clone(),
+                    remote_logo.updated_at.clone()
+                ]),
+            ));
             debug!("Updated company logo from remote");
         }
     }
@@ -534,14 +595,48 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                 // these files, so it is recomputed locally when the plugin is installed.
                 allowed_hosts_json: None,
             };
-            if let Ok(()) = db.upsert_registry_plugin(&row).await {
-                summary.vendor_plugins_updated += 1;
-                debug!(plugin_id = %remote_plugin.id, "Updated vendor plugin from remote");
-            }
+            // The same upsert `Db::upsert_registry_plugin` runs.
+            writes.push((
+                "INSERT INTO vendor_plugin_registry
+                    (id, plugin_file, display_name, description, code, files_json, version,
+                     config_fields, config_json, status, submitted_by, approved_by,
+                     category, icon, include_vendor_stock, created_at, updated_at, allowed_hosts)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                 ON CONFLICT(id) DO UPDATE SET
+                    plugin_file = ?2, display_name = ?3, description = ?4, files_json = ?5,
+                    version = ?6, config_fields = ?7, config_json = ?8, status = ?9,
+                    submitted_by = ?10, approved_by = ?11, category = ?12, icon = ?13,
+                    include_vendor_stock = ?14, updated_at = ?16, allowed_hosts = ?17"
+                    .to_string(),
+                owned_params(params![
+                    row.id.clone(),
+                    row.plugin_file.clone(),
+                    row.display_name.clone(),
+                    row.description.clone(),
+                    row.files_json.clone(),
+                    row.version.clone(),
+                    row.config_fields.clone(),
+                    row.config_json.clone(),
+                    row.status.clone(),
+                    row.submitted_by.clone(),
+                    row.approved_by.clone(),
+                    row.category.clone(),
+                    row.icon.clone(),
+                    row.include_vendor_stock as i64,
+                    row.created_at.clone(),
+                    row.updated_at.clone(),
+                    row.allowed_hosts_json.clone(),
+                ]),
+            ));
+            summary.vendor_plugins_updated += 1;
+            debug!(plugin_id = %remote_plugin.id, "Updated vendor plugin from remote");
         }
     }
 
     // ── Product Variants: LWW by updated_at ─────────────────
+    let local_variants = db.list_all_variants().await?;
+    let local_variant_map: HashMap<String, &ProductVariant> =
+        local_variants.iter().map(|v| (v.id.clone(), v)).collect();
     let mut affected_product_ids = std::collections::HashSet::new();
     for remote_variant in &remote.product_variants {
         if implausible(
@@ -553,43 +648,41 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
         ) {
             continue;
         }
-        let local_variant = db.get_variant(&remote_variant.id).await?;
-        match local_variant {
+        let local_variant = local_variant_map.get(&remote_variant.id).copied();
+        let variant = match local_variant {
             Some(local) => {
-                if remote_variant.updated_at > local.updated_at {
-                    let attrs: std::collections::HashMap<String, String> =
-                        serde_json::from_str(&remote_variant.attributes_json).unwrap_or_default();
-                    let variant = nisaba_core::types::ProductVariant {
-                        id: remote_variant.id.clone(),
-                        product_id: remote_variant.product_id.clone(),
-                        sku: remote_variant.sku.clone(),
-                        name: remote_variant.name.clone(),
-                        attributes: attrs,
-                        quantity: remote_variant.quantity,
-                        on_hand_quantity: remote_variant.on_hand_quantity,
-                        image_url: remote_variant.image_url.clone(),
-                        sort_order: remote_variant.sort_order,
-                        // The winning edit's link; an older peer sends none, so keep ours.
-                        source_plugin_id: remote_variant
-                            .source_plugin_id
-                            .clone()
-                            .or(local.source_plugin_id.clone()),
-                        source_vendor_item_id: remote_variant
-                            .source_vendor_item_id
-                            .clone()
-                            .or(local.source_vendor_item_id.clone()),
-                        created_at: local.created_at,
-                        updated_at: remote_variant.updated_at.clone(),
-                    };
-                    db.upsert_variant_from_peer(&variant).await?;
-                    summary.variants_updated += 1;
-                    affected_product_ids.insert(remote_variant.product_id.clone());
+                if remote_variant.updated_at <= local.updated_at {
+                    continue;
+                }
+                let attrs: std::collections::HashMap<String, String> =
+                    serde_json::from_str(&remote_variant.attributes_json).unwrap_or_default();
+                ProductVariant {
+                    id: remote_variant.id.clone(),
+                    product_id: remote_variant.product_id.clone(),
+                    sku: remote_variant.sku.clone(),
+                    name: remote_variant.name.clone(),
+                    attributes: attrs,
+                    quantity: remote_variant.quantity,
+                    on_hand_quantity: remote_variant.on_hand_quantity,
+                    image_url: remote_variant.image_url.clone(),
+                    sort_order: remote_variant.sort_order,
+                    // The winning edit's link; an older peer sends none, so keep ours.
+                    source_plugin_id: remote_variant
+                        .source_plugin_id
+                        .clone()
+                        .or(local.source_plugin_id.clone()),
+                    source_vendor_item_id: remote_variant
+                        .source_vendor_item_id
+                        .clone()
+                        .or(local.source_vendor_item_id.clone()),
+                    created_at: local.created_at.clone(),
+                    updated_at: remote_variant.updated_at.clone(),
                 }
             }
             None => {
                 let attrs: std::collections::HashMap<String, String> =
                     serde_json::from_str(&remote_variant.attributes_json).unwrap_or_default();
-                let variant = nisaba_core::types::ProductVariant {
+                ProductVariant {
                     id: remote_variant.id.clone(),
                     product_id: remote_variant.product_id.clone(),
                     sku: remote_variant.sku.clone(),
@@ -603,13 +696,45 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     source_vendor_item_id: remote_variant.source_vendor_item_id.clone(),
                     created_at: remote_variant.updated_at.clone(),
                     updated_at: remote_variant.updated_at.clone(),
-                };
-                db.upsert_variant_from_peer(&variant).await?;
-                summary.variants_updated += 1;
-                affected_product_ids.insert(remote_variant.product_id.clone());
+                }
             }
-        }
+        };
+        let attrs_json = serde_json::to_string(&variant.attributes)
+            .map_err(|e| P2PError::SerializationError(e.to_string()))?;
+        // The same upsert `Db::upsert_variant_from_peer` runs, keeping the peer's
+        // `updated_at`.
+        writes.push((
+            "INSERT INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+             ON CONFLICT(id) DO UPDATE SET sku = ?3, name = ?4, attributes_json = ?5, quantity = ?6,
+                on_hand_quantity = ?7, image_url = ?8, sort_order = ?9,
+                source_plugin_id = COALESCE(?10, source_plugin_id),
+                source_vendor_item_id = COALESCE(?11, source_vendor_item_id),
+                updated_at = ?12"
+                .to_string(),
+            owned_params(params![
+                variant.id.clone(),
+                variant.product_id.clone(),
+                variant.sku.clone(),
+                variant.name.clone(),
+                attrs_json,
+                variant.quantity,
+                variant.on_hand_quantity,
+                variant.image_url.clone(),
+                variant.sort_order as i64,
+                variant.source_plugin_id.clone(),
+                variant.source_vendor_item_id.clone(),
+                variant.updated_at.clone(),
+            ]),
+        ));
+        summary.variants_updated += 1;
+        affected_product_ids.insert(remote_variant.product_id.clone());
     }
+
+    // ── Apply: the whole merge in one transaction ────────────
+    // Any error here rolls every planned write back, leaving the database
+    // unchanged; the summary is only meaningful once this has committed.
+    db.execute_write_batch(writes).await?;
 
     // Recalc quantities for affected products
     for product_id in &affected_product_ids {
