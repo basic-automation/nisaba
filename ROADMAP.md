@@ -83,7 +83,7 @@ are referenced rather than repeated.
 - [ ] Automatic database backup before every migration and on a schedule (keep the last N),
       with a *Restore from backup* action in the UI. Backups land next to the database and
       never leave the machine.
-- [ ] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1).
+- [x] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1) — fixed in PR #5.
 - [ ] Lossless export/import, round-trip tested (Cross-cutting). From 1.0 the export format
       carries a version and every later release imports every earlier 1.x export.
 
@@ -859,12 +859,12 @@ cannot produce a syncing pair, and platform-sync coordination is never invoked. 
 replaces this transport. Fix the data-loss and secret-loss items now, have the README say
 P2P is experimental, and do not repair the Tor join path.
 
-- [ ] **Leaving a legacy-migrated company deletes the app database.** At startup the legacy
+- [x] **Leaving a legacy-migrated company deletes the app database.** At startup the legacy
       company is registered with `config.database.path` (`main.rs` ~150–151), which is the
       app registry database. Leaving the company then runs `remove_file` on that path
-      (`commands/company.rs` ~327–330).
-- [ ] **The legacy company secret can be lost.** Startup replaces the stored secret with
-      its hash even when saving it to the keyring failed (`main.rs` ~143–148).
+      (`commands/company.rs` ~327–330). Fixed in PR #5.
+- [x] **The legacy company secret can be lost.** Startup replaces the stored secret with
+      its hash even when saving it to the keyring failed (`main.rs` ~143–148). Fixed in PR #5.
 - [ ] **Join cannot produce a syncing pair.** `join_company` appends `.onion` to a name that
       onyums already suffixes (`company.rs` ~247), so the admin stores `x.onion.onion`. The
       member stores the admin only in `company_peers_v2`, under a random peer id, while
@@ -1446,10 +1446,10 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
 - [ ] Secret handling audit — `keyring` is a dependency, but confirm nothing (tokens, the
       company secret, plugin `secret: true` fields) is ever written to `config.toml`, logged,
       or included in an export. Plugin secrets already fail this — see Phase 3.
-- [ ] **`Db::open` deletes the WAL when turso panics** (`db.rs` ~50–64), and retries. The
+- [x] **`Db::open` deletes the WAL when turso panics** (`db.rs` ~50–64), and retries. The
       comment protects only the main file, but a WAL can hold committed transactions not
       yet checkpointed into it, so this can throw away recent writes. Back up the files and
-      surface the error instead of deleting.
+      surface the error instead of deleting. Fixed in PR #5.
 - [ ] Export/import is lossy. Export contains no secrets (verified 2026-10-19). But:
       - import drops `on_hand_quantity`, `source_plugin_id` and `source_vendor_item_id`
         (`db.rs` ~3414), and its `INSERT OR REPLACE` wipes them on variants that already
