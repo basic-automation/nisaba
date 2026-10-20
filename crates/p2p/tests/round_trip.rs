@@ -117,6 +117,7 @@ async fn seed_peer_a(db: &Db) {
         created_at: "2026-09-25 12:00:00".to_string(),
         updated_at: "2026-09-25 12:00:00".to_string(),
         allowed_hosts_json: Some(r#"["api.example.com"]"#.to_string()),
+        code_hash: None,
     })
     .await
     .unwrap();
@@ -211,10 +212,15 @@ async fn a_full_payload_round_trips_into_an_empty_peer() {
         .unwrap()
         .expect("plugin merged");
     assert_eq!(plugin.config_json.as_deref(), Some(r#"{"api_key":"k"}"#));
+    // The peer's allowlist declaration travels with the files so an allowlist change
+    // is detectable for re-approval — but the peer's approval is never trusted: a
+    // plugin this machine has never reviewed arrives pending.
     assert_eq!(
-        plugin.allowed_hosts_json, None,
-        "a peer's claim about a plugin's network access is not trusted"
+        plugin.allowed_hosts_json.as_deref(),
+        Some(r#"["api.example.com"]"#)
     );
+    assert_eq!(plugin.status, "pending");
+    assert_eq!(plugin.approved_by, None);
 }
 
 #[tokio::test]
@@ -703,4 +709,156 @@ async fn a_failing_merge_leaves_the_database_unchanged() {
         .unwrap()
         .expect("variant still there");
     assert_eq!(v.sku, "CAN-OD");
+}
+
+/// A plugin whose code or allowlist changed in a peer's payload is reset to pending
+/// for local re-approval — even when the peer claims it is approved — while an
+/// unchanged plugin keeps the local approval.
+#[tokio::test]
+async fn a_changed_plugin_in_a_peer_payload_resets_to_pending() {
+    fn row(code: &str, hosts: Option<&str>) -> VendorPluginRow {
+        VendorPluginRow {
+            id: "plug".to_string(),
+            plugin_file: "plug.zip".to_string(),
+            display_name: "Plug".to_string(),
+            description: String::new(),
+            files_json: code.to_string(),
+            version: "1.0.0".to_string(),
+            config_fields: None,
+            config_json: None,
+            status: "pending".to_string(),
+            submitted_by: None,
+            approved_by: None,
+            category: "vendor".to_string(),
+            icon: None,
+            include_vendor_stock: false,
+            created_at: "2026-09-25 12:00:00".to_string(),
+            updated_at: "2026-09-25 12:00:00".to_string(),
+            allowed_hosts_json: hosts.map(str::to_string),
+            code_hash: None,
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+
+    // Both peers hold the same plugin; B's admin reviews and approves it.
+    let code = r#"{"index.ts":"export const metadata = {};"}"#;
+    let hosts = Some(r#"["api.example.com"]"#);
+    a.upsert_registry_plugin(&row(code, hosts)).await.unwrap();
+    b.upsert_registry_plugin(&row(code, hosts)).await.unwrap();
+    b.review_registry_plugin("plug", "approved", Some("b.onion"))
+        .await
+        .unwrap();
+    let bound = b
+        .get_registry_plugin("plug")
+        .await
+        .unwrap()
+        .unwrap()
+        .code_hash
+        .expect("approval binds a code hash");
+    assert_eq!(
+        b.get_registry_plugin("plug").await.unwrap().unwrap().status,
+        "approved"
+    );
+
+    // A ships a new version of the code (and claims it is approved) with a newer
+    // timestamp; B merges it.
+    let changed_code = r#"{"index.ts":"changed code"}"#;
+    let newer = (chrono::Utc::now() + chrono::Duration::seconds(5))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    exec(
+        &a,
+        "UPDATE vendor_plugin_registry SET files_json = ?1, status = 'approved', approved_by = 'a.onion', updated_at = ?2 WHERE id = 'plug'",
+        params![changed_code, newer],
+    )
+    .await;
+    let summary = merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.vendor_plugins_updated, 1);
+
+    // B does not run the peer's approval: the changed plugin is pending, the
+    // peer's approver is dropped, and the new code hash is surfaced.
+    let merged = b.get_registry_plugin("plug").await.unwrap().unwrap();
+    assert_eq!(merged.status, "pending");
+    assert_eq!(merged.approved_by, None);
+    assert_eq!(merged.files_json, changed_code);
+    assert_ne!(merged.code_hash.as_deref(), Some(bound.as_str()));
+    assert!(merged.code_hash.is_some());
+
+    // B's admin reviews the new code and approves it.
+    b.review_registry_plugin("plug", "approved", Some("b.onion"))
+        .await
+        .unwrap();
+
+    // A re-sends the identical bytes with a newer timestamp: B keeps its approval.
+    let even_newer = (chrono::Utc::now() + chrono::Duration::seconds(10))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    exec(
+        &a,
+        "UPDATE vendor_plugin_registry SET updated_at = ?1 WHERE id = 'plug'",
+        params![even_newer],
+    )
+    .await;
+    let summary = merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.vendor_plugins_updated, 1);
+    let merged = b.get_registry_plugin("plug").await.unwrap().unwrap();
+    assert_eq!(merged.status, "approved");
+    assert_eq!(merged.approved_by.as_deref(), Some("b.onion"));
+}
+
+/// A plugin this machine has never seen arrives pending even when the peer marks
+/// it approved: a peer's approval claim is never trusted for unknown code.
+#[tokio::test]
+async fn an_unseen_plugin_from_a_peer_arrives_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = peer(&dir, "a.db").await;
+    let b = peer(&dir, "b.db").await;
+
+    a.upsert_registry_plugin(&VendorPluginRow {
+        id: "plug".to_string(),
+        plugin_file: "plug.zip".to_string(),
+        display_name: "Plug".to_string(),
+        description: String::new(),
+        files_json: r#"{"index.ts":"export const metadata = {};"}"#.to_string(),
+        version: "1.0.0".to_string(),
+        config_fields: None,
+        config_json: None,
+        status: "approved".to_string(),
+        submitted_by: None,
+        approved_by: Some("a.onion".to_string()),
+        category: "vendor".to_string(),
+        icon: None,
+        include_vendor_stock: false,
+        created_at: "2026-09-25 12:00:00".to_string(),
+        updated_at: "2026-09-25 12:00:00".to_string(),
+        allowed_hosts_json: Some(r#"["api.example.com"]"#.to_string()),
+        code_hash: None,
+    })
+    .await
+    .unwrap();
+
+    let summary = merge_remote_payload(
+        &b,
+        &over_the_wire(load_full_sync_payload(&a).await.unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.vendor_plugins_updated, 1);
+    let merged = b.get_registry_plugin("plug").await.unwrap().unwrap();
+    assert_eq!(merged.status, "pending");
+    assert_eq!(merged.approved_by, None);
+    assert!(merged.code_hash.is_some());
 }
