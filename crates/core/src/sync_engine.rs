@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::conflict::resolve_deltas;
 use crate::db::Db;
 use crate::error::SyncError;
 use crate::traits::PlatformAdapter;
@@ -72,6 +73,15 @@ pub enum SyncCommand {
 /// The closure returns a future that runs all approved vendor plugins,
 /// updates product_vendor_data, and recalculates quantities.
 pub type VendorSyncFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// One numeric platform reading captured for ledger resolution: the listing's
+/// current polled quantity plus its last-known snapshot quantity, if the
+/// listing has ever been observed before.
+struct ObservedReading {
+    mapping: PlatformMapping,
+    current_qty: i64,
+    snapshot_qty: Option<i64>,
+}
 
 pub struct SyncEngine {
     db: Arc<Db>,
@@ -277,14 +287,26 @@ impl SyncEngine {
                 continue;
             };
 
-            // ── Step 2: Resolve quantity across normal platforms ──
-            // Strategy: if any platform's stock INCREASED since last snapshot
-            // (restock), use max minus decreases on other platforms. Otherwise
-            // use min (conservative — prevents overselling).
-            let mut min_qty: Option<i64> = None;
-            let mut max_qty: Option<i64> = None;
-            let mut any_increased = false;
-            let mut total_decreases: i64 = 0;
+            // ── Step 2: Resolve quantity from the ledger ──
+            // Every numeric platform reading becomes a delta against its
+            // last-known snapshot, and the deltas are summed onto the
+            // canonical quantity (`resolve_deltas`). Two sales on two
+            // platforms in one cycle both decrement; a platform-side restock
+            // nets against sales elsewhere. The old minimum / max-minus-
+            // decreases derivation undercounted multi-platform sales and let
+            // platform readings overwrite stock changed in Nisaba.
+            //
+            // A listing with no snapshot is baselined by product state:
+            // - no snapshot for ANY mapping: this is the first observation of
+            //   the product's inventory, so the canonical quantity is the
+            //   baseline and pre-mapping platform activity still lands as a
+            //   delta;
+            // - otherwise the listing was newly mapped onto an already-synced
+            //   product: it contributes no delta. Absorbing its reading would
+            //   corrupt canonical with stock Nisaba never tracked; the push
+            //   step below corrects the listing to canonical instead.
+            let mut readings: Vec<ObservedReading> = Vec::new();
+            let mut any_snapshot = false;
 
             for mapping in mappings {
                 if !adapters.contains_key(&mapping.platform) {
@@ -305,23 +327,14 @@ impl SyncEngine {
                     continue;
                 };
 
-                // Compare against last snapshot to detect increases/decreases
+                // Compare against last snapshot to detect the platform's delta
                 let snapshot = self
                     .db
                     .get_snapshot(&product.id, mapping.platform.as_str())
                     .await?;
-
-                if let Some(snap) = &snapshot {
-                    let delta = current_qty - snap.last_known_quantity;
-                    if delta > 0 {
-                        any_increased = true;
-                    } else if delta < 0 {
-                        total_decreases += delta; // negative
-                    }
+                if snapshot.is_some() {
+                    any_snapshot = true;
                 }
-
-                min_qty = Some(min_qty.map_or(current_qty, |m: i64| m.min(current_qty)));
-                max_qty = Some(max_qty.map_or(current_qty, |m: i64| m.max(current_qty)));
 
                 // Update the polled snapshot
                 if !self.dry_run {
@@ -329,56 +342,70 @@ impl SyncEngine {
                         .upsert_snapshot(&product.id, mapping.platform.as_str(), current_qty, &now)
                         .await?;
                 }
+
+                readings.push(ObservedReading {
+                    mapping: mapping.clone(),
+                    current_qty,
+                    snapshot_qty: snapshot.map(|s| s.last_known_quantity),
+                });
             }
 
-            // If restock detected, use max minus sales on other platforms.
-            // Otherwise use min (lowest-stock-wins for sales).
-            let base_qty = if any_increased {
-                max_qty.map(|m| (m + total_decreases).max(0))
-            } else {
-                min_qty
-            };
-
-            // Apply XMR Bazaar sale decrements (from Step 1b)
-            let xmr_sales: i64 = injected_deltas
-                .remove(&product.id)
-                .map(|ds| ds.iter().map(|d| d.delta).sum())
-                .unwrap_or(0); // negative number
-
-            // New canonical = base qty + XMR sales (negative), floor at 0
-            let new_canonical = match base_qty {
-                Some(b) => (b + xmr_sales).max(0),
-                None => (product.quantity + xmr_sales).max(0), // no platforms reported
-            };
-
-            if new_canonical == product.quantity {
-                // Record history even when no change (for time-series continuity)
-                if !self.dry_run {
-                    self.db
-                        .record_inventory_history(&product.id, product.quantity, &cycle_id)
-                        .await?;
+            let mut deltas: Vec<QuantityDelta> = Vec::new();
+            for reading in &readings {
+                let previous = match reading.snapshot_qty {
+                    Some(qty) => qty,
+                    None if !any_snapshot => product.quantity,
+                    // Newly mapped listing on an already-synced product: no
+                    // delta; the push step corrects it to canonical.
+                    None => continue,
+                };
+                let delta = reading.current_qty - previous;
+                if delta != 0 {
+                    deltas.push(QuantityDelta {
+                        product_id: product.id.clone(),
+                        platform: reading.mapping.platform,
+                        previous,
+                        current: reading.current_qty,
+                        delta,
+                    });
                 }
-                continue;
             }
 
-            info!(
-                product = %product.name,
-                old = product.quantity,
-                new = new_canonical,
-                strategy = if any_increased { "restock (max - decreases)" } else { "sales (min)" },
-                base = ?base_qty,
-                xmr_sales,
-                "Resolved quantity change"
-            );
+            // Fold in the stock-mode sale decrements (from Step 1b); they are
+            // already deltas, so they sum onto the ledger like the rest.
+            if let Some(xmr_deltas) = injected_deltas.remove(&product.id) {
+                deltas.extend(xmr_deltas);
+            }
 
-            // Update canonical quantity in DB
-            if !self.dry_run {
+            let resolved = resolve_deltas(&product.id, product.quantity, deltas);
+            let new_canonical = resolved.new_canonical;
+
+            if resolved.total_delta != 0 {
+                info!(
+                    product = %product.name,
+                    old = product.quantity,
+                    new = new_canonical,
+                    total_delta = resolved.total_delta,
+                    deltas = ?resolved.deltas,
+                    "Resolved quantity change from summed deltas"
+                );
+            }
+
+            // Local truth moves first: a failed push must not roll back the
+            // canonical quantity, and a manual adjustment or vendor restock
+            // recorded in Nisaba survives the cycle and is pushed below.
+            if !self.dry_run && new_canonical != product.quantity {
                 self.db
                     .update_product_quantity(&product.id, new_canonical)
                     .await?;
             }
 
             // ── Step 4: Push to all mapped platforms ──────────
+            // Push whenever a platform's reading differs from canonical, even
+            // when canonical did not move this cycle. That is what retries a
+            // previously failed push (the reading still disagrees) and what
+            // corrects a newly mapped listing to canonical.
+            let pushed_before = changes_pushed;
             for mapping in mappings {
                 // Skip disabled platforms
                 let Some(adapter) = adapters.get(&mapping.platform) else {
@@ -517,12 +544,24 @@ impl SyncEngine {
                     continue;
                 }
 
-                // Normal (numeric quantity) push logic
+                // Normal (numeric quantity) push logic.
+                //
+                // A platform with no reading this cycle is skipped: its state
+                // is unknown, and pushing blind would overwrite live stock
+                // with a number derived from its peers.
                 let platform_key = (mapping.platform, mapping.platform_item_id.clone());
-                let current_on_platform = platform_quantities.get(&platform_key).copied();
+                let Some(current_on_platform) = platform_quantities.get(&platform_key).copied()
+                else {
+                    debug!(
+                        product = %product.name,
+                        platform = %mapping.platform,
+                        "No reading this cycle, skipping push"
+                    );
+                    continue;
+                };
 
                 // Only push if the platform doesn't already have the correct quantity
-                if current_on_platform == Some(new_canonical) {
+                if current_on_platform == new_canonical {
                     continue;
                 }
 
@@ -534,7 +573,7 @@ impl SyncEngine {
                             product_id: product.id.clone(),
                             product_name: product.name.clone(),
                             platform: mapping.platform,
-                            current_quantity: current_on_platform.unwrap_or(product.quantity),
+                            current_quantity: current_on_platform,
                             planned_quantity: new_canonical,
                         })
                         .await;
@@ -622,7 +661,9 @@ impl SyncEngine {
                     .await?;
             }
 
-            products_synced += 1;
+            if new_canonical != product.quantity || changes_pushed > pushed_before {
+                products_synced += 1;
+            }
         }
 
         // Drop the read lock before sending event
@@ -840,7 +881,7 @@ mod tests {
         polls: Mutex<Vec<Poll>>,
         sales: Mutex<Vec<SaleDetection>>,
         /// When set, every `set_quantity` fails with this message.
-        push_error: Option<String>,
+        push_error: Mutex<Option<String>>,
         pushes: Mutex<Vec<(String, i64)>>,
         poll_calls: AtomicUsize,
         refresh_calls: AtomicUsize,
@@ -854,7 +895,7 @@ mod tests {
                 capabilities: PlatformCapabilities::default(),
                 polls: Mutex::new(vec![Poll::Items(Vec::new())]),
                 sales: Mutex::new(Vec::new()),
-                push_error: None,
+                push_error: Mutex::new(None),
                 pushes: Mutex::new(Vec::new()),
                 poll_calls: AtomicUsize::new(0),
                 refresh_calls: AtomicUsize::new(0),
@@ -884,9 +925,15 @@ mod tests {
             self
         }
 
-        fn failing_pushes(mut self, message: &str) -> Self {
-            self.push_error = Some(message.to_string());
+        fn failing_pushes(self, message: &str) -> Self {
+            *self.push_error.lock().unwrap() = Some(message.to_string());
             self
+        }
+
+        /// Flip push failures on or off mid-test, so one harness can run a
+        /// fail-then-retry sequence across cycles.
+        fn set_push_error(&self, message: Option<&str>) {
+            *self.push_error.lock().unwrap() = message.map(str::to_string);
         }
 
         fn pushes(&self) -> Vec<(String, i64)> {
@@ -926,10 +973,10 @@ mod tests {
         }
 
         async fn set_quantity(&self, platform_item_id: &str, qty: i64) -> Result<(), SyncError> {
-            if let Some(message) = &self.push_error {
+            if let Some(message) = self.push_error.lock().unwrap().clone() {
                 return Err(SyncError::ApiError {
                     platform: self.platform,
-                    message: message.clone(),
+                    message,
                 });
             }
             self.pushes
@@ -1115,14 +1162,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lowest_stock_wins_when_no_platform_restocked() {
-        // eBay says 3, Squarespace says 7, and neither has a snapshot to
-        // compare against, so nothing counts as a restock: the conservative
-        // minimum (3) becomes canonical and is pushed to Squarespace only.
+    async fn two_sales_on_two_platforms_in_one_cycle_both_decrement_canonical() {
+        // The ledger acceptance case: both platforms were at 10, eBay sold 2
+        // (10 -> 8) and Squarespace sold 1 (10 -> 9) in the same cycle. The
+        // summed deltas are -2 + -1 = -3, so canonical goes 10 -> 7 and both
+        // platforms are pushed down to 7. The old minimum-based resolution
+        // answered 8 here, silently dropping the Squarespace sale.
         let harness = Harness::new(
             vec![
-                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
-                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 8)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 9)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        harness
+            .db
+            .upsert_snapshot("p1", "ebay", 10, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+        harness
+            .db
+            .upsert_snapshot("p1", "squarespace", 10, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(synced, 1);
+        assert_eq!(pushed, 2, "both platforms disagree with the resolved 7");
+        assert_eq!(harness.quantity("p1").await, 7);
+        assert_eq!(
+            harness.adapter(Platform::Ebay).pushes(),
+            vec![("E-1".to_string(), 7)]
+        );
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 7)]
+        );
+
+        let recorded = harness.events_of_type("p1", "quantity_change").await;
+        assert_eq!(recorded.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn first_observation_uses_canonical_as_the_baseline() {
+        // No snapshots exist yet: the canonical quantity is the baseline, so
+        // pre-mapping platform activity still lands as a delta. Same numbers
+        // as the seeded test above, without seeded snapshots.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 8)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 9)]),
             ],
             0,
         )
@@ -1137,27 +1235,15 @@ mod tests {
 
         let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
 
-        assert_eq!(synced, 1);
+        assert_eq!((synced, pushed), (1, 2));
+        assert_eq!(harness.quantity("p1").await, 7);
         assert_eq!(
-            pushed, 1,
-            "only Squarespace is out of step with the resolved 3"
+            harness.adapter(Platform::Ebay).pushes(),
+            vec![("E-1".to_string(), 7)]
         );
-        assert_eq!(harness.quantity("p1").await, 3);
         assert_eq!(
             harness.adapter(Platform::Squarespace).pushes(),
-            vec![("S-1".to_string(), 3)]
-        );
-        assert!(
-            harness.adapter(Platform::Ebay).pushes().is_empty(),
-            "eBay already reported 3, so it must not be written to"
-        );
-
-        let recorded = harness.events_of_type("p1", "quantity_change").await;
-        assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].target_platform, "squarespace");
-        assert_eq!(
-            (recorded[0].old_quantity, recorded[0].new_quantity),
-            (10, 3)
+            vec![("S-1".to_string(), 7)]
         );
     }
 
@@ -1207,12 +1293,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_quantity_never_goes_negative() {
-        // A restock reading smaller than the decreases it is netted against
-        // must floor at 0, never push a negative quantity to a platform.
+        // Deltas that would drive canonical below zero must floor at 0, and
+        // the engine must never push a negative quantity to a platform.
         let harness = Harness::new(
             vec![
-                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 1)]),
-                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 0)]),
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 0)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 3)]),
             ],
             0,
         )
@@ -1220,25 +1306,34 @@ mod tests {
         harness
             .add_product(
                 "p1",
-                20,
+                5,
                 &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
             )
             .await;
         harness
             .db
-            .upsert_snapshot("p1", "ebay", 0, "2026-01-01 00:00:00")
+            .upsert_snapshot("p1", "ebay", 5, "2026-01-01 00:00:00")
             .await
             .unwrap();
         harness
             .db
-            .upsert_snapshot("p1", "squarespace", 9, "2026-01-01 00:00:00")
+            .upsert_snapshot("p1", "squarespace", 3, "2026-01-01 00:00:00")
             .await
             .unwrap();
 
         harness.engine.run_cycle().await.unwrap();
 
+        // -5 + 0 = -5 against a canonical 5 floors at 0.
         assert_eq!(harness.quantity("p1").await, 0);
-        for (item, pushed) in harness.adapter(Platform::Ebay).pushes() {
+        assert!(
+            harness.adapter(Platform::Ebay).pushes().is_empty(),
+            "eBay already reads 0, so nothing is pushed there"
+        );
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 0)]
+        );
+        for (item, pushed) in harness.adapter(Platform::Squarespace).pushes() {
             assert!(pushed >= 0, "pushed {pushed} to {item}");
         }
     }
@@ -1331,13 +1426,13 @@ mod tests {
             "the cycle must still complete"
         );
 
-        // Documenting current behaviour, not endorsing it: the platform whose
-        // poll failed is still written to in the same cycle, with a canonical
-        // quantity resolved without any reading from it. See the "partial
-        // failure semantics" item in ROADMAP.md Phase 4.
-        assert_eq!(
-            harness.adapter(Platform::Squarespace).pushes(),
-            vec![("S-1".to_string(), 2)]
+        // Partial-failure policy: a platform with no reading this cycle is
+        // never pushed to. Its state is unknown, so writing the canonical
+        // quantity — resolved without any reading from it — could overwrite
+        // live stock with a number derived from its peers.
+        assert!(
+            harness.adapter(Platform::Squarespace).pushes().is_empty(),
+            "no reading means no push, even though canonical moved"
         );
     }
 
@@ -1375,6 +1470,154 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("listing is locked"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_is_retried_on_the_next_cycle() {
+        // Three cycles: the first push to Squarespace fails, the second cycle
+        // retries it (the reading still disagrees with canonical), and the
+        // third cycle is quiet once the platform agrees.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 1)]),
+                FakeAdapter::new(Platform::Squarespace)
+                    .with_poll_script(vec![
+                        Poll::items(&[("S-1", 6)]),
+                        Poll::items(&[("S-1", 6)]),
+                        Poll::items(&[("S-1", 1)]),
+                    ])
+                    .failing_pushes("listing is locked"),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                6,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let squarespace = harness.adapter(Platform::Squarespace);
+
+        // Cycle 1: canonical moves 6 -> 1, the Squarespace push fails.
+        harness.engine.run_cycle().await.unwrap();
+        assert_eq!(harness.quantity("p1").await, 1);
+        assert!(squarespace.pushes().is_empty(), "the push failed");
+        assert_eq!(harness.events_of_type("p1", "push_error").await.len(), 1);
+
+        // Cycle 2: the listing still reads 6 against a canonical 1, so the
+        // engine retries the push even though canonical did not move.
+        squarespace.set_push_error(None);
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+        assert_eq!(harness.quantity("p1").await, 1);
+        assert_eq!(
+            squarespace.pushes(),
+            vec![("S-1".to_string(), 1)],
+            "the failed push must be retried on the next cycle"
+        );
+        assert_eq!((synced, pushed), (1, 1));
+
+        // Cycle 3: the platform now agrees with canonical — nothing to do.
+        let (_, pushed) = harness.engine.run_cycle().await.unwrap();
+        assert_eq!(pushed, 0);
+        assert_eq!(squarespace.pushes().len(), 1);
+        assert_eq!(harness.quantity("p1").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_manual_adjustment_is_pushed_to_platforms_on_the_next_cycle() {
+        // Stock changed in Nisaba — typed in by hand or raised by the vendor
+        // sync — must reach the platforms, not be overwritten by them. The
+        // product is fully synced at 7 on both platforms; then the canonical
+        // quantity is raised to 15 outside the engine.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 7)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                7,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        for platform in ["ebay", "squarespace"] {
+            harness
+                .db
+                .upsert_snapshot("p1", platform, 7, "2026-01-01 00:00:00")
+                .await
+                .unwrap();
+        }
+
+        // The manual adjustment (or vendor restock): canonical 7 -> 15.
+        harness.db.update_product_quantity("p1", 15).await.unwrap();
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(harness.quantity("p1").await, 15);
+        assert_eq!((synced, pushed), (1, 2));
+        assert_eq!(
+            harness.adapter(Platform::Ebay).pushes(),
+            vec![("E-1".to_string(), 15)]
+        );
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 15)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newly_mapped_listing_is_corrected_to_canonical() {
+        // The product is synced at 7 on eBay. A Squarespace listing reading 10
+        // is mapped afterwards. Its reading must not be absorbed into canonical
+        // as a phantom +3 restock; the listing is corrected down to 7.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 7)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 10)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 7, &[(Platform::Ebay, "E-1")])
+            .await;
+        harness
+            .db
+            .upsert_snapshot("p1", "ebay", 7, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        // Map the new listing after the product already has snapshot state.
+        harness
+            .db
+            .insert_mapping("p1", "squarespace", "S-1", None, "v1")
+            .await
+            .unwrap();
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+
+        assert_eq!(
+            harness.quantity("p1").await,
+            7,
+            "the new listing's reading must not move canonical"
+        );
+        assert_eq!((synced, pushed), (1, 1));
+        assert_eq!(
+            harness.adapter(Platform::Squarespace).pushes(),
+            vec![("S-1".to_string(), 7)],
+            "the new listing is corrected to canonical"
+        );
+        assert!(
+            harness.adapter(Platform::Ebay).pushes().is_empty(),
+            "eBay already agrees with canonical"
+        );
     }
 
     // ── Retry and auth ────────────────────────────────────────
@@ -1617,7 +1860,10 @@ mod tests {
         let (synced, would_push) = harness.engine.run_cycle().await.unwrap();
 
         assert_eq!(synced, 1);
-        assert_eq!(would_push, 1, "Squarespace is the one platform out of step");
+        assert_eq!(
+            would_push, 2,
+            "both platforms are out of step with the resolved 0"
+        );
 
         assert!(
             harness.adapter(Platform::Ebay).pushes().is_empty()
@@ -1625,7 +1871,7 @@ mod tests {
             "a dry run must never call set_quantity"
         );
 
-        let planned: Vec<_> = harness
+        let mut planned: Vec<_> = harness
             .drain_events()
             .into_iter()
             .filter_map(|e| match e {
@@ -1638,7 +1884,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(planned, vec![(Platform::Squarespace, 7, 3)]);
+        planned.sort_by_key(|(platform, _, _)| platform.as_str().to_string());
+        assert_eq!(
+            planned,
+            vec![(Platform::Ebay, 3, 0), (Platform::Squarespace, 7, 0),]
+        );
     }
 
     #[tokio::test]
@@ -1765,7 +2015,7 @@ mod tests {
 
         let dry = harness.into_dry_run();
         let (_, would_push) = dry.engine.run_cycle().await.unwrap();
-        assert_eq!(would_push, 1);
+        assert_eq!(would_push, 2);
         assert!(squarespace.pushes().is_empty());
 
         // Same DB, same adapters, same canned readings — but for real.
@@ -1773,8 +2023,12 @@ mod tests {
         let (_, pushed) = real.run_cycle().await.unwrap();
 
         assert_eq!(pushed, would_push, "the preview matched the real cycle");
-        assert_eq!(squarespace.pushes(), vec![("S-1".to_string(), 3)]);
-        assert_eq!(db.get_product("p1").await.unwrap().unwrap().quantity, 3);
+        assert_eq!(
+            squarespace.pushes(),
+            vec![("S-1".to_string(), 0)],
+            "Squarespace is corrected down to the ledger-resolved 0"
+        );
+        assert_eq!(db.get_product("p1").await.unwrap().unwrap().quantity, 0);
     }
 
     #[tokio::test]
