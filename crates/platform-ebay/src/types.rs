@@ -12,33 +12,115 @@ pub struct EbayTokenResponse {
 }
 
 /// eBay inventory item from the Inventory API.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Lossless by construction (N-5.2): `createOrReplaceInventoryItem` is a
+/// full replace, so every field eBay returns that this adapter does not
+/// actively edit must survive a read-modify-write cycle. Fields the adapter
+/// knows about but does not edit (brand, MPN, UPC, package weight/size,
+/// condition descriptors, …) are modelled explicitly; anything else —
+/// including fields eBay adds in future — is captured by `extra` via
+/// `#[serde(flatten)]` and re-serialised verbatim on the way back out.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayInventoryItem {
     pub sku: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product: Option<EbayProductInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability: Option<EbayAvailability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(
+        rename = "conditionDescription",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub condition_description: Option<String>,
+    /// e.g. `[{ "name": "3000", "values": ["..."] }]` — carried opaquely.
+    #[serde(
+        rename = "conditionDescriptors",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub condition_descriptors: Option<serde_json::Value>,
+    /// `{ dimensions, weight, ... }` — carried opaquely.
+    #[serde(
+        rename = "packageWeightAndSize",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub package_weight_and_size: Option<serde_json::Value>,
+    /// Any other top-level field (e.g. `locale`) round-trips through here.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayProductInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "imageUrls")]
+    #[serde(rename = "imageUrls", default, skip_serializing_if = "Option::is_none")]
     pub image_urls: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspects: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ean: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epid: Option<String>,
+    /// Unmodelled product fields (e.g. `productIdentifiers`, fields eBay
+    /// adds later) round-trip through here.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl Default for EbayProductInfo {
+    fn default() -> Self {
+        Self {
+            title: None,
+            description: None,
+            image_urls: None,
+            aspects: None,
+            brand: None,
+            mpn: None,
+            upc: None,
+            ean: None,
+            isbn: None,
+            epid: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayAvailability {
-    #[serde(rename = "shipToLocationAvailability")]
+    #[serde(
+        rename = "shipToLocationAvailability",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ship_to_location_availability: Option<EbayShipToLocation>,
+    /// e.g. `pickupAtLocationAvailability` and any future availability
+    /// blocks round-trip through here.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayShipToLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<i64>,
+    /// e.g. `availabilityDistributions` round-trips through here.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Response from GET /sell/inventory/v1/inventory_item
@@ -101,47 +183,103 @@ pub struct EbayOffersResponse {
     pub next: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// An offer as returned by the Offer API. Lossless like
+/// [`EbayInventoryItem`]: `updateOffer` is a full replace, so a complete
+/// PUT body is rebuilt from this value (see
+/// `client::build_offer_put_body`); unmodelled fields (`listingDuration`,
+/// `merchantLocationKey`, `tax`, `charity`, …) round-trip via `extra`.
+/// `offerId` / `listingId` / `status` are read-only and are stripped from
+/// PUT bodies, never written back.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayOffer {
-    #[serde(rename = "offerId")]
+    #[serde(rename = "offerId", default, skip_serializing_if = "Option::is_none")]
     pub offer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sku: Option<String>,
-    #[serde(rename = "marketplaceId")]
+    #[serde(
+        rename = "marketplaceId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub marketplace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-    #[serde(rename = "listingId")]
+    #[serde(rename = "listingId", default, skip_serializing_if = "Option::is_none")]
     pub listing_id: Option<String>,
-    #[serde(rename = "pricingSummary")]
+    #[serde(
+        rename = "pricingSummary",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pricing_summary: Option<EbayOfferPrice>,
-    #[serde(rename = "listingDescription")]
+    #[serde(
+        rename = "listingDescription",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub listing_description: Option<String>,
-    #[serde(rename = "availableQuantity")]
+    #[serde(
+        rename = "availableQuantity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub available_quantity: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(rename = "categoryId")]
+    #[serde(
+        rename = "categoryId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub category_id: Option<String>,
-    #[serde(rename = "listingPolicies")]
+    #[serde(
+        rename = "listingPolicies",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub listing_policies: Option<EbayOfferListingPolicies>,
+    /// Unmodelled offer fields round-trip through here.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayOfferListingPolicies {
-    #[serde(rename = "fulfillmentPolicyId")]
+    #[serde(
+        rename = "fulfillmentPolicyId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fulfillment_policy_id: Option<String>,
-    #[serde(rename = "paymentPolicyId")]
+    #[serde(
+        rename = "paymentPolicyId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub payment_policy_id: Option<String>,
-    #[serde(rename = "returnPolicyId")]
+    #[serde(
+        rename = "returnPolicyId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub return_policy_id: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayOfferPrice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<EbayAmount>,
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EbayAmount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
 }
 
