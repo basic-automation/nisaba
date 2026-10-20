@@ -429,20 +429,106 @@ pub async fn add_company_peer(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn remove_company_peer(
-    state: State<'_, AppState>,
-    onion_address: String,
-) -> Result<(), String> {
-    let db = state.active_db().await?;
-    // Find peer_id by onion address in v2 table
-    if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
+// ── Peer administration ─────────────────────────────────────
+
+/// Same admin check as `get_company_secret`: only the active company's
+/// `admin` role may administer peers.
+fn require_peer_admin(role: &str) -> Result<(), String> {
+    if role != "admin" {
+        return Err("Admin access required to manage company peers".to_string());
+    }
+    Ok(())
+}
+
+/// Resolve a peer by onion address, erroring when it does not exist.
+///
+/// Returns the v2 `peer_id` when the peer is in `company_peers_v2`, or
+/// `None` when it only exists in the legacy `company_peers` table. A peer
+/// present in neither table is an error, not a silent no-op.
+async fn require_existing_peer(db: &Db, onion_address: &str) -> Result<Option<String>, String> {
+    if let Some((peer_id, _, _, _, _)) = db
+        .get_peer_by_onion(onion_address)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(Some(peer_id));
+    }
+    if db
+        .get_peer(onion_address)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    Err(format!("Peer not found: {onion_address}"))
+}
+
+async fn remove_peer_inner(db: &Db, role: &str, onion_address: &str) -> Result<(), String> {
+    require_peer_admin(role)?;
+    let peer_id = require_existing_peer(db, onion_address).await?;
+    if let Some(peer_id) = peer_id {
         db.remove_peer_v2(&peer_id)
             .await
             .map_err(|e| e.to_string())?;
     }
     // Also remove from legacy table
-    let _ = db.remove_peer(&onion_address).await;
+    let _ = db.remove_peer(onion_address).await;
+    Ok(())
+}
+
+async fn approve_peer_inner(db: &Db, role: &str, onion_address: &str) -> Result<(), String> {
+    require_peer_admin(role)?;
+    let peer_id = require_existing_peer(db, onion_address).await?;
+    if let Some(peer_id) = peer_id {
+        db.approve_peer_v2(&peer_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = db.approve_peer(onion_address).await;
+    Ok(())
+}
+
+async fn reject_peer_inner(db: &Db, role: &str, onion_address: &str) -> Result<(), String> {
+    require_peer_admin(role)?;
+    let peer_id = require_existing_peer(db, onion_address).await?;
+    if let Some(peer_id) = peer_id {
+        db.reject_peer_v2(&peer_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = db.reject_peer(onion_address).await;
+    Ok(())
+}
+
+async fn set_peer_role_inner(
+    db: &Db,
+    role: &str,
+    onion_address: &str,
+    new_role: &str,
+) -> Result<(), String> {
+    if new_role != "admin" && new_role != "member" {
+        return Err("Role must be 'admin' or 'member'".to_string());
+    }
+    require_peer_admin(role)?;
+    let peer_id = require_existing_peer(db, onion_address).await?;
+    if let Some(peer_id) = peer_id {
+        db.update_peer_role_v2(&peer_id, new_role)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = db.update_peer_role(onion_address, new_role).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_company_peer(
+    state: State<'_, AppState>,
+    onion_address: String,
+) -> Result<(), String> {
+    let role = state.active_role().await?;
+    let db = state.active_db().await?;
+    remove_peer_inner(&db, &role, &onion_address).await?;
     info!(peer = %onion_address, "Peer removed");
     Ok(())
 }
@@ -452,13 +538,9 @@ pub async fn approve_company_peer(
     state: State<'_, AppState>,
     onion_address: String,
 ) -> Result<(), String> {
+    let role = state.active_role().await?;
     let db = state.active_db().await?;
-    if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.approve_peer_v2(&peer_id)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    let _ = db.approve_peer(&onion_address).await;
+    approve_peer_inner(&db, &role, &onion_address).await?;
     info!(peer = %onion_address, "Peer approved");
     Ok(())
 }
@@ -468,13 +550,9 @@ pub async fn reject_company_peer(
     state: State<'_, AppState>,
     onion_address: String,
 ) -> Result<(), String> {
+    let role = state.active_role().await?;
     let db = state.active_db().await?;
-    if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.reject_peer_v2(&peer_id)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    let _ = db.reject_peer(&onion_address).await;
+    reject_peer_inner(&db, &role, &onion_address).await?;
     info!(peer = %onion_address, "Peer rejected");
     Ok(())
 }
@@ -485,16 +563,9 @@ pub async fn set_peer_role(
     onion_address: String,
     role: String,
 ) -> Result<(), String> {
-    if role != "admin" && role != "member" {
-        return Err("Role must be 'admin' or 'member'".to_string());
-    }
+    let caller_role = state.active_role().await?;
     let db = state.active_db().await?;
-    if let Ok(Some((peer_id, _, _, _, _))) = db.get_peer_by_onion(&onion_address).await {
-        db.update_peer_role_v2(&peer_id, &role)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    let _ = db.update_peer_role(&onion_address, &role).await;
+    set_peer_role_inner(&db, &caller_role, &onion_address, &role).await?;
     info!(peer = %onion_address, role = %role, "Peer role updated");
     Ok(())
 }
@@ -588,4 +659,132 @@ pub async fn switch_company(state: State<'_, AppState>, id: String) -> Result<St
     info!(company = %id, "Switched active company");
 
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ONION: &str = "peer1.onion";
+    const MISSING: &str = "missing.onion";
+
+    async fn test_db() -> (Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nisaba-peer-admin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(dir.join("test.db").to_str().unwrap())
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        (db, dir)
+    }
+
+    async fn seed_peer(db: &Db) {
+        db.insert_peer_v2("peer-1", ONION, "Alice", "member", false)
+            .await
+            .unwrap();
+        db.insert_peer(ONION, "Alice", "member", false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_admin_commands_error_on_a_missing_peer() {
+        let (db, dir) = test_db().await;
+
+        for err in [
+            approve_peer_inner(&db, "admin", MISSING).await.unwrap_err(),
+            reject_peer_inner(&db, "admin", MISSING).await.unwrap_err(),
+            remove_peer_inner(&db, "admin", MISSING).await.unwrap_err(),
+            set_peer_role_inner(&db, "admin", MISSING, "admin")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(err.contains("Peer not found"), "{err}");
+            assert!(err.contains(MISSING), "{err}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn peer_admin_commands_require_admin() {
+        let (db, dir) = test_db().await;
+        seed_peer(&db).await;
+
+        for err in [
+            approve_peer_inner(&db, "member", ONION).await.unwrap_err(),
+            reject_peer_inner(&db, "member", ONION).await.unwrap_err(),
+            remove_peer_inner(&db, "member", ONION).await.unwrap_err(),
+            set_peer_role_inner(&db, "member", ONION, "admin")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(err.contains("Admin access required"), "{err}");
+        }
+
+        // The rejected calls changed nothing.
+        let peer = db.get_peer_by_onion(ONION).await.unwrap().unwrap();
+        assert_eq!(peer.3, "member");
+        assert!(!peer.4);
+
+        // A non-admin is refused even for a peer that does not exist, so
+        // existence is not leaked and the admin check comes first.
+        assert!(approve_peer_inner(&db, "member", MISSING)
+            .await
+            .unwrap_err()
+            .contains("Admin access required"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn peer_admin_commands_apply_to_an_existing_peer_for_an_admin() {
+        let (db, dir) = test_db().await;
+        seed_peer(&db).await;
+
+        approve_peer_inner(&db, "admin", ONION).await.unwrap();
+        let peer = db.get_peer_by_onion(ONION).await.unwrap().unwrap();
+        assert!(peer.4, "approve should authorize the peer");
+
+        set_peer_role_inner(&db, "admin", ONION, "admin")
+            .await
+            .unwrap();
+        let peer = db.get_peer_by_onion(ONION).await.unwrap().unwrap();
+        assert_eq!(peer.3, "admin");
+
+        // An invalid role is still refused before anything changes.
+        assert!(set_peer_role_inner(&db, "admin", ONION, "owner")
+            .await
+            .unwrap_err()
+            .contains("Role must be"));
+
+        remove_peer_inner(&db, "admin", ONION).await.unwrap();
+        assert!(db.get_peer_by_onion(ONION).await.unwrap().is_none());
+        assert!(db.get_peer(ONION).await.unwrap().is_none());
+
+        // Reject also removes an existing peer.
+        seed_peer(&db).await;
+        reject_peer_inner(&db, "admin", ONION).await.unwrap();
+        assert!(db.get_peer_by_onion(ONION).await.unwrap().is_none());
+        assert!(db.get_peer(ONION).await.unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_only_peer_counts_as_existing() {
+        let (db, dir) = test_db().await;
+        db.insert_peer(ONION, "Legacy", "member", false)
+            .await
+            .unwrap();
+
+        approve_peer_inner(&db, "admin", ONION).await.unwrap();
+        let peer = db.get_peer(ONION).await.unwrap().unwrap();
+        assert!(peer.3);
+
+        remove_peer_inner(&db, "admin", ONION).await.unwrap();
+        assert!(db.get_peer(ONION).await.unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
