@@ -15,7 +15,7 @@ use crate::types::{
     VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 22;
+const CURRENT_SCHEMA_VERSION: i64 = 23;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -523,8 +523,8 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008`
     ///   (repairing the columns migration 007 dropped when it rebuilt
-    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019`, `021` and `022` are
-    ///   all inline. The inline step is the single authority for these
+    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019`, `021`, `022` and
+    ///   `023` are all inline. The inline step is the single authority for these
     ///   numbers: an orphan `.sql` file with an inline step's number must not
     ///   exist (three such orphans were deleted by N-3.2).
     ///
@@ -1019,6 +1019,45 @@ impl Db {
                     )
                     .await;
                 debug!("Applied migration 022: vendor_plugin_registry.code_hash");
+            }
+            23 => {
+                // Partial unique indexes for platform_mappings (N-4.5):
+                // `delete_mapping` soft-deletes, but the unique indexes from
+                // steps 007/015 span *all* rows, tombstones included — so
+                // re-mapping a listing whose old mapping was deleted hit
+                // UNIQUE and could never succeed. Rebuild the table (the
+                // step 007/015 pattern: turso cannot DROP INDEX) and recreate
+                // both unique indexes as partial, covering only live rows
+                // (`WHERE deleted_at IS NULL`). Tombstones are preserved:
+                // the partial indexes are strictly weaker than the old ones,
+                // so every existing row still fits.
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS platform_mappings_partial (
+                        id               INTEGER PRIMARY KEY,
+                        product_id       TEXT NOT NULL REFERENCES products(id),
+                        platform         TEXT NOT NULL,
+                        platform_item_id TEXT NOT NULL,
+                        platform_sku     TEXT,
+                        is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+                        deleted_at       TEXT,
+                        updated_at       TEXT NOT NULL DEFAULT '',
+                        variant_id       TEXT REFERENCES product_variants(id)
+                    );
+                    INSERT INTO platform_mappings_partial
+                        (id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id)
+                        SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id
+                        FROM platform_mappings;
+                    DROP TABLE platform_mappings;
+                    ALTER TABLE platform_mappings_partial RENAME TO platform_mappings;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_mappings_product_platform_variant
+                        ON platform_mappings(product_id, platform, COALESCE(variant_id, ''))
+                        WHERE deleted_at IS NULL;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_mappings_platform_item
+                        ON platform_mappings(platform, platform_item_id)
+                        WHERE deleted_at IS NULL;",
+                )
+                .await?;
+                debug!("Applied migration 023: partial unique indexes on platform_mappings");
             }
             _ => {}
         }
@@ -1726,6 +1765,86 @@ impl Db {
         )
         .await?;
         Ok(())
+    }
+
+    /// The live (non-deleted) mapping for one product on one platform for one
+    /// variant, if any. This is the row the partial unique index
+    /// `idx_mappings_product_platform_variant` protects, so a `Some` here
+    /// means a new mapping for the same triple would fail with UNIQUE.
+    pub async fn get_mapping_for_product_platform_variant(
+        &self,
+        product_id: &str,
+        platform: &str,
+        variant_id: &str,
+    ) -> Result<Option<PlatformMapping>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                 FROM platform_mappings
+                 WHERE product_id = ?1 AND platform = ?2
+                   AND COALESCE(variant_id, '') = COALESCE(?3, '')
+                   AND deleted_at IS NULL",
+                params![product_id, platform, variant_id],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(Some(parse_mapping(&row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Record a listing that was just created on a platform: insert its
+    /// mapping and, when `listing_json` is given, its `cached_listings`
+    /// record, in a single transaction.
+    ///
+    /// The two writes either both land or both roll back, so the local
+    /// record of a created listing can never exist without its mapping (or
+    /// vice versa). The live listing itself is created by the caller *after*
+    /// a pre-flight check (see
+    /// [`get_mapping_for_product_platform_variant`](Self::get_mapping_for_product_platform_variant)):
+    /// no platform adapter can delete a listing it created, so the mapping
+    /// conflict that used to strand an unmapped live listing is rejected
+    /// before anything is created remotely, not discovered afterwards.
+    pub async fn record_created_listing(
+        &self,
+        product_id: &str,
+        platform: &str,
+        platform_item_id: &str,
+        platform_sku: Option<&str>,
+        variant_id: &str,
+        listing_json: Option<&str>,
+    ) -> Result<(), SyncError> {
+        let mapping = (
+            "INSERT INTO platform_mappings (product_id, platform, platform_item_id, platform_sku, variant_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            to_params(params![
+                product_id,
+                platform,
+                platform_item_id,
+                platform_sku,
+                variant_id
+            ]),
+        );
+        match listing_json {
+            Some(json) => {
+                self.execute_writes(&[
+                    mapping,
+                    (
+                        "INSERT INTO cached_listings (product_id, platform, platform_item_id, listing_json, fetched_at)
+                         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+                        to_params(params![product_id, platform, platform_item_id, json]),
+                    ),
+                ])
+                .await
+            }
+            None => {
+                let (sql, p) = mapping;
+                self.execute_writes(&[(sql, p)]).await
+            }
+        }
     }
 
     // ── Platform Snapshots ────────────────────────────────────
@@ -4903,6 +5022,22 @@ mod tests {
         names
     }
 
+    async fn index_sql(conn: &turso::Connection, index: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                turso::params![index],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn user_version_pragma_rolls_back_with_its_transaction() {
         // migrate_step() bumps user_version inside the step's transaction. This
@@ -5149,6 +5284,81 @@ mod tests {
             assert_eq!(n, 1, "{table} lost its row in the step-16 rebuild");
         }
         drop(conn);
+
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn step_23_makes_the_mapping_unique_indexes_partial() {
+        // Upgrade from a populated v22 database: one live mapping and one
+        // soft-deleted tombstone. Step 23 must keep both rows, swap both
+        // unique indexes for partial ones, and afterwards let the
+        // tombstone's keys be re-mapped.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v22.db", 22).await;
+
+        let conn = db.connect().await.unwrap();
+        for index in [
+            "idx_mappings_product_platform_variant",
+            "idx_mappings_platform_item",
+        ] {
+            assert!(
+                !index_sql(&conn, index).await.contains("WHERE"),
+                "v22 {index} should not be partial yet"
+            );
+        }
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p1', 'SKU-1', 'Widget', 10)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings
+                 (id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at, variant_id)
+             VALUES (1, 'p1', 'ebay', 'EBAY-LIVE', 'SKU-1', 1, NULL, '2026-10-01', 'v1'),
+                    (2, 'p1', 'etsy', 'ETSY-GONE', 'SKU-1', 1, '2026-10-02', '2026-10-02', 'v1')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(23).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 23);
+
+        let conn = db.connect().await.unwrap();
+        for index in [
+            "idx_mappings_product_platform_variant",
+            "idx_mappings_platform_item",
+        ] {
+            let sql = index_sql(&conn, index).await;
+            assert!(
+                sql.contains("WHERE deleted_at IS NULL"),
+                "step 23 must make {index} partial; got: {sql}"
+            );
+        }
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM platform_mappings", ())
+            .await
+            .unwrap();
+        let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(n, 2, "step 23 must preserve live rows and tombstones");
+        drop(conn);
+
+        // The tombstone no longer blocks re-mapping its keys…
+        db.insert_mapping("p1", "etsy", "ETSY-GONE", Some("SKU-1"), "v1")
+            .await
+            .unwrap();
+        // …but a second live mapping for the same keys still conflicts.
+        assert!(
+            db.insert_mapping("p1", "etsy", "ETSY-GONE", Some("SKU-1"), "v1")
+                .await
+                .is_err(),
+            "the partial index must still reject duplicate live mappings"
+        );
 
         db.migrate().await.unwrap();
         assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
@@ -5504,6 +5714,145 @@ mod tests {
         db.delete_mapping(mappings[0].id).await.unwrap();
         let mappings = db.list_mappings_for_product("p1").await.unwrap();
         assert_eq!(mappings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deleted_mapping_can_be_recreated() {
+        // N-4.5: `delete_mapping` soft-deletes, and the unique indexes used
+        // to span the tombstone, so re-mapping the same listing always hit
+        // UNIQUE. With the partial indexes (migration 023) a deleted
+        // mapping's keys are free again.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remap.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        for (id, sku) in [("p1", "SKU-P1"), ("p2", "SKU-P2")] {
+            db.insert_product(&Product {
+                id: id.to_string(),
+                canonical_sku: sku.to_string(),
+                name: format!("Product {id}"),
+                quantity: 5,
+                low_stock_threshold: None,
+                is_tracked: true,
+                has_variants: false,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .await
+            .unwrap();
+        }
+
+        db.insert_mapping("p1", "ebay", "EBAY-123", Some("SKU-P1"), "v1")
+            .await
+            .unwrap();
+        let original_id = db.list_mappings_for_product("p1").await.unwrap()[0].id;
+        db.delete_mapping(original_id).await.unwrap();
+        assert!(db
+            .get_mapping_by_platform_item("ebay", "EBAY-123")
+            .await
+            .unwrap()
+            .is_none());
+
+        // Re-create the exact same mapping: same product, platform, item
+        // and variant — both partial unique indexes are exercised.
+        db.insert_mapping("p1", "ebay", "EBAY-123", Some("SKU-P1"), "v1")
+            .await
+            .unwrap();
+        let mappings = db.list_mappings_for_product("p1").await.unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].platform_item_id, "EBAY-123");
+
+        // The tombstone is still stored (P2P propagates deletions from it),
+        // alongside the live replacement.
+        assert_eq!(
+            count_rows(&db, "platform_mappings", "platform_item_id", "EBAY-123").await,
+            2
+        );
+
+        // Unmap again and map the same platform item to a different
+        // product: `idx_mappings_platform_item` alone must not block it.
+        db.delete_mapping(mappings[0].id).await.unwrap();
+        db.insert_mapping("p2", "ebay", "EBAY-123", Some("SKU-P2"), "v9")
+            .await
+            .unwrap();
+        let found = db
+            .get_mapping_by_platform_item("ebay", "EBAY-123")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.product_id, "p2");
+    }
+
+    #[tokio::test]
+    async fn record_created_listing_records_mapping_and_listing_atomically() {
+        // N-4.5: the mapping for a newly created listing and the local
+        // record of that listing land in one transaction — both or neither.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("created-listing.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        db.insert_product(&Product {
+            id: "p1".to_string(),
+            canonical_sku: "SKU-P1".to_string(),
+            name: "Product 1".to_string(),
+            quantity: 5,
+            low_stock_threshold: None,
+            is_tracked: true,
+            has_variants: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+
+        // Happy path: mapping and cached listing record appear together.
+        db.record_created_listing(
+            "p1",
+            "ebay",
+            "EBAY-NEW",
+            Some("SKU-P1"),
+            "v1",
+            Some(r#"{"title":"Widget"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.list_mappings_for_product("p1").await.unwrap().len(), 1);
+        assert_eq!(
+            db.get_cached_listings("p1").await.unwrap(),
+            vec![r#"{"title":"Widget"}"#.to_string()]
+        );
+
+        // Failure path: pre-seed a cached record whose primary key the next
+        // call would reuse, so its second statement fails. The mapping
+        // insert from the same call must roll back with it.
+        db.save_cached_listing("p1", "etsy", "ETSY-NEW", "{}")
+            .await
+            .unwrap();
+        assert!(db
+            .record_created_listing(
+                "p1",
+                "etsy",
+                "ETSY-NEW",
+                Some("SKU-P1"),
+                "v1",
+                Some(r#"{"title":"Gadget"}"#),
+            )
+            .await
+            .is_err());
+        assert!(
+            db.get_mapping_by_platform_item("etsy", "ETSY-NEW")
+                .await
+                .unwrap()
+                .is_none(),
+            "a failed listing record must not leave its mapping behind"
+        );
+        assert_eq!(
+            db.get_cached_listings("p1").await.unwrap().len(),
+            2,
+            "the pre-existing cached records must be untouched"
+        );
     }
 
     #[tokio::test]
