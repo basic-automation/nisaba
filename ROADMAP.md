@@ -82,7 +82,7 @@ are referenced rather than repeated.
 
 ### Gate: data safety
 
-- [ ] Transactional migrations, plus upgrade tests from a populated database at *every
+- [x] Transactional migrations, plus upgrade tests from a populated database at *every
       released version* (0.1.0 onward), run in CI (Phase 1).
 - [ ] Automatic database backup before every migration and on a schedule (keep the last N),
       with a *Restore from backup* action in the UI. Backups land next to the database and
@@ -339,7 +339,7 @@ layer's Tor transport are still untested.
 - [ ] Renumber or rename `migrations/*.sql` so a file's number matches its schema version —
       they have drifted (`014_cached_platform_listings.sql` runs at `version < 17`), and the
       `if version < N` gate being the only authority is a trap for a new contributor
-- [ ] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
+- [x] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
       BEGIN/COMMIT and writes `user_version` only at the end. A crash between `DROP` and
       `RENAME` in the table rebuilds (steps 7, 15, 16) leaves a database on which every later
       launch fails. Wrap each step in a transaction that bumps `user_version`. Add an

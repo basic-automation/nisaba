@@ -342,6 +342,100 @@ impl Db {
     /// Run migrations if needed. Uses PRAGMA user_version to track schema version.
     /// Apply every migration step the DB has not seen yet.
     ///
+    /// Each step runs in its own `BEGIN IMMEDIATE ... COMMIT` transaction via
+    /// [`migrate_step`](Self::migrate_step), which bumps `PRAGMA user_version`
+    /// to the step number atomically with the schema change. A crash anywhere
+    /// before the step's `COMMIT` rolls the whole step back, leaving the
+    /// database at the previous version and the step re-runnable.
+    pub async fn migrate(&self) -> Result<(), SyncError> {
+        let start = self.schema_version().await?;
+        if start >= CURRENT_SCHEMA_VERSION {
+            debug!(version = start, "Database schema is up to date");
+            return Ok(());
+        }
+
+        info!(
+            current_version = start,
+            target_version = CURRENT_SCHEMA_VERSION,
+            "Running database migrations"
+        );
+        for step in (start + 1)..=CURRENT_SCHEMA_VERSION {
+            self.migrate_step(step).await?;
+        }
+        info!("Migrations complete, schema version = {CURRENT_SCHEMA_VERSION}");
+        Ok(())
+    }
+
+    /// Current `PRAGMA user_version` of this database.
+    async fn schema_version(&self) -> Result<i64, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn.query("PRAGMA user_version", ()).await?;
+        if let Some(row) = rows.next().await? {
+            Ok(row.get::<i64>(0)?)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Apply one migration step inside its own transaction, bumping
+    /// `PRAGMA user_version` to the step number atomically with the schema
+    /// change.
+    ///
+    /// SQLite rolls `PRAGMA user_version = N` back with the enclosing
+    /// transaction, so a crash anywhere before `COMMIT` leaves the database at
+    /// the previous version and the step re-runnable. Steps already applied
+    /// are skipped.
+    async fn migrate_step(&self, step: i64) -> Result<(), SyncError> {
+        if self.schema_version().await? >= step {
+            return Ok(());
+        }
+
+        let conn = self.connect().await?;
+        for attempt in 0..3u32 {
+            match conn.execute("BEGIN IMMEDIATE", ()).await {
+                Ok(_) => break,
+                Err(ref e) if is_retryable(e) && attempt < 2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt)))
+                        .await;
+                }
+                Err(e) => {
+                    return Err(SyncError::DatabaseError(format!(
+                        "Migration step {step}: failed to begin transaction: {e}"
+                    )));
+                }
+            }
+        }
+
+        if let Err(e) = self.run_migration_step(&conn, step).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        conn.execute(&format!("PRAGMA user_version = {step}"), ())
+            .await
+            .map_err(|e| {
+                SyncError::DatabaseError(format!(
+                    "Migration step {step}: user_version bump failed: {e}"
+                ))
+            })?;
+
+        match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                debug!(step, "Applied migration step");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(SyncError::DatabaseError(format!(
+                    "Migration step {step}: commit failed: {e}"
+                )))
+            }
+        }
+    }
+
+    /// The body of a single migration step. Runs inside the transaction opened
+    /// by [`migrate_step`](Self::migrate_step); never call it directly.
+    ///
     /// Two things about the numbering are worth knowing before adding a step,
     /// because neither is obvious from `migrations/`:
     ///
@@ -355,74 +449,53 @@ impl Db {
     /// * **A file's number is not its schema version.** The `NNN_` prefixes and
     ///   `PRAGMA user_version` drifted apart as inline steps were added:
     ///   `migrations/014_cached_platform_listings.sql` is applied at
-    ///   `version < 17`. The `if version < N` gate is the authority; the
+    ///   `version < 17`. The match arm below is the authority; the
     ///   filename is a label.
     ///
     /// Adding a step means bumping [`CURRENT_SCHEMA_VERSION`] and appending a
-    /// new `if version < N` block. Never edit or renumber a step that shipped.
-    pub async fn migrate(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
-
-        let mut rows = conn.query("PRAGMA user_version", ()).await?;
-        let version: i64 = if let Some(row) = rows.next().await? {
-            row.get::<i64>(0)?
-        } else {
-            0
-        };
-
-        if version < CURRENT_SCHEMA_VERSION {
-            info!(
-                current_version = version,
-                target_version = CURRENT_SCHEMA_VERSION,
-                "Running database migrations"
-            );
-
-            if version < 1 {
+    /// new match arm here. Never edit or renumber a step that shipped.
+    async fn run_migration_step(&self, conn: &Connection, step: i64) -> Result<(), SyncError> {
+        match step {
+            1 => {
                 conn.execute_batch(include_str!("../../../migrations/001_initial.sql"))
                     .await?;
                 debug!("Applied migration 001_initial.sql");
             }
-
-            if version < 2 {
+            2 => {
                 conn.execute_batch(include_str!("../../../migrations/002_p2p_company.sql"))
                     .await?;
                 debug!("Applied migration 002_p2p_company.sql");
             }
-
-            if version < 3 {
+            3 => {
                 conn.execute_batch(include_str!("../../../migrations/003_multi_company.sql"))
                     .await?;
 
                 // Migrate existing peers from company_peers → company_peers_v2
-                self.migrate_peers_to_v2().await?;
+                self.migrate_peers_to_v2(conn).await?;
 
                 // Add peer_id column to company table if it exists and doesn't have it
-                self.add_company_peer_id_column().await?;
+                self.add_company_peer_id_column(conn).await?;
 
                 debug!("Applied migration 003_multi_company.sql");
             }
-
-            if version < 4 {
+            4 => {
                 // Add logo columns to company table (company DB)
-                self.add_company_logo_columns().await?;
+                self.add_company_logo_columns(conn).await?;
                 // Add logo column to company_registry table (app DB)
-                self.add_registry_logo_column().await?;
+                self.add_registry_logo_column(conn).await?;
                 debug!("Applied migration 004_company_logo");
             }
-
-            if version < 5 {
+            5 => {
                 conn.execute_batch(include_str!("../../../migrations/005_vendor_plugins.sql"))
                     .await?;
                 debug!("Applied migration 005_vendor_plugins.sql");
             }
-
-            if version < 6 {
+            6 => {
                 conn.execute_batch(include_str!("../../../migrations/006_plugin_metadata.sql"))
                     .await?;
                 debug!("Applied migration 006_plugin_metadata.sql");
             }
-
-            if version < 7 {
+            7 => {
                 // Create product_variants table + indexes
                 conn.execute_batch(include_str!("../../../migrations/007_product_variants.sql"))
                     .await?;
@@ -463,8 +536,7 @@ impl Db {
 
                 debug!("Applied migration 007_product_variants");
             }
-
-            if version < 8 {
+            8 => {
                 // Repair: migration 7 rebuilt platform_mappings but may have
                 // dropped the deleted_at/updated_at columns added by migration 2.
                 // Add them back idempotently.
@@ -482,27 +554,23 @@ impl Db {
                     .await;
                 debug!("Applied migration 008_repair_mappings_columns");
             }
-
-            if version < 9 {
+            9 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/009_vendor_listings_cache.sql"
                 ))
                 .await?;
                 debug!("Applied migration 009_vendor_listings_cache.sql");
             }
-
-            if version < 10 {
-                self.migrate_always_variants().await?;
+            10 => {
+                self.migrate_always_variants(conn).await?;
                 debug!("Applied migration 010_always_variants");
             }
-
-            if version < 11 {
+            11 => {
                 conn.execute_batch(include_str!("../../../migrations/011_cached_listings.sql"))
                     .await?;
                 debug!("Applied migration 011_cached_listings.sql");
             }
-
-            if version < 12 {
+            12 => {
                 // Idempotent — ignore error if columns already exist (e.g. from
                 // a previous interrupted migration that didn't bump the version).
                 let _ = conn
@@ -519,8 +587,7 @@ impl Db {
                     .await;
                 debug!("Applied migration 012_variant_vendor_source.sql");
             }
-
-            if version < 13 {
+            13 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/013_product_vendor_data.sql"
                 ))
@@ -590,8 +657,7 @@ impl Db {
 
                 debug!("Applied migration 013_product_vendor_data.sql (with backfill)");
             }
-
-            if version < 14 {
+            14 => {
                 // Dropship-aware inventory: per-plugin toggle + on-hand quantity
                 let _ = conn
                     .execute(
@@ -613,8 +679,7 @@ impl Db {
                 .await?;
                 debug!("Applied migration 014: dropship inventory (include_vendor_stock + on_hand_quantity)");
             }
-
-            if version < 15 {
+            15 => {
                 // Rebuild platform_mappings without AUTOINCREMENT (unsupported in MVCC mode).
                 // INTEGER PRIMARY KEY still auto-generates IDs via max(rowid)+1.
                 conn.execute_batch(
@@ -642,8 +707,7 @@ impl Db {
                 .await?;
                 debug!("Applied migration 015: rebuild platform_mappings without AUTOINCREMENT for MVCC compat");
             }
-
-            if version < 16 {
+            16 => {
                 // Rebuild all remaining tables that used AUTOINCREMENT (unsupported in MVCC mode).
                 // INTEGER PRIMARY KEY still auto-generates IDs via max(rowid)+1.
 
@@ -790,16 +854,14 @@ impl Db {
 
                 debug!("Applied migration 016: rebuild all remaining AUTOINCREMENT tables for MVCC compat");
             }
-
-            if version < 17 {
+            17 => {
                 conn.execute_batch(include_str!(
                     "../../../migrations/014_cached_platform_listings.sql"
                 ))
                 .await?;
                 debug!("Applied migration 017: cached_platform_listings table");
             }
-
-            if version < 18 {
+            18 => {
                 // Cached fetch allowlist per registry plugin (see VendorPluginRow). NULL
                 // means "not computed yet", which is exactly right for every existing row.
                 let _ = conn
@@ -810,8 +872,7 @@ impl Db {
                     .await;
                 debug!("Applied migration 018: vendor_plugin_registry.allowed_hosts");
             }
-
-            if version < 19 {
+            19 => {
                 // Per-install plugin time limit (local, never synced). NULL = default.
                 let _ = conn
                     .execute(
@@ -821,19 +882,8 @@ impl Db {
                     .await;
                 debug!("Applied migration 019: vendor_plugin_installs.timeout_minutes");
             }
-
-            // Set the new schema version
-            conn.execute_batch(&format!(
-                "PRAGMA user_version = {};",
-                CURRENT_SCHEMA_VERSION
-            ))
-            .await?;
-
-            info!("Migrations complete, schema version = {CURRENT_SCHEMA_VERSION}");
-        } else {
-            debug!(version, "Database schema is up to date");
+            _ => {}
         }
-
         Ok(())
     }
 
@@ -2487,9 +2537,7 @@ impl Db {
     /// Migration 10: ensure every product has at least one variant row.
     /// Products with has_variants=0 and no variant rows get a "Default" variant
     /// created from their canonical_sku and quantity. Then has_variants is set to 1.
-    async fn migrate_always_variants(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
-
+    async fn migrate_always_variants(&self, conn: &Connection) -> Result<(), SyncError> {
         // Find products that have no variant rows
         let mut rows = conn
             .query(
@@ -2535,8 +2583,7 @@ impl Db {
         Ok(())
     }
 
-    async fn migrate_peers_to_v2(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn migrate_peers_to_v2(&self, conn: &Connection) -> Result<(), SyncError> {
         // Check if the old company_peers table exists
         let mut rows = conn
             .query(
@@ -2594,8 +2641,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_company_peer_id_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_company_peer_id_column(&self, conn: &Connection) -> Result<(), SyncError> {
         // Check if company table exists
         let mut rows = conn
             .query(
@@ -2634,8 +2680,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_company_logo_columns(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_company_logo_columns(&self, conn: &Connection) -> Result<(), SyncError> {
         // Try to add columns; ignore errors if table doesn't exist or column already exists
         let _ = conn
             .execute_batch("ALTER TABLE company ADD COLUMN logo TEXT")
@@ -2646,8 +2691,7 @@ impl Db {
         Ok(())
     }
 
-    async fn add_registry_logo_column(&self) -> Result<(), SyncError> {
-        let conn = self.connect().await?;
+    async fn add_registry_logo_column(&self, conn: &Connection) -> Result<(), SyncError> {
         // Try to add column; ignore errors if table doesn't exist or column already exists
         let _ = conn
             .execute_batch("ALTER TABLE company_registry ADD COLUMN logo TEXT")
@@ -4102,6 +4146,382 @@ mod tests {
         let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
         let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// Open a database and apply migration steps `1..=target` one at a time,
+    /// exactly as `migrate()` would have on an older release.
+    async fn db_at_schema_version(dir: &tempfile::TempDir, name: &str, target: i64) -> Db {
+        let path = dir.path().join(name);
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        for step in 1..=target {
+            db.migrate_step(step).await.unwrap();
+        }
+        assert_eq!(db.schema_version().await.unwrap(), target);
+        db
+    }
+
+    async fn user_version_of(db: &Db) -> i64 {
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    async fn table_columns(conn: &turso::Connection, table: &str) -> Vec<String> {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await
+            .unwrap();
+        let mut cols = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            cols.push(row.get::<String>(1).unwrap());
+        }
+        cols
+    }
+
+    async fn table_ddl(conn: &turso::Connection, table: &str) -> String {
+        let mut rows = conn
+            .query(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                turso::params![table],
+            )
+            .await
+            .unwrap();
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
+    }
+
+    async fn index_names(conn: &turso::Connection, table: &str) -> Vec<String> {
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1",
+                turso::params![table],
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        names
+    }
+
+    #[tokio::test]
+    async fn user_version_pragma_rolls_back_with_its_transaction() {
+        // migrate_step() bumps user_version inside the step's transaction. This
+        // locks in the SQLite behavior that makes that atomic: the pragma is
+        // rolled back with the transaction, so a crash mid-step can never
+        // leave the version bumped while the schema change rolled back.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "pragma-tx.db", 1).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        conn.execute("PRAGMA user_version = 42", ()).await.unwrap();
+        conn.execute("ROLLBACK", ()).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 1);
+
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        conn.execute("PRAGMA user_version = 42", ()).await.unwrap();
+        conn.execute("COMMIT", ()).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 42);
+    }
+
+    #[tokio::test]
+    async fn step_7_rebuild_preserves_populated_mappings() {
+        // Upgrade from a populated v6 database through the DROP/RENAME table
+        // rebuild in step 7. The step must bump the version by itself, keep
+        // every row, and swap the unique indexes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v6.db", 6).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p1', 'SKU-1', 'Widget', 10)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings
+                 (id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, updated_at)
+             VALUES (7, 'p1', 'ebay', 'EBAY-1', 'SKU-1', 1, NULL, '2026-10-01')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(7).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 7);
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT product_id, platform, platform_item_id, platform_sku, deleted_at, updated_at, variant_id
+                 FROM platform_mappings WHERE id = 7",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "p1");
+        assert_eq!(row.get::<String>(1).unwrap(), "ebay");
+        assert_eq!(row.get::<String>(2).unwrap(), "EBAY-1");
+        assert_eq!(row.get::<String>(3).unwrap(), "SKU-1");
+        assert!(row.get::<Option<String>>(4).unwrap().is_none());
+        assert_eq!(row.get::<String>(5).unwrap(), "2026-10-01");
+        assert!(row.get::<Option<String>>(6).unwrap().is_none());
+
+        // The rebuild added variant_id and swapped the unique indexes.
+        assert!(table_columns(&conn, "platform_mappings")
+            .await
+            .contains(&"variant_id".to_string()));
+        let indexes = index_names(&conn, "platform_mappings").await;
+        assert!(indexes.contains(&"idx_mappings_product_platform_variant".to_string()));
+        assert!(indexes.contains(&"idx_mappings_platform_item".to_string()));
+        assert!(!indexes.contains(&"idx_mappings_product_platform".to_string()));
+        drop(conn);
+
+        // The remaining steps complete the upgrade from the stepped version.
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn step_15_rebuild_drops_autoincrement_and_keeps_data() {
+        // Upgrade from a populated v14 database through the step-15 rebuild of
+        // platform_mappings (AUTOINCREMENT is unsupported in MVCC mode).
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v14.db", 14).await;
+
+        let conn = db.connect().await.unwrap();
+        assert!(
+            table_ddl(&conn, "platform_mappings")
+                .await
+                .contains("AUTOINCREMENT"),
+            "v14 platform_mappings should still use AUTOINCREMENT"
+        );
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p2', 'SKU-2', 'Gadget', 3)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings (product_id, platform, platform_item_id, is_active, variant_id)
+             VALUES ('p2', 'etsy', 'ETSY-9', 1, 'var-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(15).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 15);
+
+        let conn = db.connect().await.unwrap();
+        assert!(
+            !table_ddl(&conn, "platform_mappings")
+                .await
+                .contains("AUTOINCREMENT"),
+            "step 15 must remove AUTOINCREMENT"
+        );
+        let mut rows = conn
+            .query(
+                "SELECT product_id, platform, platform_item_id, variant_id FROM platform_mappings",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "p2");
+        assert_eq!(row.get::<String>(3).unwrap(), "var-1");
+        assert!(rows.next().await.unwrap().is_none());
+        drop(conn);
+
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn step_16_rebuild_preserves_every_table() {
+        // Upgrade from a populated v15 database through the step-16 rebuild of
+        // all remaining AUTOINCREMENT tables. Every row in every rebuilt table
+        // must survive.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "v15.db", 15).await;
+
+        let conn = db.connect().await.unwrap();
+        for table in [
+            "platform_snapshots",
+            "sync_events",
+            "inventory_history",
+            "listing_descriptions",
+            "listing_photos",
+            "pricing_snapshots",
+            "vendor_listings_cache",
+        ] {
+            assert!(
+                table_ddl(&conn, table).await.contains("AUTOINCREMENT"),
+                "v15 {table} should still use AUTOINCREMENT"
+            );
+        }
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p3', 'SKU-3', 'Thing', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at)
+             VALUES ('p3', 'ebay', 5, '2026-10-01')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_events (product_id, source_platform, target_platform, old_quantity, new_quantity, event_type, sync_cycle_id)
+             VALUES ('p3', 'ebay', 'etsy', 5, 4, 'quantity', 'cyc-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO inventory_history (product_id, quantity, sync_cycle_id)
+             VALUES ('p3', 4, 'cyc-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listing_descriptions (product_id, platform, platform_item_id, description_text)
+             VALUES ('p3', 'ebay', 'EBAY-1', 'hello')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO listing_photos (product_id, platform, platform_item_id, url)
+             VALUES ('p3', 'ebay', 'EBAY-1', 'https://x/y.png')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pricing_snapshots (product_id, platform, amount)
+             VALUES ('p3', 'ebay', 9.99)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO vendor_listings_cache (plugin_id, vendor_item_id, title)
+             VALUES ('plug', 'V-1', 'Vendor thing')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(16).await.unwrap();
+        assert_eq!(user_version_of(&db).await, 16);
+
+        let conn = db.connect().await.unwrap();
+        for table in [
+            "platform_snapshots",
+            "sync_events",
+            "inventory_history",
+            "listing_descriptions",
+            "listing_photos",
+            "pricing_snapshots",
+            "vendor_listings_cache",
+        ] {
+            assert!(
+                !table_ddl(&conn, table).await.contains("AUTOINCREMENT"),
+                "{table} still uses AUTOINCREMENT after step 16"
+            );
+            let mut rows = conn
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .unwrap();
+            let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+            assert_eq!(n, 1, "{table} lost its row in the step-16 rebuild");
+        }
+        drop(conn);
+
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[tokio::test]
+    async fn failed_step_rolls_back_and_stays_rerunnable() {
+        // Simulates a crash between DROP and RENAME in a table rebuild: the
+        // step body runs inside a transaction, an error aborts it before
+        // COMMIT, and the database must stay at the previous version with its
+        // data intact — so the next launch can simply re-run the step.
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_at_schema_version(&dir, "crash.db", 6).await;
+
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO products (id, canonical_sku, name, quantity)
+             VALUES ('p4', 'SKU-4', 'Doohickey', 2)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platform_mappings (product_id, platform, platform_item_id)
+             VALUES ('p4', 'ebay', 'EBAY-4')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        conn.execute("BEGIN IMMEDIATE", ()).await.unwrap();
+        db.run_migration_step(&conn, 7).await.unwrap();
+        // The crash: a statement error aborts the transaction before COMMIT.
+        conn.execute("THIS IS NOT VALID SQL AND SIMULATES A CRASH", ())
+            .await
+            .unwrap_err();
+        conn.execute("ROLLBACK", ()).await.unwrap();
+
+        assert_eq!(
+            user_version_of(&db).await,
+            6,
+            "a failed step must not bump user_version"
+        );
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM platform_mappings", ())
+            .await
+            .unwrap();
+        let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(n, 1, "rolled-back rebuild must not lose rows");
+        assert!(
+            !table_columns(&conn, "platform_mappings")
+                .await
+                .contains(&"variant_id".to_string()),
+            "rolled-back rebuild must not leave the new column behind"
+        );
+        drop(conn);
+
+        // The next launch re-runs the step and completes the upgrade.
+        db.migrate().await.unwrap();
+        assert_eq!(user_version_of(&db).await, CURRENT_SCHEMA_VERSION);
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM platform_mappings", ())
+            .await
+            .unwrap();
+        let n: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(n, 1);
     }
 
     #[tokio::test]
