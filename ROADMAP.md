@@ -44,10 +44,11 @@ are referenced rather than repeated.
 
 ### Scope decisions (settle first)
 
-- [ ] **Is P2P in 1.0?** Recommendation: no. Ship 1.0 as a single-machine product and put
+- [x] **Is P2P in 1.0?** Decision (owner, 2026-10-19): no. Ship 1.0 as a single-machine product and put
       company sync behind a "Preview" switch that is off by default. Sync v2 (Phase 5) is a
       rewrite of the transport and the data layer, and today's Tor path does not work end
-      to end, so holding 1.0 for it would hold everything else. The exception is the
+      to end, so holding 1.0 for it would hold everything else. Data-loss fixes in the
+      current P2P path still land now; P2P itself is not a 1.0 promise. The exception is the
       **stock ledger** (Phase 4): it changes the database's data model, so it must land
       before 1.0, or 1.0 freezes the model Sync v2 has to migrate away from.
 - [x] **Credential model: customers bring their own API keys** (owner decision, 2026-10-19).
@@ -57,11 +58,14 @@ are referenced rather than repeated.
       Squarespace API key and their own XMR Bazaar login. This is what the code already
       does. 1.0 runs no hosted OAuth broker; the setup wizard (*Gate: product*) carries the
       onboarding cost instead. Revisit a shared eBay keyset after 1.0 (see *Services*).
-- [ ] **Which adapters are "1.0"?** An adapter ships as stable only after a live-account
+- [x] **Which adapters are "1.0"?** Decision (owner, 2026-10-19). An adapter ships as stable only after a live-account
       verification (below). Anything not verified ships labelled *Beta* in the UI, or
       disabled. **Amazon ships as Beta:** each customer must get their own SP-API developer
-      registration approved, Amazon can refuse it as it refused ours, and the adapter has
-      never been run end to end. The setup guide says so before the customer starts.
+      registration approved (bring-your-own SP-API keys), Amazon can refuse it as it refused
+      ours, and the adapter has never been verified end to end. The other adapters (eBay,
+      Squarespace, XMR Bazaar) ship as stable only if the live-account verification below is
+      recorded for them; otherwise they too ship labelled *Beta* or disabled. The setup
+      guide says so before the customer starts.
 
 ### Gate: correctness
 

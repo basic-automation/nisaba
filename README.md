@@ -200,6 +200,11 @@ What the sandbox enforces:
 
 ## P2P company sync
 
+**Experimental / Preview.** Company sync is experimental and not part of the 1.0 promise:
+1.0 ships as a single-machine product, and company sync sits behind a "Preview" switch
+that is off by default. Today's Tor-based sync does not work end to end; Sync v2 (see
+[`ROADMAP.md`](ROADMAP.md), Phase 5) will replace the transport and data layer after 1.0.
+
 Each company an install belongs to publishes a Tor onion service and syncs catalog state
 with its peers on an interval. (`[company].enabled` in `config.toml` is currently not
 read — the onion service starts for every company regardless; see the roadmap.)
