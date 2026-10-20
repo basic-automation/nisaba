@@ -44,10 +44,11 @@ are referenced rather than repeated.
 
 ### Scope decisions (settle first)
 
-- [ ] **Is P2P in 1.0?** Recommendation: no. Ship 1.0 as a single-machine product and put
+- [x] **Is P2P in 1.0?** Decision (owner, 2026-10-19): no. Ship 1.0 as a single-machine product and put
       company sync behind a "Preview" switch that is off by default. Sync v2 (Phase 5) is a
       rewrite of the transport and the data layer, and today's Tor path does not work end
-      to end, so holding 1.0 for it would hold everything else. The exception is the
+      to end, so holding 1.0 for it would hold everything else. Data-loss fixes in the
+      current P2P path still land now; P2P itself is not a 1.0 promise. The exception is the
       **stock ledger** (Phase 4): it changes the database's data model, so it must land
       before 1.0, or 1.0 freezes the model Sync v2 has to migrate away from.
 - [x] **Credential model: customers bring their own API keys** (owner decision, 2026-10-19).
@@ -57,11 +58,14 @@ are referenced rather than repeated.
       Squarespace API key and their own XMR Bazaar login. This is what the code already
       does. 1.0 runs no hosted OAuth broker; the setup wizard (*Gate: product*) carries the
       onboarding cost instead. Revisit a shared eBay keyset after 1.0 (see *Services*).
-- [ ] **Which adapters are "1.0"?** An adapter ships as stable only after a live-account
+- [x] **Which adapters are "1.0"?** Decision (owner, 2026-10-19). An adapter ships as stable only after a live-account
       verification (below). Anything not verified ships labelled *Beta* in the UI, or
       disabled. **Amazon ships as Beta:** each customer must get their own SP-API developer
-      registration approved, Amazon can refuse it as it refused ours, and the adapter has
-      never been run end to end. The setup guide says so before the customer starts.
+      registration approved (bring-your-own SP-API keys), Amazon can refuse it as it refused
+      ours, and the adapter has never been verified end to end. The other adapters (eBay,
+      Squarespace, XMR Bazaar) ship as stable only if the live-account verification below is
+      recorded for them; otherwise they too ship labelled *Beta* or disabled. The setup
+      guide says so before the customer starts.
 
 ### Gate: correctness
 
@@ -78,18 +82,18 @@ are referenced rather than repeated.
 
 ### Gate: data safety
 
-- [ ] Transactional migrations, plus upgrade tests from a populated database at *every
+- [x] Transactional migrations, plus upgrade tests from a populated database at *every
       released version* (0.1.0 onward), run in CI (Phase 1).
 - [ ] Automatic database backup before every migration and on a schedule (keep the last N),
       with a *Restore from backup* action in the UI. Backups land next to the database and
       never leave the machine.
-- [ ] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1).
+- [x] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1) — fixed in PR #5.
 - [ ] Lossless export/import, round-trip tested (Cross-cutting). From 1.0 the export format
       carries a version and every later release imports every earlier 1.x export.
 
 ### Gate: security
 
-- [ ] Strict CSP and sanitised `v-html` (Cross-cutting).
+- [x] Strict CSP and sanitised `v-html` (Cross-cutting).
 - [ ] Plugin re-approval on code change, and plugin secrets in the keyring (Phase 3).
 - [ ] Secret-handling audit closed: nothing secret in `config.toml`, logs, exports or P2P
       payloads (Cross-cutting).
@@ -341,7 +345,7 @@ layer's Tor transport are still untested.
       the `Db::migrate` doc comment now states that file numbers equal schema
       versions and inline steps are the single authority for their numbers. The
       `if version < N` gate remains the runtime authority.
-- [ ] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
+- [x] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
       BEGIN/COMMIT and writes `user_version` only at the end. A crash between `DROP` and
       `RENAME` in the table rebuilds (steps 7, 15, 16) leaves a database on which every later
       launch fails. Wrap each step in a transaction that bumps `user_version`. Add an
@@ -422,7 +426,7 @@ anything on the platform (see "Writes that report success without writing" below
 - [ ] A fifth adapter would prove the trait is actually general. Superseded: the next
       adapter is WooCommerce, then Shopify, built as marketplace plugins (Phase 3,
       *Plugin kinds after 1.0*; *Services and integrations*).
-- [ ] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
+- [x] eBay OAuth sends no `state` parameter (`platform-ebay/src/auth.rs` ~54–60), and the
       callback accepts a `code` from any page the auth window reaches (~279–283). Add and
       check `state`.
 - [ ] Four `SyncError` variants are never constructed: `RateLimited`, `EbayRevisionLimit`,
@@ -534,12 +538,19 @@ write surfaces as `Err`.
       fail with "must contain an index.ts". Importer tests: 5, the first in `nisaba-tauri`.
       Nisaba never calls `ZipArchive::extract`, so the symlink zip-slip in the `zip` crate
       (CVE-2025-29787) does not reach it. https://github.com/advisories/GHSA-94vh-gphv-8pm8
-- [ ] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
+- [x] **Plugin `secret: true` values are stored in plaintext.** `set_vendor_plugin_config`
       writes the whole config map — API tokens included — to
       `vendor_plugin_registry.config_json` in the unencrypted database, and that column is
       part of the P2P sync payload. The README claimed they were encrypted; it no longer
       does. Move secret fields to the OS keyring like the company secret, and decide how a
       peer that needs the token to run the plugin obtains it.
+      → Done (N-2.3): `secret: true` values are stored in the OS keyring
+      (`nisaba-plugin-config` service, one entry per plugin field) via
+      `Db::set_plugin_config_split`; `config_json` and the P2P payload never carry
+      them (stripped on payload build and on merge). Legacy plaintext values migrate
+      to the keyring on first load and are scrubbed from the DB
+      (`migrate_plugin_secrets_to_keyring`, also run at company-context init).
+      Secrets are per-machine: a peer that needs the token sets it locally.
 - [x] Plugin resource limits — `PluginLimits` bounds every run: a wall-clock timeout
       (a watchdog thread terminates the isolate, since a spinning plugin never yields to
       tokio's timer), a V8 heap ceiling with a near-limit callback, and an output budget
@@ -577,7 +588,7 @@ write surfaces as `Err`.
       the new code. A new version that drops `allowed_hosts` therefore becomes
       Unrestricted without anyone seeing the badge. A changed code hash or allowlist must
       reset the plugin to pending and show the diff, and the run paths must check status.
-- [ ] Host-side fetches bypass the plugin allowlist. `cache_images` (`commands/images.rs`
+- [x] Host-side fetches bypass the plugin allowlist. `cache_images` (`commands/images.rs`
       ~190–265) fetches any URL the webview hands it, including plugin `image_url` values
       and variants received from peers, with no host filter and no size cap
       (`resp.bytes()`), and writes the result to disk. Separately, `FetchPolicy`
@@ -622,9 +633,14 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
       - UPC/GTIN, brand, MPN, weight and dimensions become typed fields instead of strings
         in `extras`, because platform create-listing needs them;
       - `extras` keeps its free-form role.
-- [ ] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
+- [x] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
       keyring, injected into the run, and never written to `config_json` or the P2P
       payload. This closes the plaintext item above.
+      → Done (N-2.3): `Db::get_plugin_config_merged` injects keyring secrets into
+      every plugin run path (`fetch_vendor_listings`, `sync_vendor_listings`,
+      `run_vendor_sync_single`); `get_vendor_plugin_config` returns the merged map
+      for the config form. Tests serialise both `config_json` and the P2P payload
+      and assert the secret is absent.
 - [ ] **Per-plugin storage**: `Nisaba.store.get/set/delete`, a small key–value store with a
       size cap that persists between runs. It holds cursors, ETags and last-seen
       timestamps.
@@ -865,12 +881,12 @@ cannot produce a syncing pair, and platform-sync coordination is never invoked. 
 replaces this transport. Fix the data-loss and secret-loss items now, have the README say
 P2P is experimental, and do not repair the Tor join path.
 
-- [ ] **Leaving a legacy-migrated company deletes the app database.** At startup the legacy
+- [x] **Leaving a legacy-migrated company deletes the app database.** At startup the legacy
       company is registered with `config.database.path` (`main.rs` ~150–151), which is the
       app registry database. Leaving the company then runs `remove_file` on that path
-      (`commands/company.rs` ~327–330).
-- [ ] **The legacy company secret can be lost.** Startup replaces the stored secret with
-      its hash even when saving it to the keyring failed (`main.rs` ~143–148).
+      (`commands/company.rs` ~327–330). Fixed in PR #5.
+- [x] **The legacy company secret can be lost.** Startup replaces the stored secret with
+      its hash even when saving it to the keyring failed (`main.rs` ~143–148). Fixed in PR #5.
 - [ ] **Join cannot produce a syncing pair.** `join_company` appends `.onion` to a name that
       onyums already suffixes (`company.rs` ~247), so the admin stores `x.onion.onion`. The
       member stores the admin only in `company_peers_v2`, under a random peer id, while
@@ -903,7 +919,7 @@ P2P is experimental, and do not repair the Tor join path.
       re-inserts them from any peer that still has them. They also orphan rows in
       `listing_descriptions`, `listing_photos`, `pricing_snapshots` and `cached_listings`.
       Sync v2's observed-remove sets cover the P2P half; the orphans need fixing now.
-- [ ] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
+- [x] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
       not exist and have no admin check, unlike `get_company_secret` (`company.rs` ~438+).
 - [ ] README still says "AES-GCM encrypted payloads" (`README.md:27`); payloads have no
       application-layer encryption.
@@ -1452,10 +1468,10 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
 - [ ] Secret handling audit — `keyring` is a dependency, but confirm nothing (tokens, the
       company secret, plugin `secret: true` fields) is ever written to `config.toml`, logged,
       or included in an export. Plugin secrets already fail this — see Phase 3.
-- [ ] **`Db::open` deletes the WAL when turso panics** (`db.rs` ~50–64), and retries. The
+- [x] **`Db::open` deletes the WAL when turso panics** (`db.rs` ~50–64), and retries. The
       comment protects only the main file, but a WAL can hold committed transactions not
       yet checkpointed into it, so this can throw away recent writes. Back up the files and
-      surface the error instead of deleting.
+      surface the error instead of deleting. Fixed in PR #5.
 - [ ] Export/import is lossy. Export contains no secrets (verified 2026-10-19). But:
       - import drops `on_hand_quantity`, `source_plugin_id` and `source_vendor_item_id`
         (`db.rs` ~3414), and its `INSERT OR REPLACE` wipes them on variants that already
@@ -1464,7 +1480,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
         so import revives them as active and the engine pushes to them.
       `ExportData` lives in `core/src/types.rs` (~397) and is built in
       `tauri-app/src/commands/export_import.rs`. It has no tests.
-- [ ] Config settings that do nothing, and a save that writes secrets:
+- [x] Config settings that do nothing, and a save that writes secrets:
       - `build_adapter_config` (`main.rs` ~450–457) resets every platform section, so
         `[ebay]`, `[squarespace]`, `[xmrbazaar]` (including `endpoints`) and `[amazon]` in
         `config.toml` are ignored by the app;
@@ -1477,7 +1493,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       atomically with `0600`.
 - [ ] Swallowed errors: `cache_listing_detail` ignores four database writes
       (`listings.rs` ~538–569), and the pricing snapshot hard-codes `"USD"` (~98).
-- [ ] **Untrusted HTML runs in a webview with full IPC access.** CSP is disabled
+- [x] **Untrusted HTML runs in a webview with full IPC access.** CSP is disabled
       (`tauri.conf.json:31`, `"csp": null`). Marketplace listing descriptions
       (`products/[id]/index.vue` ~1093) and vendor-plugin descriptions
       (`DescriptionEditor.vue:143`, reached from `publish.vue`) are rendered with `v-html`.
@@ -1486,6 +1502,14 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       platform secrets. That is a way around the Deno sandbox from the other side. Set a
       strict CSP with no inline script, sanitize every `v-html` sink (DOMPurify), and narrow
       the Tauri capability set so the main window cannot read secrets it never displays.
+      - N-2.7 (2026-10-20) landed the capability-narrowing third: `crates/tauri-app/permissions/`
+        allow-lists + `capabilities/settings.json` deny `get_company_secret`, `get_config` and
+        `get_company_platform_config` on the main window; those commands are invocable only
+        from the dedicated `nisaba-settings` window hosting `/config`, `/company` and the
+        existing-company `/setup` flow (a narrow `get_xmrbazaar_monero_address` keeps the
+        publish page's payout-address prefill working). REMAINDER: strict CSP (still
+        `"csp": null`) and DOMPurify sanitization of the `v-html` sinks — injected script in
+        the main window can still invoke every non-secret command.
 - [ ] Money is `f64` from end to end (`core/src/types.rs` ~258, ~313). The XMR and
       Squarespace adapters serialize prices with `to_string()`, so a computed price can be
       sent as `0.30000000000000004`. Use a decimal type, or integer minor units plus a
