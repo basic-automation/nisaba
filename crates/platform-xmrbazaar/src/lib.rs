@@ -4,7 +4,7 @@ pub mod endpoints;
 pub mod scraper;
 pub mod types;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -31,8 +31,6 @@ pub struct XmrBazaarAdapter {
     monero_address: String,
     /// Cached stock mode field discovery result.
     stock_mode_field: Mutex<Option<StockModeField>>,
-    /// Session-level deduplication of seen order IDs.
-    seen_orders: Mutex<HashSet<String>>,
 }
 
 impl XmrBazaarAdapter {
@@ -47,7 +45,6 @@ impl XmrBazaarAdapter {
             endpoints,
             monero_address: config.monero_address.clone(),
             stock_mode_field: Mutex::new(None),
-            seen_orders: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -108,18 +105,16 @@ impl PlatformAdapter for XmrBazaarAdapter {
     }
 
     async fn detect_sales(&self) -> Result<Vec<SaleDetection>, SyncError> {
+        // No in-memory deduplication here: the sync engine's
+        // `xmr_processed_orders` table is the only authority on which orders
+        // have been consumed. A session-level set used to mark orders seen
+        // before the engine processed them, so a dry run — or any cycle that
+        // failed after the scrape — made the next real cycle skip the sale.
         let records = self.client.fetch_recent_sales(&self.endpoints).await?;
 
         let mut sales = Vec::new();
-        let mut seen = self.seen_orders.lock().unwrap();
 
         for record in records {
-            // Session-level deduplication
-            if seen.contains(&record.order_id) {
-                continue;
-            }
-            seen.insert(record.order_id.clone());
-
             debug!(
                 order_id = %record.order_id,
                 listing_id = %record.listing_id,
