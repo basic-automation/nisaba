@@ -209,7 +209,10 @@ impl PlatformAdapter for AmazonAdapter {
             .client
             .fetch_listings(&token, &self.seller_id, &self.marketplace_ids)
             .await?;
-        Ok(items.iter().map(mapping::to_listing).collect())
+        Ok(items
+            .iter()
+            .map(|i| mapping::to_listing_for_marketplaces(i, &self.marketplace_ids))
+            .collect())
     }
 
     async fn set_quantity(&self, platform_item_id: &str, qty: i64) -> Result<(), SyncError> {
@@ -246,7 +249,10 @@ impl PlatformAdapter for AmazonAdapter {
                 &self.marketplace_ids,
             )
             .await?;
-        Ok(mapping::to_full_listing(&item))
+        Ok(mapping::to_full_listing_for_marketplaces(
+            &item,
+            &self.marketplace_ids,
+        ))
     }
 
     async fn fetch_price(&self, platform_item_id: &str) -> Result<Option<ListingPrice>, SyncError> {
@@ -261,20 +267,7 @@ impl PlatformAdapter for AmazonAdapter {
             )
             .await?;
 
-        let price = item
-            .offers
-            .first()
-            .and_then(|o| o.price.as_ref())
-            .and_then(|p| {
-                let val: f64 = p.amount.as_ref()?.parse().ok()?;
-                let currency = p.currency_code.clone().unwrap_or_else(|| "USD".to_string());
-                Some(ListingPrice {
-                    amount: val,
-                    currency,
-                })
-            });
-
-        Ok(price)
+        Ok(mapping::selected_price(&item, &self.marketplace_ids))
     }
 
     async fn set_price(

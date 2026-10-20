@@ -397,18 +397,22 @@ anything on the platform (see "Writes that report success without writing" below
       and Amazon never reach the default impl at all — they are not silently reporting "no
       sales" each cycle. `detect_sales_is_only_called_on_stock_mode_platforms` holds the gate
       in place.
-- [ ] Amazon counts only `fulfillmentAvailability[0]`, so a listing stocked on both
+- [x] Amazon counts only `fulfillmentAvailability[0]`, so a listing stocked on both
       merchant-fulfilled and FBA reports one channel's quantity — and Amazon does not
       guarantee that array's order. Because the sync engine resolves the minimum across
       platforms, a listing with most of its stock in FBA drags canonical stock down and
       pushes that number to eBay and Squarespace. Decide whether to sum the channels or
       filter to a configured one. Pinned by `only_the_first_fulfilment_channel_is_counted`.
-- [ ] Amazon takes `offers[0]` for price with no marketplace filtering, so a seller listed
+      [N-5.4: quantity now sums across all fulfilment channels deterministically;
+      the pinned test is replaced by `quantities_sum_across_fulfilment_channels` (13 for the cap).]
+- [x] Amazon takes `offers[0]` for price with no marketplace filtering, so a seller listed
       in more than one marketplace gets an arbitrary offer, and `to_listing` drops the
-      currency. Filter on the configured `marketplace_ids`.
-- [ ] Amazon drops ERROR-severity `issues` in every mapping, so a suppressed listing reaches
+      currency. Filter on the configured `marketplace_ids`. [N-5.4: price is selected from
+      the configured marketplace in configured order and `ListingPrice` keeps its currency.]
+- [x] Amazon drops ERROR-severity `issues` in every mapping, so a suppressed listing reaches
       the UI as a normal listing with zero stock and no explanation. Carry them through
-      `extras` and surface them.
+      `extras` and surface them. [N-5.4: ERROR issues are carried through `FullListing.extras`
+      (`amazon_error_issues` / count / per-issue entries); `fetch_listings` now requests `issues`.]
 - [ ] eBay's two read paths key listings differently — the Inventory API by SKU, the Trading
       API by ItemID — so a mapping created from one will not match the other. Decide which
       is canonical, or store both.
@@ -492,10 +496,12 @@ write surfaces as `Err`.
       `create_listing` checks the submission instead of discarding it.
       Fake-server tests prove a rejected write surfaces as `Err` for each of
       `update_quantity`, `update_price` and `create_listing`.]
-- [ ] **Amazon pagination may read the wrong key.** `types.rs:17` expects a top-level
+- [x] **Amazon pagination may read the wrong key.** `types.rs:17` expects a top-level
       `nextToken`. If `searchListingsItems` nests it under `pagination`, only the first 20
       SKUs per marketplace are ever read. The hand-built fixture encodes the same
-      assumption, which is the case for real captured fixtures (Phase 1).
+      assumption, which is the case for real captured fixtures (Phase 1). [N-5.4: the token
+      is now read from the documented nested `pagination.nextToken` (with a legacy
+      top-level fallback), pinned by the fixture's `pagination` block.]
 - [ ] **XMR Bazaar writes cannot tell success from failure.** `client.rs` ~174, ~392 and
       ~766 accept any final 2xx/3xx on a client that follows redirects, so a POST bounced
       to `/login/` or a re-rendered form with errors counts as success. `set_stock_mode`

@@ -9,15 +9,48 @@ pub struct AmazonTokenResponse {
     pub expires_in: i64,
 }
 
+/// Pagination block of a `searchListingsItems` response.
+///
+/// The documented SP-API shape nests the tokens under a top-level
+/// `pagination` object (`{ "pagination": { "nextToken": "..." } }`); there is
+/// no top-level `nextToken` on the response. Reading a top-level key (the
+/// previous shape of this type) therefore always yielded `None` and only the
+/// first page (20 SKUs) per marketplace was ever read.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AmazonPagination {
+    #[serde(default, rename = "nextToken")]
+    pub next_token: Option<String>,
+    #[serde(default, rename = "previousToken")]
+    pub previous_token: Option<String>,
+}
+
 /// Response from GET /listings/2021-08-01/items/{sellerId}
+/// (`searchListingsItems`).
 #[derive(Debug, Deserialize)]
 pub struct AmazonListingsResponse {
     #[serde(default, rename = "items")]
     pub items: Vec<AmazonListingItem>,
-    #[serde(rename = "nextToken")]
+    #[serde(default)]
+    pub pagination: Option<AmazonPagination>,
+    /// Legacy top-level token, kept only as a fallback for hand-built or
+    /// third-party payloads that still emit it. Real SP-API responses carry
+    /// the token under `pagination`; prefer [`Self::effective_next_token`].
+    #[serde(default, rename = "nextToken")]
     pub next_token: Option<String>,
     #[serde(rename = "numberOfResults")]
     pub number_of_results: Option<i64>,
+}
+
+impl AmazonListingsResponse {
+    /// The token for the next page, from the documented nested `pagination`
+    /// object first, falling back to a legacy top-level `nextToken`.
+    pub fn effective_next_token(&self) -> Option<String> {
+        self.pagination
+            .as_ref()
+            .and_then(|p| p.next_token.clone())
+            .filter(|t| !t.is_empty())
+            .or_else(|| self.next_token.clone().filter(|t| !t.is_empty()))
+    }
 }
 
 /// A single listing item from the SP-API Listings Items API.

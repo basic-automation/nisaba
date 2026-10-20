@@ -1,7 +1,7 @@
 {
   "_comment": "GET /listings/2021-08-01/items/{sellerId} — shape only. SKUs, ASINs and image hosts are invented; no real seller, token or listing appears here.",
   "numberOfResults": 4,
-  "nextToken": null,
+  "pagination": { "nextToken": "fixture-page-2-token" },
   "items": [
     {
       "sku": "PANTS-RIPSTOP-M",
