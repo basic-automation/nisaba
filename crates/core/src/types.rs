@@ -347,9 +347,15 @@ pub struct VendorPluginRow {
     /// The plugin's declared fetch allowlist as JSON, computed from its files when it was
     /// imported or installed: `["host", …]`, or `null` when it declares none (so it has
     /// unrestricted network access). `None` means not yet computed from the current files
-    /// — e.g. a row that arrived from a peer — and must not be shown as either.
+    /// — e.g. a payload from an older peer — and must not be shown as either.
     #[serde(default)]
     pub allowed_hosts_json: Option<String>,
+    /// SHA-256 fingerprint of the plugin's code and fetch allowlist, bound when an admin
+    /// last reviewed it (see [`crate::plugins`]). A re-import or P2P merge whose code or
+    /// allowlist no longer matches this hash resets the plugin to `pending`. `None` for
+    /// rows that predate the binding or were never reviewed.
+    #[serde(default)]
+    pub code_hash: Option<String>,
 }
 
 /// A vendor plugin install (user-local, never syncs).
