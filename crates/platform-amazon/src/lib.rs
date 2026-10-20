@@ -20,7 +20,7 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use crate::auth::AmazonAuth;
-use crate::client::AmazonClient;
+use crate::client::{check_submission, AmazonClient};
 
 /// Refresh the access token when it expires within this many seconds.
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 300; // 5 minutes
@@ -348,7 +348,8 @@ impl PlatformAdapter for AmazonAdapter {
             }],
         });
 
-        self.client
+        let submission = self
+            .client
             .create_listing(
                 &token,
                 &self.seller_id,
@@ -358,6 +359,11 @@ impl PlatformAdapter for AmazonAdapter {
                 attributes,
             )
             .await?;
+
+        // The client already rejects INVALID submissions; check again here
+        // so this adapter path never reports success for a rejected write
+        // by discarding the submission unread (N-5.3).
+        check_submission(&submission, &format!("Create listing failed for {sku}"))?;
 
         info!(sku = %sku, "Created Amazon listing");
         Ok(sku)
