@@ -76,8 +76,12 @@ async fn main() -> Result<()> {
         sync_event_tx,
         config.general.max_retries,
     );
+    let startup_interval_secs = config
+        .general
+        .sync_interval_secs()
+        .unwrap_or(nisaba_core::config::DEFAULT_SYNC_INTERVAL_SECS);
     tokio::spawn(async move {
-        engine.run(cmd_rx, 300).await;
+        engine.run(cmd_rx, startup_interval_secs).await;
     });
 
     // Spawn event sources
@@ -135,7 +139,18 @@ async fn main() -> Result<()> {
                         match new_adapters {
                             Ok(map) => {
                                 *app.adapters.write().await = map;
-                                let _ = app.cmd_tx.send(SyncCommand::Reload).await;
+                                // The config save already validated the
+                                // schedule; fall back to the default if it
+                                // somehow does not parse.
+                                let interval_secs = app
+                                    .config
+                                    .general
+                                    .sync_interval_secs()
+                                    .unwrap_or(nisaba_core::config::DEFAULT_SYNC_INTERVAL_SECS);
+                                let _ = app
+                                    .cmd_tx
+                                    .send(SyncCommand::Reload { interval_secs })
+                                    .await;
                                 app.status_message =
                                     Some("Config saved, adapters reloaded".into());
                             }
