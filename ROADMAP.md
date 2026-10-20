@@ -897,7 +897,7 @@ P2P is experimental, and do not repair the Tor join path.
       re-inserts them from any peer that still has them. They also orphan rows in
       `listing_descriptions`, `listing_photos`, `pricing_snapshots` and `cached_listings`.
       Sync v2's observed-remove sets cover the P2P half; the orphans need fixing now.
-- [ ] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
+- [x] Peer admin commands (approve, reject, set role, remove) return `Ok` when the peer does
       not exist and have no admin check, unlike `get_company_secret` (`company.rs` ~438+).
 - [ ] README still says "AES-GCM encrypted payloads" (`README.md:27`); payloads have no
       application-layer encryption.
