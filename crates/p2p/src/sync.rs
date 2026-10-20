@@ -356,7 +356,11 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
             continue;
         }
         let local_snap = db
-            .get_snapshot(&remote_snap.product_id, remote_snap.platform.as_str())
+            .get_snapshot(
+                &remote_snap.product_id,
+                remote_snap.platform.as_str(),
+                remote_snap.variant_id.as_deref(),
+            )
             .await?;
 
         match local_snap {
@@ -365,6 +369,7 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                     db.upsert_snapshot(
                         &remote_snap.product_id,
                         remote_snap.platform.as_str(),
+                        remote_snap.variant_id.as_deref(),
                         remote_snap.last_known_quantity,
                         &remote_snap.last_polled_at,
                     )
@@ -376,6 +381,7 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                 db.upsert_snapshot(
                     &remote_snap.product_id,
                     remote_snap.platform.as_str(),
+                    remote_snap.variant_id.as_deref(),
                     remote_snap.last_known_quantity,
                     &remote_snap.last_polled_at,
                 )
