@@ -157,23 +157,32 @@ pub async fn load_full_sync_payload(db: &Db) -> Result<SyncPayload, P2PError> {
     let vendor_plugins: Vec<SyncableVendorPlugin> = match db.list_registry_plugins().await {
         Ok(plugins) => plugins
             .into_iter()
-            .map(|p| SyncableVendorPlugin {
-                id: p.id,
-                plugin_file: p.plugin_file,
-                display_name: p.display_name,
-                description: p.description,
-                files_json: p.files_json,
-                code: String::new(),
-                version: p.version,
-                config_fields: p.config_fields,
-                config_json: p.config_json,
-                status: p.status,
-                submitted_by: p.submitted_by,
-                approved_by: p.approved_by,
-                category: p.category,
-                icon: p.icon,
-                include_vendor_stock: p.include_vendor_stock,
-                updated_at: p.updated_at,
+            .map(|p| {
+                // `secret: true` values never leave this machine: they live in
+                // the OS keyring and are stripped from the payload even if a
+                // row somehow still carries them in config_json.
+                let config_json = nisaba_core::db::strip_secret_values(
+                    p.config_fields.as_deref(),
+                    p.config_json.as_deref(),
+                );
+                SyncableVendorPlugin {
+                    id: p.id,
+                    plugin_file: p.plugin_file,
+                    display_name: p.display_name,
+                    description: p.description,
+                    files_json: p.files_json,
+                    code: String::new(),
+                    version: p.version,
+                    config_fields: p.config_fields,
+                    config_json,
+                    status: p.status,
+                    submitted_by: p.submitted_by,
+                    approved_by: p.approved_by,
+                    category: p.category,
+                    icon: p.icon,
+                    include_vendor_stock: p.include_vendor_stock,
+                    updated_at: p.updated_at,
+                }
             })
             .collect(),
         Err(_) => Vec::new(), // table may not exist on old schemas
@@ -521,7 +530,12 @@ pub async fn merge_remote_payload(db: &Db, remote: &SyncPayload) -> Result<Merge
                 files_json: remote_plugin.resolved_files_json(),
                 version: remote_plugin.version.clone(),
                 config_fields: remote_plugin.config_fields.clone(),
-                config_json: remote_plugin.config_json.clone(),
+                // Secrets never sync between machines: strip any `secret: true`
+                // values a peer may have sent before storing the row.
+                config_json: nisaba_core::db::strip_secret_values(
+                    remote_plugin.config_fields.as_deref(),
+                    remote_plugin.config_json.as_deref(),
+                ),
                 status: remote_plugin.status.clone(),
                 submitted_by: remote_plugin.submitted_by.clone(),
                 approved_by: remote_plugin.approved_by.clone(),
