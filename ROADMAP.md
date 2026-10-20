@@ -718,7 +718,7 @@ is used only when no platform reports.
 - [ ] **An XMR order is marked processed before its sale is applied** (`sync_engine.rs`
       ~245). Any `?` exit in between, or an untracked product (~272), loses the sale for
       good. Mark it in the same transaction as the stock write.
-- [ ] **Re-base the engine on a stock ledger.** Record every change as a uniquely keyed
+- [x] **Re-base the engine on a stock ledger.** Record every change as a uniquely keyed
       event: a sale by platform + order id, a restock, a manual adjustment, a vendor
       update. Canonical stock is the sum, and a push is the difference between canonical
       and each platform's reading, per variant. This fixes every item above. It is also the
