@@ -1480,6 +1480,14 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       platform secrets. That is a way around the Deno sandbox from the other side. Set a
       strict CSP with no inline script, sanitize every `v-html` sink (DOMPurify), and narrow
       the Tauri capability set so the main window cannot read secrets it never displays.
+      - N-2.7 (2026-10-20) landed the capability-narrowing third: `crates/tauri-app/permissions/`
+        allow-lists + `capabilities/settings.json` deny `get_company_secret`, `get_config` and
+        `get_company_platform_config` on the main window; those commands are invocable only
+        from the dedicated `nisaba-settings` window hosting `/config`, `/company` and the
+        existing-company `/setup` flow (a narrow `get_xmrbazaar_monero_address` keeps the
+        publish page's payout-address prefill working). REMAINDER: strict CSP (still
+        `"csp": null`) and DOMPurify sanitization of the `v-html` sinks — injected script in
+        the main window can still invoke every non-secret command.
 - [ ] Money is `f64` from end to end (`core/src/types.rs` ~258, ~313). The XMR and
       Squarespace adapters serialize prices with `to_string()`, so a computed price can be
       sent as `0.30000000000000004`. Use a decimal type, or integer minor units plus a
