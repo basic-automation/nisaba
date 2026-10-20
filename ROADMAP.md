@@ -89,7 +89,7 @@ are referenced rather than repeated.
 
 ### Gate: security
 
-- [ ] Strict CSP and sanitised `v-html` (Cross-cutting).
+- [x] Strict CSP and sanitised `v-html` (Cross-cutting).
 - [ ] Plugin re-approval on code change, and plugin secrets in the keyring (Phase 3).
 - [ ] Secret-handling audit closed: nothing secret in `config.toml`, logs, exports or P2P
       payloads (Cross-cutting).
@@ -1471,7 +1471,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       atomically with `0600`.
 - [ ] Swallowed errors: `cache_listing_detail` ignores four database writes
       (`listings.rs` ~538–569), and the pricing snapshot hard-codes `"USD"` (~98).
-- [ ] **Untrusted HTML runs in a webview with full IPC access.** CSP is disabled
+- [x] **Untrusted HTML runs in a webview with full IPC access.** CSP is disabled
       (`tauri.conf.json:31`, `"csp": null`). Marketplace listing descriptions
       (`products/[id]/index.vue` ~1093) and vendor-plugin descriptions
       (`DescriptionEditor.vue:143`, reached from `publish.vue`) are rendered with `v-html`.
