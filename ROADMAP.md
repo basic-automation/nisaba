@@ -799,7 +799,7 @@ is used only when no platform reports.
       reserve is a share of stock rights held back from every peer.
 - [ ] Chart `InventoryHistoryEntry` analytics. There are no charts today (`chart.js` and
       `vue-chartjs` are installed but never imported); `inventory.vue` shows a count.
-- [ ] **The sync schedule accepts anything and can kill the engine.** `config.vue` offers
+- [x] **The sync schedule accepts anything and can kill the engine.** `config.vue` offers
       free-form cron. `parse_interval` (`tauri-app/src/main.rs` ~492) understands only a
       minute field of `*/N` and silently uses 300 s for anything else. `*/0` yields a 0 s
       period, and `tokio::time::interval` panics on zero, which ends the sync engine task.
