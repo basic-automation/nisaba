@@ -336,9 +336,15 @@ layer's Tor transport are still untested.
       `012_variant_vendor_source.sql` *do* exist but are never `include_str!`'d, and the
       `010` file differs from the inline `migrate_always_variants`. Delete them as part of
       the renumbering below, and fix the `Db::migrate` doc comment.
-- [ ] Renumber or rename `migrations/*.sql` so a file's number matches its schema version —
-      they have drifted (`014_cached_platform_listings.sql` runs at `version < 17`), and the
-      `if version < N` gate being the only authority is a trap for a new contributor
+- [x] Renumber or rename `migrations/*.sql` so a file's number matches its schema version —
+      done (N-3.2, 2026-10-20): the only drifted file,
+      `014_cached_platform_listings.sql`, was renamed to
+      `017_cached_platform_listings.sql` to match its `version < 17` gate; the
+      orphan files `004_company_logo.sql`, `010_always_variants.sql` and
+      `012_variant_vendor_source.sql` (never `include_str!`'d) were deleted, and
+      the `Db::migrate` doc comment now states that file numbers equal schema
+      versions and inline steps are the single authority for their numbers. The
+      `if version < N` gate remains the runtime authority.
 - [x] **Migrations are not transactional.** `migrate()` (`db.rs` ~233–686) has no
       BEGIN/COMMIT and writes `user_version` only at the end. A crash between `DROP` and
       `RENAME` in the table rebuilds (steps 7, 15, 16) leaves a database on which every later
