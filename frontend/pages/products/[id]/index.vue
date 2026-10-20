@@ -1090,7 +1090,7 @@ function formatTimeAgo(isoTimestamp: string): string {
                 <p class="label-sm mb-1">Description</p>
                 <div class="desc-box">
                   <pre v-if="listing.platform === 'xmrbazaar'" class="whitespace-pre-wrap font-sans text-xs m-0">{{ listing.description.plain_text || listing.description.html }}</pre>
-                  <div v-else-if="listing.description.html" class="prose-listing" v-html="listing.description.html" />
+                  <div v-else-if="listing.description.html" class="prose-listing" v-html="sanitizeHtml(listing.description.html)" />
                   <p v-else-if="listing.description.plain_text" class="whitespace-pre-wrap">{{ listing.description.plain_text }}</p>
                   <p v-else class="text-muted/40 italic">No description</p>
                 </div>
