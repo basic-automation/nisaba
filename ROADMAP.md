@@ -502,14 +502,29 @@ write surfaces as `Err`.
       assumption, which is the case for real captured fixtures (Phase 1). [N-5.4: the token
       is now read from the documented nested `pagination.nextToken` (with a legacy
       top-level fallback), pinned by the fixture's `pagination` block.]
-- [ ] **XMR Bazaar writes cannot tell success from failure.** `client.rs` ~174, ~392 and
+- [x] **XMR Bazaar writes cannot tell success from failure.** `client.rs` ~174, ~392 and
       ~766 accept any final 2xx/3xx on a client that follows redirects, so a POST bounced
       to `/login/` or a re-rendered form with errors counts as success. `set_stock_mode`
       also returns `Ok` when no stock field is found (~343). Detect a successful save
       positively: the redirect target, or the saved value read back.
-- [ ] **XMR `create_listing` can record the wrong listing id.** It takes `listings.first()`
+      [N-5.5: all edit writes (`update_quantity`, `set_stock_mode`,
+      `update_listing_field`) now POST with a no-redirect client via
+      `submit_edit_and_verify` — a redirect to `/login/` is an `AuthError`, a
+      200 carrying form errors or the login page is an `Err`, and the saved
+      values must read back from a fresh GET of the edit form before `Ok`.
+      `set_stock_mode` returns `Err` when no stock field exists. Fake-server
+      tests cover the login-bounce, error-form and redirect-without-save
+      cases for each path.]
+- [x] **XMR `create_listing` can record the wrong listing id.** It takes `listings.first()`
       as the newest listing (~650), and on a 200 body it accepts any `/listing/<id>/` link
       (~662). A wrong mapping points later stock toggles at an unrelated listing.
+      [N-5.5: `create_listing` snapshots my-listings before creating and
+      identifies the created listing deterministically — the id in the
+      redirect `Location`, or the pre/post diff of my-listings (exactly one
+      new listing, or exactly one new listing carrying the requested title).
+      Body links are never trusted and `listings.first()` is gone; a login
+      bounce, an error form, no new listing, or an ambiguous diff is an
+      `Err`. Fake-server tests pin each case, including a decoy body link.]
 
 ### Adapter correctness
 
