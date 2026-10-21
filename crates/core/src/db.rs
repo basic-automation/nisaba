@@ -18,7 +18,7 @@ use crate::types::{
     VendorPluginRow, Weight, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 25;
+const CURRENT_SCHEMA_VERSION: i64 = 26;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -1276,6 +1276,12 @@ impl Db {
                 }
                 debug!("Applied migration 025: vendor listing images + typed fields");
             }
+            26 => {
+                // Per-plugin KV storage behind `Nisaba.store` (N-7.3).
+                conn.execute_batch(include_str!("../../../migrations/026_plugin_kv_store.sql"))
+                    .await?;
+                debug!("Applied migration 026_plugin_kv_store.sql");
+            }
             _ => {}
         }
         Ok(())
@@ -1549,6 +1555,7 @@ impl Db {
         Ok(())
     }
 
+    // ── Stock ledger (N-4.1) ────────────────────────────────────────
     // ── Stock ledger (N-4.1) ────────────────────────────────────────
     //
     // Every stock change is a row in `stock_ledger` with a UNIQUE `event_key`:
@@ -4200,6 +4207,97 @@ impl Db {
             params![plugin_id],
         )
         .await?;
+        // A removed plugin's cursors must not linger for a later re-install.
+        self.clear_plugin_store(plugin_id).await?;
+        Ok(())
+    }
+
+    /// Read one key from a plugin's private KV store (`Nisaba.store.get`).
+    ///
+    /// The store lives in the company database, so keys are scoped to
+    /// plugin + company by construction: a plugin can only ever read its own
+    /// rows, and the same plugin under another company reads another table.
+    pub async fn plugin_store_get(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT value FROM plugin_kv_store WHERE plugin_id = ?1 AND key = ?2",
+                params![plugin_id, key],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Ok(Some(row.get::<String>(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Write one key in a plugin's private KV store (`Nisaba.store.set`).
+    ///
+    /// Upserts. The per-plugin size cap is enforced by the plugin runtime
+    /// before this is called, so the rejection message can name the API.
+    pub async fn plugin_store_set(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "INSERT INTO plugin_kv_store (plugin_id, key, value, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT (plugin_id, key) DO UPDATE
+             SET value = excluded.value, updated_at = datetime('now')",
+            params![plugin_id, key, value],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Delete one key from a plugin's private KV store
+    /// (`Nisaba.store.delete`). Returns whether the key existed.
+    pub async fn plugin_store_delete(&self, plugin_id: &str, key: &str) -> Result<bool, SyncError> {
+        let removed = self
+            .execute_write(
+                "DELETE FROM plugin_kv_store WHERE plugin_id = ?1 AND key = ?2",
+                params![plugin_id, key],
+            )
+            .await?;
+        Ok(removed > 0)
+    }
+
+    /// Total stored bytes (key + value, UTF-8) for one plugin. The plugin
+    /// runtime charges `Nisaba.store.set` writes against the per-plugin cap
+    /// using this number.
+    pub async fn plugin_store_total_bytes(&self, plugin_id: &str) -> Result<u64, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(SUM(LENGTH(key) + LENGTH(value)), 0)
+                 FROM plugin_kv_store WHERE plugin_id = ?1",
+                params![plugin_id],
+            )
+            .await?;
+        let total: i64 = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?
+            .unwrap_or(0);
+        Ok(total.max(0) as u64)
+    }
+
+    /// Drop a plugin's whole KV store. Called on uninstall; also useful when a
+    /// plugin's stored cursor is known to be stale.
+    pub async fn clear_plugin_store(&self, plugin_id: &str) -> Result<(), SyncError> {
+        self.execute_write(
+            "DELETE FROM plugin_kv_store WHERE plugin_id = ?1",
+            params![plugin_id],
+        )
+        .await?;
         Ok(())
     }
 
@@ -5020,6 +5118,7 @@ mod tests {
         "listing_photos",
         "platform_mappings",
         "platform_snapshots",
+        "plugin_kv_store",
         "pricing_snapshots",
         "products",
         "product_variants",
@@ -6521,6 +6620,75 @@ mod tests {
         let db = Db::open(path.to_str().unwrap()).await.unwrap();
         db.migrate().await.unwrap();
         (dir, db)
+    }
+
+    // ── Per-plugin KV store (N-7.3) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn plugin_kv_store_crud_scoping_and_accounting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        // Missing keys read as None.
+        assert_eq!(db.plugin_store_get("p1", "cursor").await.unwrap(), None);
+        assert_eq!(db.plugin_store_total_bytes("p1").await.unwrap(), 0);
+
+        // Set, read, overwrite.
+        db.plugin_store_set("p1", "cursor", "page-3").await.unwrap();
+        assert_eq!(
+            db.plugin_store_get("p1", "cursor")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("page-3")
+        );
+        db.plugin_store_set("p1", "cursor", "page-4").await.unwrap();
+        assert_eq!(
+            db.plugin_store_get("p1", "cursor")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("page-4")
+        );
+
+        // Scoped per plugin: another plugin reads nothing.
+        assert_eq!(db.plugin_store_get("p2", "cursor").await.unwrap(), None);
+        db.plugin_store_set("p2", "cursor", "p2-value")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.plugin_store_get("p1", "cursor")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("page-4")
+        );
+
+        // Byte accounting charges key + value.
+        db.plugin_store_set("p3", "k1", "vv").await.unwrap();
+        assert_eq!(db.plugin_store_total_bytes("p3").await.unwrap(), 4);
+        db.plugin_store_set("p3", "k1", "vvvv").await.unwrap();
+        assert_eq!(db.plugin_store_total_bytes("p3").await.unwrap(), 6);
+
+        // Delete reports whether the key existed.
+        assert!(db.plugin_store_delete("p3", "k1").await.unwrap());
+        assert!(!db.plugin_store_delete("p3", "k1").await.unwrap());
+        assert_eq!(db.plugin_store_total_bytes("p3").await.unwrap(), 0);
+
+        // Clearing drops the whole plugin's store (uninstall path).
+        db.clear_plugin_store("p1").await.unwrap();
+        assert_eq!(db.plugin_store_get("p1", "cursor").await.unwrap(), None);
+        assert_eq!(db.plugin_store_total_bytes("p1").await.unwrap(), 0);
+        // Other plugins are untouched.
+        assert_eq!(
+            db.plugin_store_get("p2", "cursor")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("p2-value")
+        );
     }
 
     // ── Stock ledger (N-4.1) ──────────────────────────────────────
