@@ -1374,7 +1374,7 @@ mod tests {
             sku: None,
             quantity: 1,
             price: Some(nisaba_core::types::ListingPrice {
-                amount: 25.0,
+                amount: rust_decimal::Decimal::new(25, 0),
                 currency: "USD".to_string(),
             }),
             photo_urls: vec![],
