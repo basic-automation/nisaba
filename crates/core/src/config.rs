@@ -117,6 +117,30 @@ fn default_max_retries() -> u32 {
 pub struct DatabaseConfig {
     #[serde(default = "default_db_path")]
     pub path: String,
+    /// Master switch for automatic database backups (N-8.1). When false, no
+    /// backup is written before migrations and the scheduled backup task stays
+    /// idle. Explicit "Back up now" from the UI still works.
+    #[serde(default = "default_backup_enabled")]
+    pub backup_enabled: bool,
+    /// How many of the newest backups to keep next to the database.
+    #[serde(default = "default_backup_keep_last")]
+    pub backup_keep_last: usize,
+    /// Hours between scheduled backups. 0 disables the schedule
+    /// (pre-migration backups still run while `backup_enabled` is true).
+    #[serde(default = "default_backup_interval_hours")]
+    pub backup_interval_hours: u64,
+}
+
+fn default_backup_enabled() -> bool {
+    true
+}
+
+fn default_backup_keep_last() -> usize {
+    7
+}
+
+fn default_backup_interval_hours() -> u64 {
+    24
 }
 
 fn default_db_path() -> String {
@@ -364,7 +388,12 @@ impl AppConfig {
                 sync_schedule: default_sync_schedule(),
                 max_retries: default_max_retries(),
             },
-            database: DatabaseConfig { path: db_path },
+            database: DatabaseConfig {
+                path: db_path,
+                backup_enabled: default_backup_enabled(),
+                backup_keep_last: default_backup_keep_last(),
+                backup_interval_hours: default_backup_interval_hours(),
+            },
             ebay: EbayConfig::default(),
             squarespace: SquarespaceConfig::default(),
             xmrbazaar: XmrBazaarConfig::default(),

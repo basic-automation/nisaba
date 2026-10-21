@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AppConfig } from '~/types'
+import type { AppConfig, BackupInfo } from '~/types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
@@ -118,7 +118,78 @@ onMounted(async () => {
   } catch { /* ignore */ }
   await loadCompanyConfig()
   await fetchPlugins()
+  await fetchBackups()
 })
+
+// ── N-8.1: database backups ──────────────────────────────────────────────
+// The backup schedule settings (backup_enabled / backup_keep_last /
+// backup_interval_hours) are part of editConfig.database and save through
+// the normal config save flow. The list below is the app database's backups.
+const backups = ref<BackupInfo[]>([])
+const backingUp = ref(false)
+const restoringPath = ref<string | null>(null)
+const backupMessage = ref('')
+
+async function fetchBackups() {
+  try {
+    backups.value = await invoke<BackupInfo[]>('list_backups')
+  } catch {
+    backups.value = []
+  }
+}
+
+function formatBackupSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatBackupDate(iso: string): string {
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+function formatBackupReason(reason: string): string {
+  return reason.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+}
+
+async function runBackupNow() {
+  backingUp.value = true
+  backupMessage.value = ''
+  try {
+    const path = await invoke<string>('backup_now')
+    backupMessage.value = `Backup written: ${path}`
+    notify({ type: 'success', title: 'Backup complete', message: path, source: 'config' })
+    await fetchBackups()
+  } catch (e) {
+    const msg = String(e)
+    backupMessage.value = msg
+    notify({ type: 'error', title: 'Backup failed', message: msg, detail: msg, source: 'config' })
+  } finally {
+    backingUp.value = false
+  }
+}
+
+async function restoreBackup(b: BackupInfo) {
+  const ok = confirm(
+    `Restore the database from backup "${b.name}" (${formatBackupDate(b.created_at)})?\n\n` +
+    `Everything written after this backup will be lost. A safety backup of the current database ` +
+    `is taken first. The app will restart after the restore.`
+  )
+  if (!ok) return
+  restoringPath.value = b.path
+  try {
+    await invoke('restore_backup', { backup_path: b.path })
+    notify({ type: 'info', title: 'Restore complete', message: 'Restarting the app…', source: 'config' })
+    // The database file was swapped on disk; open connections still cache
+    // the old file, so the app must restart to see the restored state.
+    await invoke('plugin:process|restart')
+  } catch (e) {
+    const msg = String(e)
+    notify({ type: 'error', title: 'Restore failed', message: msg, detail: msg, source: 'config' })
+    restoringPath.value = null
+  }
+}
 
 // Load plugin config when switching sub-tabs
 watch(activePluginId, async (id) => {
@@ -459,6 +530,65 @@ async function handleToggleDropship(include: boolean) {
           <div>
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Max retries</label>
             <input v-model.number="editConfig.general.max_retries" type="number" min="0" max="10" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
+          </div>
+        </div>
+      </section>
+
+      <!-- Database backups (N-8.1) -->
+      <section>
+        <h3 class="text-xs font-medium tracking-widest uppercase text-muted/60 mb-5">Database backups</h3>
+        <p class="text-xs text-muted/50 mb-5 max-w-xl">
+          A timestamped backup is written next to the database before every migration and on the
+          schedule below. Backups never leave this machine. Restoring replaces the database file
+          and restarts the app.
+        </p>
+        <div class="grid grid-cols-3 gap-x-8 gap-y-5">
+          <div>
+            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Automatic backups</label>
+            <select v-model="editConfig.database.backup_enabled" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors appearance-none">
+              <option :value="true" class="bg-background">Enabled</option>
+              <option :value="false" class="bg-background">Disabled</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Keep last N</label>
+            <input v-model.number="editConfig.database.backup_keep_last" type="number" min="1" max="100" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
+          </div>
+          <div>
+            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Backup every (hours)</label>
+            <input v-model.number="editConfig.database.backup_interval_hours" type="number" min="0" max="720" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
+            <p class="mt-1.5 text-[11px] text-muted/40">0 disables the schedule. Applies on save, no restart needed.</p>
+          </div>
+        </div>
+        <div class="mt-6 flex items-center gap-3">
+          <button
+            @click="runBackupNow"
+            :disabled="backingUp"
+            class="text-xs font-medium px-4 py-2 rounded border border-border/40 text-foreground/80 hover:border-accent/50 hover:text-foreground transition-colors disabled:opacity-40"
+          >
+            {{ backingUp ? 'Backing up…' : 'Back up now' }}
+          </button>
+          <span v-if="backupMessage" class="text-xs text-muted/50 truncate max-w-md">{{ backupMessage }}</span>
+        </div>
+        <div class="mt-6">
+          <h4 class="text-[11px] text-muted/40 uppercase tracking-wider mb-3">Backups</h4>
+          <div v-if="backups.length === 0" class="text-xs text-muted/40 py-2">No backups yet.</div>
+          <div v-else class="divide-y divide-white/[0.06]">
+            <div v-for="b in backups" :key="b.path" class="flex items-center gap-4 py-2.5">
+              <div class="flex-1 min-w-0">
+                <div class="text-sm text-foreground/90 truncate">{{ b.name }}</div>
+                <div class="text-[11px] text-muted/40">
+                  {{ formatBackupDate(b.created_at) }} · {{ formatBackupSize(b.size_bytes) }} · {{ formatBackupReason(b.reason) }}
+                </div>
+              </div>
+              <button
+                @click="restoreBackup(b)"
+                :disabled="restoringPath !== null"
+                class="text-xs font-medium px-3 py-1.5 rounded border border-red-500/30 text-red-400/80 hover:border-red-500/60 hover:text-red-300 transition-colors disabled:opacity-40 shrink-0"
+              >
+                {{ restoringPath === b.path ? 'Restoring…' : 'Restore' }}
+              </button>
+            </div>
           </div>
         </div>
       </section>

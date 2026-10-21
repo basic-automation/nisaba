@@ -476,11 +476,41 @@ impl Db {
     /// to the step number atomically with the schema change. A crash anywhere
     /// before the step's `COMMIT` rolls the whole step back, leaving the
     /// database at the previous version and the step re-runnable.
-    pub async fn migrate(&self) -> Result<(), SyncError> {
+    /// Run migrations if needed, writing a timestamped backup first when any
+    /// migration step is pending and backups are enabled.
+    ///
+    /// A failed pre-migration backup aborts the migration: this is fail
+    /// closed on purpose — the data-safety gate (N-8.1) promises no migration
+    /// ever runs without a backup on disk. Disable via
+    /// [`BackupConfig::enabled`] (TOML `database.backup_enabled`) for
+    /// environments where the operator takes backups another way.
+    pub async fn migrate_with_backup(&self, cfg: &BackupConfig) -> Result<(), SyncError> {
         let start = self.schema_version().await?;
         if start >= CURRENT_SCHEMA_VERSION {
             debug!(version = start, "Database schema is up to date");
             return Ok(());
+        }
+
+        if cfg.enabled {
+            let backup = self
+                .backup_now(cfg, BackupReason::PreMigration)
+                .await
+                .map_err(|e| {
+                    SyncError::DatabaseError(format!(
+                        "pre-migration backup failed, refusing to migrate: {e}"
+                    ))
+                })?;
+            info!(
+                backup = %backup.display(),
+                from_version = start,
+                target_version = CURRENT_SCHEMA_VERSION,
+                "Wrote pre-migration database backup"
+            );
+        } else {
+            warn!(
+                "Automatic backups are disabled (database.backup_enabled = false); \
+                 migrating without a pre-migration backup"
+            );
         }
 
         info!(
@@ -493,6 +523,13 @@ impl Db {
         }
         info!("Migrations complete, schema version = {CURRENT_SCHEMA_VERSION}");
         Ok(())
+    }
+
+    /// Run migrations if needed, with the default backup policy (enabled,
+    /// keep the last 7, backups next to the database). See
+    /// [`migrate_with_backup`](Self::migrate_with_backup).
+    pub async fn migrate(&self) -> Result<(), SyncError> {
+        self.migrate_with_backup(&BackupConfig::default()).await
     }
 
     /// Current `PRAGMA user_version` of this database.
@@ -5072,6 +5109,427 @@ impl Db {
     }
 }
 
+// ── N-8.1: automatic database backups ─────────────────────────────────────
+// Backups land next to the database (`<db-dir>/backups/`) and never leave
+// the machine. A backup is the database file plus its journal companions
+// (`-wal`, `-shm`, `-log`) copied under a timestamped name, so it is a
+// restorable set even when the WAL holds uncheckpointed pages.
+
+/// What triggered a backup. Recorded in the backup file name so a human
+/// browsing the backup directory can tell pre-migration snapshots from
+/// scheduled ones at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupReason {
+    /// Written by [`Db::migrate_with_backup`] before running migrations.
+    PreMigration,
+    /// Written by the scheduled backup task.
+    Scheduled,
+    /// Written by an explicit user action ("Back up now").
+    Manual,
+    /// Safety snapshot of the live database taken just before a restore.
+    PreRestore,
+}
+
+impl BackupReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackupReason::PreMigration => "pre-migration",
+            BackupReason::Scheduled => "scheduled",
+            BackupReason::Manual => "manual",
+            BackupReason::PreRestore => "pre-restore",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pre-migration" => Some(BackupReason::PreMigration),
+            "scheduled" => Some(BackupReason::Scheduled),
+            "manual" => Some(BackupReason::Manual),
+            "pre-restore" => Some(BackupReason::PreRestore),
+            _ => None,
+        }
+    }
+}
+
+/// Policy controlling automatic database backups (N-8.1).
+#[derive(Debug, Clone)]
+pub struct BackupConfig {
+    /// Master switch for *automatic* backups. When false,
+    /// [`Db::migrate_with_backup`] skips the pre-migration backup and the
+    /// scheduled task stays idle. An explicit [`Db::backup_now`] call (the
+    /// UI's "Back up now", or the pre-restore safety snapshot) still works.
+    pub enabled: bool,
+    /// How many of the newest backups to keep. Pruning always keeps at
+    /// least the newest one, even if this is 0.
+    pub keep_last: usize,
+    /// Seconds between scheduled backups. 0 disables the schedule
+    /// (pre-migration backups still run while `enabled`).
+    pub interval_secs: u64,
+    /// Directory backups land in. `None` means `<db-dir>/backups`.
+    pub dir: Option<PathBuf>,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            keep_last: 7,
+            interval_secs: 24 * 3600,
+            dir: None,
+        }
+    }
+}
+
+impl BackupConfig {
+    /// Build the core backup policy from the `[database]` TOML section.
+    pub fn from_database_config(c: &crate::config::DatabaseConfig) -> Self {
+        Self {
+            enabled: c.backup_enabled,
+            keep_last: c.backup_keep_last,
+            interval_secs: c.backup_interval_hours.saturating_mul(3600),
+            dir: None,
+        }
+    }
+}
+
+/// One timestamped backup file, as listed for the UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupInfo {
+    /// File name, e.g. `nisaba-20261021T091500.123Z-pre-migration.db`.
+    pub name: String,
+    /// Full path to the backup `.db` file.
+    pub path: String,
+    /// When the backup was written (RFC 3339, UTC).
+    pub created_at: String,
+    /// Size of the `.db` file in bytes (journal companions not included).
+    pub size_bytes: u64,
+    /// The [`BackupReason`] that produced it, or `"unknown"` for foreign files.
+    pub reason: String,
+}
+
+/// Millisecond-precision UTC timestamp; file names sort chronologically.
+const BACKUP_TS_FORMAT: &str = "%Y%m%dT%H%M%S%.3fZ";
+
+/// File stem used for backup names: the database file's own stem (`nisaba`
+/// for `nisaba.db`), so backups read
+/// `nisaba-20261021T091500.123Z-pre-migration.db`.
+fn db_file_stem(db_path: &Path) -> String {
+    db_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("nisaba")
+        .to_string()
+}
+
+/// The `.db` file plus its journal companions (`-wal`, `-shm`, `-log`).
+fn backup_file_set(db: &Path) -> Vec<PathBuf> {
+    let mut out = vec![db.to_path_buf()];
+    let base = db.as_os_str().to_owned();
+    for suffix in JOURNAL_SUFFIXES {
+        let mut s = base.clone();
+        s.push(suffix);
+        out.push(PathBuf::from(s));
+    }
+    out
+}
+
+/// Copy a database file plus its existing journal companions to the
+/// destination stem.
+fn copy_file_set(src_db: &Path, dest_db: &Path) -> std::io::Result<()> {
+    std::fs::copy(src_db, dest_db)?;
+    let src_base = src_db.as_os_str().to_owned();
+    let dest_base = dest_db.as_os_str().to_owned();
+    for suffix in JOURNAL_SUFFIXES {
+        let mut s = src_base.clone();
+        s.push(suffix);
+        let s = PathBuf::from(s);
+        if s.exists() {
+            let mut d = dest_base.clone();
+            d.push(suffix);
+            std::fs::copy(&s, PathBuf::from(d))?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete all but the newest `keep_last` backups of `stem` in `dir` (file
+/// names sort chronologically). Journal companions of pruned backups are
+/// deleted too. Always keeps at least the newest one.
+fn prune_backup_dir(dir: &Path, stem: &str, keep_last: usize) -> Result<(), SyncError> {
+    let keep = keep_last.max(1);
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        SyncError::DatabaseError(format!("cannot list backup dir {}: {e}", dir.display()))
+    })?;
+    let prefix = format!("{stem}-");
+    let mut dbs: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .filter_map(|n| n.into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(".db"))
+        .collect();
+    dbs.sort();
+    if dbs.len() <= keep {
+        return Ok(());
+    }
+    for name in dbs.iter().take(dbs.len() - keep) {
+        for p in backup_file_set(&dir.join(name)) {
+            if p.exists() {
+                std::fs::remove_file(&p).map_err(|e| {
+                    SyncError::DatabaseError(format!(
+                        "cannot prune old backup {}: {e}",
+                        p.display()
+                    ))
+                })?;
+            }
+        }
+        debug!(backup = %name, "Pruned old database backup");
+    }
+    Ok(())
+}
+
+/// Copy the database file plus any journal files into `dir` under a
+/// timestamped name, then prune to `keep_last`. Returns the `.db` path.
+fn write_backup_files(
+    src: &Path,
+    dir: &Path,
+    reason: &str,
+    keep_last: usize,
+) -> Result<PathBuf, SyncError> {
+    std::fs::create_dir_all(dir).map_err(|e| {
+        SyncError::DatabaseError(format!("cannot create backup dir {}: {e}", dir.display()))
+    })?;
+    let stem = db_file_stem(src);
+    let ts = chrono::Utc::now().format(BACKUP_TS_FORMAT).to_string();
+    // Same-millisecond collisions (tests, rapid retries) get a numeric suffix.
+    let mut n = 0u32;
+    let dest_db = loop {
+        let name = if n == 0 {
+            format!("{stem}-{ts}-{reason}.db")
+        } else {
+            format!("{stem}-{ts}-{reason}-{n}.db")
+        };
+        let candidate = dir.join(&name);
+        if !candidate.exists() {
+            break candidate;
+        }
+        n += 1;
+    };
+    copy_file_set(src, &dest_db).map_err(|e| {
+        SyncError::DatabaseError(format!(
+            "backup copy {} -> {}: {e}",
+            src.display(),
+            dest_db.display()
+        ))
+    })?;
+    prune_backup_dir(dir, &stem, keep_last)?;
+    info!(backup = %dest_db.display(), "Wrote database backup");
+    Ok(dest_db)
+}
+
+/// Recover the [`BackupReason`] recorded in a backup file name
+/// (`<stem>-<ts>Z-<reason>[-<n>].db`); `"unknown"` for anything else.
+fn backup_reason_from_name(name: &str, stem: &str) -> String {
+    let rest = match name.strip_prefix(&format!("{stem}-")) {
+        Some(r) => r,
+        None => return "unknown".to_string(),
+    };
+    let rest = rest.strip_suffix(".db").unwrap_or(rest);
+    // The timestamp ends at the last 'Z'; the reason follows it.
+    let tail = match rest.rsplit_once('Z') {
+        Some((_, t)) => t,
+        None => return "unknown".to_string(),
+    };
+    let reason = tail.strip_prefix('-').unwrap_or(tail);
+    // Drop a numeric disambiguator suffix ("manual-2" -> "manual").
+    let reason = match reason.rsplit_once('-') {
+        Some((r, n)) if n.chars().all(|c| c.is_ascii_digit()) => r,
+        _ => reason,
+    };
+    if BackupReason::from_str(reason).is_some() {
+        reason.to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn read_backup_list(dir: &Path, stem: &str) -> Result<Vec<BackupInfo>, SyncError> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => {
+            return Err(SyncError::DatabaseError(format!(
+                "cannot list backup dir {}: {e}",
+                dir.display()
+            )))
+        }
+    };
+    let prefix = format!("{stem}-");
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if !(name.starts_with(&prefix) && name.ends_with(".db")) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let created_at = meta
+            .modified()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+            .unwrap_or_default();
+        out.push(BackupInfo {
+            reason: backup_reason_from_name(&name, stem),
+            path: dir.join(&name).display().to_string(),
+            name,
+            created_at,
+            size_bytes: meta.len(),
+        });
+    }
+    // File names sort chronologically; newest first.
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(out)
+}
+
+/// Copy the backup file set over the live database paths. Journal
+/// companions the backup does not have are deleted from the live side, so a
+/// stale WAL can never shadow the restored file.
+fn swap_in_backup(live_db: &Path, backup_db: &Path) -> Result<(), SyncError> {
+    copy_file_set(backup_db, live_db).map_err(|e| {
+        SyncError::DatabaseError(format!(
+            "restore copy {} -> {}: {e}",
+            backup_db.display(),
+            live_db.display()
+        ))
+    })?;
+    let live_base = live_db.as_os_str().to_owned();
+    let backup_base = backup_db.as_os_str().to_owned();
+    for suffix in JOURNAL_SUFFIXES {
+        let mut b = backup_base.clone();
+        b.push(suffix);
+        if Path::new(&b).exists() {
+            continue;
+        }
+        let mut l = live_base.clone();
+        l.push(suffix);
+        let l = PathBuf::from(l);
+        if l.exists() {
+            std::fs::remove_file(&l).map_err(|e| {
+                SyncError::DatabaseError(format!(
+                    "cannot remove stale journal {}: {e}",
+                    l.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+impl Db {
+    /// Directory this database's backups land in: `<db-dir>/backups` unless
+    /// the config overrides it. Created on demand by [`Db::backup_now`].
+    pub fn backup_dir(&self, cfg: &BackupConfig) -> PathBuf {
+        if let Some(dir) = &cfg.dir {
+            return dir.clone();
+        }
+        match Path::new(&self.path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            Some(parent) => parent.join("backups"),
+            None => PathBuf::from("backups"),
+        }
+    }
+
+    /// Write a timestamped backup of this database into the backup directory
+    /// and prune older backups to `keep_last`. Returns the backup `.db` path.
+    ///
+    /// A best-effort `wal_checkpoint(TRUNCATE)` runs first so the main file
+    /// holds as much as possible even where the engine ignores the pragma;
+    /// the journal files are copied alongside the main file anyway, so the
+    /// backup stays a restorable set. This is the explicit entry point (the
+    /// UI's "Back up now", the scheduler, the pre-restore safety snapshot):
+    /// it writes regardless of [`BackupConfig::enabled`]; the automatic
+    /// triggers check the flag themselves.
+    pub async fn backup_now(
+        &self,
+        cfg: &BackupConfig,
+        reason: BackupReason,
+    ) -> Result<PathBuf, SyncError> {
+        if let Ok(conn) = self.connect().await {
+            let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await;
+        }
+        let src = PathBuf::from(&self.path);
+        let dir = self.backup_dir(cfg);
+        let keep_last = cfg.keep_last.max(1);
+        let reason_str = reason.as_str().to_string();
+        tokio::task::spawn_blocking(move || write_backup_files(&src, &dir, &reason_str, keep_last))
+            .await
+            .map_err(|e| SyncError::DatabaseError(format!("backup task failed: {e}")))?
+    }
+
+    /// List this database's backups, newest first. A missing backup
+    /// directory lists as empty; stray files never fail the listing.
+    pub async fn list_backups(&self, cfg: &BackupConfig) -> Result<Vec<BackupInfo>, SyncError> {
+        let dir = self.backup_dir(cfg);
+        let stem = db_file_stem(Path::new(&self.path));
+        tokio::task::spawn_blocking(move || read_backup_list(&dir, &stem))
+            .await
+            .map_err(|e| SyncError::DatabaseError(format!("listing backups failed: {e}")))?
+    }
+
+    /// Replace the live database file with a backup.
+    ///
+    /// The backup must live inside this database's backup directory (path
+    /// traversal is rejected) and be a `.db` file. A `pre-restore` backup of
+    /// the current file is taken first, so a bad restore is itself
+    /// recoverable. Journal files beside the live database are synced to the
+    /// backup's set, so a stale WAL can never shadow the restored file.
+    ///
+    /// The process MUST restart afterwards: turso keeps the old file's pages
+    /// cached in already-open connections. The UI restarts the app once this
+    /// returns `Ok`.
+    pub async fn restore_backup(&self, cfg: &BackupConfig, backup: &Path) -> Result<(), SyncError> {
+        let backup_canon = backup
+            .canonicalize()
+            .map_err(|e| SyncError::DatabaseError(format!("backup {}: {e}", backup.display())))?;
+        let dir = self.backup_dir(cfg);
+        let dir_canon = dir.canonicalize().map_err(|_| {
+            SyncError::DatabaseError("no backups have been written yet".to_string())
+        })?;
+        if !backup_canon.starts_with(&dir_canon) {
+            return Err(SyncError::DatabaseError(format!(
+                "refusing to restore {}: not inside the backup directory {}",
+                backup.display(),
+                dir.display()
+            )));
+        }
+        if backup_canon.extension().and_then(|e| e.to_str()) != Some("db") {
+            return Err(SyncError::DatabaseError(format!(
+                "refusing to restore {}: not a .db backup file",
+                backup.display()
+            )));
+        }
+        // Safety net first: snapshot the live database before touching it.
+        let safety = self
+            .backup_now(cfg, BackupReason::PreRestore)
+            .await
+            .map_err(|e| {
+                SyncError::DatabaseError(format!("pre-restore safety backup failed: {e}"))
+            })?;
+        info!(safety = %safety.display(), "Wrote pre-restore safety backup");
+
+        let live = PathBuf::from(&self.path);
+        tokio::task::spawn_blocking(move || swap_in_backup(&live, &backup_canon))
+            .await
+            .map_err(|e| SyncError::DatabaseError(format!("restore task failed: {e}")))?
+    }
+}
+
 /// Config keys declared with `secret: true` in a plugin's `config_fields` JSON.
 ///
 /// `config_fields` is the serialised `Vec<ConfigField>` from the plugin's
@@ -7719,5 +8177,185 @@ mod tests {
         assert_eq!(row.get::<String>(0).unwrap(), "48.5");
         assert_eq!(row.get::<String>(1).unwrap(), "text");
         assert_eq!(row.get::<String>(2).unwrap(), "EUR");
+    }
+
+    // ── N-8.1: automatic database backups ────────────────────────────────
+
+    /// Migrating a database with pending steps writes a timestamped backup
+    /// first, and the backup holds the pre-migration state.
+    #[tokio::test]
+    async fn backup_on_migrate_writes_timestamped_backup_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+
+        // Write something BEFORE any migration runs, so the backup must
+        // contain the pre-migration state.
+        let conn = db.connect().await.unwrap();
+        conn.execute("CREATE TABLE scratch (v TEXT)", ())
+            .await
+            .unwrap();
+        conn.execute("INSERT INTO scratch (v) VALUES ('pre-migration-data')", ())
+            .await
+            .unwrap();
+        drop(conn);
+
+        db.migrate_with_backup(&BackupConfig::default())
+            .await
+            .unwrap();
+
+        // Exactly one timestamped backup, next to the database.
+        let backups = db.list_backups(&BackupConfig::default()).await.unwrap();
+        assert_eq!(backups.len(), 1);
+        assert!(
+            backups[0].name.contains("pre-migration"),
+            "unexpected backup name: {}",
+            backups[0].name
+        );
+        assert!(backups[0].path.ends_with(".db"));
+        assert!(std::path::Path::new(&backups[0].path).exists());
+
+        // The backup holds the pre-migration state: open it WITHOUT
+        // migrating and check the scratch row is there at the old version.
+        let snap = Db::open(&backups[0].path).await.unwrap();
+        let conn = snap.connect().await.unwrap();
+        let mut rows = conn.query("SELECT v FROM scratch", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "pre-migration-data");
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert!(
+            version < CURRENT_SCHEMA_VERSION,
+            "backup should predate the migration, got version {version}"
+        );
+
+        // The live database migrated fully.
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// A failed pre-migration backup aborts the migration (fail closed).
+    /// Simulate it with a backup directory that cannot be created: point
+    /// `dir` at a path blocked by a regular file.
+    #[tokio::test]
+    async fn migrate_aborts_when_pre_migration_backup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let cfg = BackupConfig {
+            dir: Some(blocker.join("backups")),
+            ..BackupConfig::default()
+        };
+        let err = db.migrate_with_backup(&cfg).await.unwrap_err();
+        assert!(
+            err.to_string().contains("pre-migration backup failed"),
+            "unexpected error: {err}"
+        );
+        // Nothing migrated.
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(version, 0);
+    }
+
+    /// Backup -> change -> restore -> reopen: the reopened database shows
+    /// exactly the backed-up state (the restore round-trip).
+    #[tokio::test]
+    async fn restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        db.set_app_setting("backup_probe", "before").await.unwrap();
+        let cfg = BackupConfig::default();
+        let backup = db.backup_now(&cfg, BackupReason::Manual).await.unwrap();
+
+        // Change state after the backup.
+        db.set_app_setting("backup_probe", "after").await.unwrap();
+
+        db.restore_backup(&cfg, &backup).await.unwrap();
+
+        // Simulate the post-restore restart: a fresh handle on the same path
+        // must see the backed-up state.
+        drop(db);
+        let db2 = Db::open(path.to_str().unwrap()).await.unwrap();
+        let value = db2.get_app_setting("backup_probe").await.unwrap();
+        assert_eq!(value.as_deref(), Some("before"));
+
+        // The restore also left a pre-restore safety snapshot behind.
+        let backups = db2.list_backups(&cfg).await.unwrap();
+        assert!(
+            backups.iter().any(|b| b.reason == "pre-restore"),
+            "expected a pre-restore safety backup, got: {:?}",
+            backups.iter().map(|b| &b.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Pruning keeps the newest N backups and deletes older sets.
+    #[tokio::test]
+    async fn prune_keeps_last_n_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        let cfg = BackupConfig {
+            keep_last: 3,
+            ..BackupConfig::default()
+        };
+        for _ in 0..5 {
+            db.backup_now(&cfg, BackupReason::Scheduled).await.unwrap();
+        }
+        let backups = db.list_backups(&cfg).await.unwrap();
+        assert_eq!(backups.len(), 3);
+        // Newest first.
+        assert!(backups[0].name > backups[1].name);
+        assert!(backups[1].name > backups[2].name);
+        // Exactly three .db files on disk.
+        let db_files = std::fs::read_dir(db.backup_dir(&cfg))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("db"))
+            .count();
+        assert_eq!(db_files, 3);
+    }
+
+    /// A disabled backup config skips the pre-migration backup entirely.
+    #[tokio::test]
+    async fn disabled_config_skips_migration_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        let cfg = BackupConfig {
+            enabled: false,
+            ..BackupConfig::default()
+        };
+        db.migrate_with_backup(&cfg).await.unwrap();
+        assert!(!dir.path().join("backups").exists());
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let version: i64 = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    /// Restore refuses a backup path outside the backup directory.
+    #[tokio::test]
+    async fn restore_rejects_paths_outside_backup_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+        let cfg = BackupConfig::default();
+        let evil = dir.path().join("evil.db");
+        std::fs::write(&evil, b"not a database").unwrap();
+        let err = db.restore_backup(&cfg, &evil).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not inside the backup directory"),
+            "unexpected error: {err}"
+        );
     }
 }
