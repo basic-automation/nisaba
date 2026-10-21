@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Read as _;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use nisaba_core::crypto::OsKeyringPluginSecrets;
 use nisaba_core::db::Db;
 use nisaba_core::types::{decimal_money, VendorListingCache, VendorPluginRow};
-use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
+use nisaba_vendor_runtime::{BatchCallback, PluginLimits, PluginStore, StoreError, VendorRuntime};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -470,20 +472,98 @@ fn default_timeout_minutes() -> u32 {
     (PluginLimits::default().timeout.as_secs() / 60) as u32
 }
 
+/// [`PluginStore`] backed by the company database: the `plugin_kv_store` table
+/// lives in the company DB, so the store behind `Nisaba.store` is scoped to
+/// plugin + company by construction.
+#[derive(Clone)]
+struct DbPluginStore {
+    db: Arc<Db>,
+}
+
+impl PluginStore for DbPluginStore {
+    fn get(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, StoreError>> + '_>> {
+        let db = self.db.clone();
+        let plugin_id = plugin_id.to_string();
+        let key = key.to_string();
+        Box::pin(async move {
+            db.plugin_store_get(&plugin_id, &key)
+                .await
+                .map_err(|e| StoreError(e.to_string()))
+        })
+    }
+
+    fn set(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + '_>> {
+        let db = self.db.clone();
+        let plugin_id = plugin_id.to_string();
+        let key = key.to_string();
+        let value = value.to_string();
+        Box::pin(async move {
+            db.plugin_store_set(&plugin_id, &key, &value)
+                .await
+                .map_err(|e| StoreError(e.to_string()))
+        })
+    }
+
+    fn delete(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, StoreError>> + '_>> {
+        let db = self.db.clone();
+        let plugin_id = plugin_id.to_string();
+        let key = key.to_string();
+        Box::pin(async move {
+            db.plugin_store_delete(&plugin_id, &key)
+                .await
+                .map_err(|e| StoreError(e.to_string()))
+        })
+    }
+
+    fn total_bytes(
+        &self,
+        plugin_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, StoreError>> + '_>> {
+        let db = self.db.clone();
+        let plugin_id = plugin_id.to_string();
+        Box::pin(async move {
+            db.plugin_store_total_bytes(&plugin_id)
+                .await
+                .map_err(|e| StoreError(e.to_string()))
+        })
+    }
+}
+
 /// Run VendorRuntime::execute_plugin_from_files in a thread that owns a LocalSet.
+///
+/// `plugin_id` scopes the `Nisaba.store` key–value store; `store` is its
+/// host-side backend (the company database in production).
 async fn execute_plugin_in_thread(
     files: HashMap<String, String>,
     config: HashMap<String, String>,
     batch_callback: Option<BatchCallback>,
     limits: PluginLimits,
+    plugin_id: &str,
+    store: Arc<dyn PluginStore>,
 ) -> Result<Vec<nisaba_vendor_runtime::VendorListing>, String> {
+    let plugin_id = plugin_id.to_string();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(VendorRuntime::execute_plugin_from_files_with_limits(
+        rt.block_on(VendorRuntime::execute_plugin_from_files_with_store(
             &files,
+            &plugin_id,
+            store,
             config,
             batch_callback,
             limits,
@@ -1123,7 +1203,8 @@ pub async fn fetch_vendor_listings(
 
     let files = parse_files_json(&plugin.files_json)?;
     let limits = plugin_limits(&db, &plugin_id).await;
-    let result = execute_plugin_in_thread(files, config, None, limits).await?;
+    let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
+    let result = execute_plugin_in_thread(files, config, None, limits, &plugin_id, store).await?;
 
     // Save to cache as side-effect
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1229,8 +1310,11 @@ pub async fn sync_vendor_listings(
     let app_handle = app.clone();
     let db_spawn = db.clone();
     let limits = plugin_limits(&db, &plugin_id).await;
+    let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
     tokio::spawn(async move {
-        let result = execute_plugin_in_thread(files, config, Some(batch_callback), limits).await;
+        let result =
+            execute_plugin_in_thread(files, config, Some(batch_callback), limits, &pid, store)
+                .await;
 
         match result {
             Ok(vendor_listings) => {
@@ -1729,7 +1813,8 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
     tracing::info!(plugin = %plugin.display_name, version = %plugin.version, "Auto vendor sync starting");
 
     let limits = plugin_limits(&db, &plugin_id).await;
-    match execute_plugin_in_thread(files, config, None, limits).await {
+    let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
+    match execute_plugin_in_thread(files, config, None, limits, &plugin_id, store).await {
         Ok(vendor_listings) => {
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let cache_rows: Vec<VendorListingCache> =
