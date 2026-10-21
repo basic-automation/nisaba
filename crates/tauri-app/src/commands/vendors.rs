@@ -959,6 +959,9 @@ pub async fn install_vendor_plugin(
     // plugin whose metadata no longer loads is not installed.
     let files = parse_files_json(&plugin.files_json)?;
     let metadata = read_metadata_in_thread(files).await?;
+    // A plugin built for a plugin API this host does not implement cannot run here:
+    // refuse it at install with the reason, rather than failing at first sync.
+    metadata.check_api_version()?;
     db.set_registry_plugin_allowed_hosts(&plugin_id, allowed_hosts_json(&metadata).as_deref())
         .await
         .map_err(|e| e.to_string())?;

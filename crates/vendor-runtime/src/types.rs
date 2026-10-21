@@ -19,11 +19,23 @@ pub struct VendorListing {
     pub variant_attributes: std::collections::HashMap<String, String>,
 }
 
+/// The plugin API major version this host implements.
+///
+/// This is the frozen plugin surface documented in `plugins/template` and
+/// `SECURITY.md`: bumping it is a breaking change, and a host refuses to
+/// install a plugin whose `api_version` major it does not support.
+pub const HOST_PLUGIN_API_VERSION: u32 = 1;
+
 /// Metadata exported by a plugin's `metadata` const.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMetadata {
     pub name: String,
     pub version: String,
+    /// Which revision of the frozen plugin surface this plugin targets. A plugin
+    /// that does not declare one deserializes to 0, which is not a real revision
+    /// and is refused at install — so missing and unknown both fail the same way.
+    #[serde(default)]
+    pub api_version: u32,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -37,6 +49,23 @@ pub struct PluginMetadata {
     /// `Some(vec![])` means no network at all.
     #[serde(default)]
     pub allowed_hosts: Option<Vec<String>>,
+}
+
+impl PluginMetadata {
+    /// Refuse a plugin whose API major this host does not implement. The message
+    /// is shown to the user at install time, naming both versions so the fix —
+    /// a plugin build made for this host's API — is obvious.
+    pub fn check_api_version(&self) -> Result<(), String> {
+        if self.api_version == HOST_PLUGIN_API_VERSION {
+            Ok(())
+        } else {
+            Err(format!(
+                "Plugin '{}' targets plugin API version {}, but this host supports only version {}. \
+                 Install a build of the plugin made for API v{}.",
+                self.name, self.api_version, HOST_PLUGIN_API_VERSION, HOST_PLUGIN_API_VERSION
+            ))
+        }
+    }
 }
 
 fn default_category() -> String {

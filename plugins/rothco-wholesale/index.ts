@@ -12,6 +12,9 @@ import type {
 export const metadata = {
   name: 'Rothco Wholesale',
   version: '2.5.0',
+  // The frozen plugin surface this plugin targets; a host whose API major is
+  // not 1 refuses to install this plugin.
+  api_version: 1,
   description:
     'Import Rothco product catalog with SKU variants and inventory via GraphQL v2 API.',
   category: 'vendor',

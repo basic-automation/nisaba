@@ -685,7 +685,7 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
 `name`, `version`, `description`, `config_fields`, `category`, `icon` and `allowed_hosts`.
 1.0 freezes whatever shape exists at that point, so fix the shape first.
 
-- [ ] An `api_version` in metadata. The host refuses a major version it does not know and
+- [x] An `api_version` in metadata. The host refuses a major version it does not know and
       says so at install. The surface frozen at `api_version: 1` is written down in
       `plugins/template` and `SECURITY.md`.
 - [ ] Fix `VendorListing` before freezing it:

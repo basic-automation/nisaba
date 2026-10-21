@@ -48,6 +48,36 @@ The parts of Nisaba that carry real security weight:
   `op_nisaba_*` ops are the whole security boundary. A plugin reaching the
   filesystem, spawning a process, or making network requests outside
   `op_nisaba_fetch` is a sandbox escape — report it.
+
+## Plugin API v1 (frozen)
+
+The vendor plugin surface frozen for 1.0. Every plugin's `metadata` must declare
+`api_version: 1`; at install the host refuses any plugin whose API major it does
+not support, naming both versions so the user knows a plugin build made for
+this host's API is what is needed. Bumping the major is a breaking change by
+design — it is what keeps a v2 plugin from silently misbehaving on a v1 host.
+
+The frozen v1 surface is:
+
+- **Metadata**: `name`, `version`, `api_version`, `description`,
+  `config_fields` (each with `key`, `label`, `required`, `secret`,
+  `placeholder`), `category`, `icon`, `allowed_hosts`.
+- **Entry points**: an exported `metadata` object literal (read before any run,
+  with no network access) and an exported async `fetchListings(config)` that
+  returns the whole catalog as `VendorListing[]`.
+- **The `Nisaba` host object**: `fetch` (only to `allowed_hosts`; redirects are
+  followed only to listed hosts), `sleep` (the only way to wait — there are no
+  timers), `emitBatch` (progress batches; the array `fetchListings` returns is
+  the result), and `log` (`trace`/`debug`/`info`/`warn`/`error`; `console.*`
+  writes there too).
+- **`VendorListing`**: `vendor_item_id`, `title`, `price`, `currency`,
+  `quantity`, `sku`, `image_url`, `url`, `extras`, `group_key`,
+  `variant_attributes`. Only `vendor_item_id` and `title` are required.
+- **Sandbox limits per run**: 30 minutes wall-clock, a 1 GiB V8 heap, 256 MiB
+  of listing output, 64 MiB per `fetch` response body.
+
+The same surface is written down in `plugins/template/index.ts`, the starting
+point for third-party plugins.
 - **The P2P layer** (`crates/p2p`). Payloads between installs are AES-GCM
   encrypted and carried over a Tor onion service. Anything that lets an
   unauthorized peer read or write a company's catalog, or that weakens the

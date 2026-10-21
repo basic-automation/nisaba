@@ -13,4 +13,4 @@ extension!(
 
 pub use ops::{BatchCallback, BlockPrivateHosts, FetchPolicy};
 pub use runtime::{PluginLimits, VendorRuntime};
-pub use types::{ConfigField, PluginInfo, PluginMetadata, VendorListing};
+pub use types::{ConfigField, PluginInfo, PluginMetadata, VendorListing, HOST_PLUGIN_API_VERSION};

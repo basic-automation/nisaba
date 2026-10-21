@@ -8,6 +8,23 @@
 // global and no timers — only the `Nisaba` object declared below. A run is limited to
 // 30 minutes, a 1 GiB heap, 256 MiB of listing output and 64 MiB per response body.
 
+// ── Plugin API v1 (frozen) ──────────────────────────────────────────────────
+//
+// This template targets plugin API v1 (`metadata.api_version: 1`). The host
+// refuses to install a plugin whose `api_version` major it does not support,
+// so this file also serves as the written-down v1 surface:
+//
+//   metadata: name, version, api_version, description, config_fields
+//             (key, label, required, secret, placeholder), category, icon,
+//             allowed_hosts
+//   entry points: `metadata` (a plain object literal, read before any run)
+//                 and `fetchListings(config): Promise<VendorListing[]>`
+//   the Nisaba object: fetch, sleep, emitBatch, log — see "The host API" below
+//   VendorListing: vendor_item_id, title, price, currency, quantity, sku,
+//                  image_url, url, extras, group_key, variant_attributes
+//
+// Keep to this surface and the plugin keeps installing on every 1.x host.
+
 // ── The host API ────────────────────────────────────────────────────────────
 
 interface NisabaResponse {
@@ -65,6 +82,9 @@ export interface VendorListing {
 export const metadata = {
   name: 'Example Supplier', // shown in the app; also how re-imports are matched
   version: '1.0.0', // bump it to publish an update
+  // The frozen plugin surface this plugin targets. A host whose API major is not
+  // 1 refuses to install this plugin, and says why.
+  api_version: 1,
   description: 'Template: imports the Example Supplier catalog.',
   category: 'vendor',
   // Each field becomes an input on the plugin's Configure dialog; values arrive in
