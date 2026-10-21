@@ -277,9 +277,48 @@ pub async fn op_nisaba_sleep(#[bigint] millis: u64) -> Result<(), deno_error::Js
     Ok(())
 }
 
-/// Logging op — routes to Rust tracing.
+/// Per-run collector for a plugin's own log lines (N-7.5). Installed in the
+/// `OpState` by the host when it wants the run's lines back (for the run
+/// history); the lines are also routed to Rust tracing either way, exactly
+/// as before. Capped so a chatty plugin cannot grow it without bound.
+#[derive(Clone, Default)]
+pub struct PluginLogCollector {
+    lines: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// The most log lines kept for one run.
+pub const PLUGIN_LOG_MAX_LINES: usize = 200;
+/// The most characters kept for one log line.
+pub const PLUGIN_LOG_MAX_LINE_CHARS: usize = 500;
+
+impl PluginLogCollector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&self, level: &str, msg: &str) {
+        if let Ok(mut lines) = self.lines.lock() {
+            if lines.len() < PLUGIN_LOG_MAX_LINES {
+                let msg: String = msg.chars().take(PLUGIN_LOG_MAX_LINE_CHARS).collect();
+                lines.push(format!("[{level}] {msg}"));
+            }
+        }
+    }
+
+    /// The lines captured so far, oldest first.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.lines.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+}
+
+/// Logging op — routes to Rust tracing and, when the host installed a
+/// [`PluginLogCollector`] for this run, captures the line for the run
+/// history (N-7.5).
 #[op2(fast)]
-pub fn op_nisaba_log(#[string] level: &str, #[string] msg: &str) {
+pub fn op_nisaba_log(state: &mut OpState, #[string] level: &str, #[string] msg: &str) {
+    if let Some(collector) = state.try_borrow::<PluginLogCollector>() {
+        collector.push(level, msg);
+    }
     match level {
         "trace" => tracing::trace!(target: "vendor_plugin", "{msg}"),
         "debug" => tracing::debug!(target: "vendor_plugin", "{msg}"),

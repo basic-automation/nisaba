@@ -200,3 +200,58 @@ export async function fetchListings(config, args) {
         .unwrap();
     assert!(matches!(result, FetchListingsResult::Full(listings) if listings.is_empty()));
 }
+
+/// N-7.5: the logged incremental entry point returns the plugin's own log
+/// lines for the run history — including for a run that fails.
+#[tokio::test]
+async fn logged_run_returns_the_plugins_log_lines() {
+    let code = format!(
+        "{METADATA}\n{}",
+        r#"
+export async function fetchListings(config, args) {
+  Nisaba.log.info("starting pull");
+  Nisaba.log.warn("supplier is slow");
+  return [{ vendor_item_id: "a", title: "Apple" }];
+}
+"#
+    );
+    let files = HashMap::from([("index.ts".to_string(), code)]);
+    let store: Arc<dyn PluginStore> = Arc::new(MemoryStore::default());
+    let (result, logs) = VendorRuntime::execute_plugin_from_files_with_store_incremental_logged(
+        &files,
+        "plug",
+        store,
+        HashMap::new(),
+        None,
+        PluginLimits::default(),
+        &FetchListingsArgs::default(),
+    )
+    .await;
+    assert!(matches!(result, Ok(FetchListingsResult::Full(_))));
+    assert_eq!(logs, ["[info] starting pull", "[warn] supplier is slow"]);
+
+    // A failing run still hands back what the plugin logged before it died.
+    let code = format!(
+        "{METADATA}\n{}",
+        r#"
+export async function fetchListings(config, args) {
+  Nisaba.log.error("about to fail");
+  throw new Error("supplier down");
+}
+"#
+    );
+    let files = HashMap::from([("index.ts".to_string(), code)]);
+    let store: Arc<dyn PluginStore> = Arc::new(MemoryStore::default());
+    let (result, logs) = VendorRuntime::execute_plugin_from_files_with_store_incremental_logged(
+        &files,
+        "plug",
+        store,
+        HashMap::new(),
+        None,
+        PluginLimits::default(),
+        &FetchListingsArgs::default(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(logs, ["[error] about to fail"]);
+}

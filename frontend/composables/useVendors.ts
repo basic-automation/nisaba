@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { VendorPluginInfo, VendorListing, VendorImportItem, ImportResult, VendorSyncStatus, VariantSkuEntry } from '~/types'
+import type { VendorPluginInfo, VendorListing, VendorImportItem, ImportResult, VendorSyncStatus, VariantSkuEntry, PluginRunInfo } from '~/types'
 
 // Module-level state — persists across navigations
 const plugins = ref<VendorPluginInfo[]>([])
@@ -83,6 +83,17 @@ export function useVendors() {
   async function setPluginTimeout(pluginId: string, minutes: number | null) {
     await invoke('set_vendor_plugin_timeout', { pluginId, minutes })
     await fetchPlugins()
+  }
+
+  /** Per-plugin auto-sync interval in minutes (N-7.5); `null` = every global cycle. Manual runs ignore it. */
+  async function setPluginSyncInterval(pluginId: string, minutes: number | null) {
+    await invoke('set_vendor_plugin_sync_interval', { pluginId, minutes })
+    await fetchPlugins()
+  }
+
+  /** A plugin's recorded runs (N-7.5), newest first. */
+  async function fetchPluginRunHistory(pluginId: string, limit = 20): Promise<PluginRunInfo[]> {
+    return invoke<PluginRunInfo[]>('get_plugin_run_history', { pluginId, limit })
   }
 
   // Execution (direct — blocking, also writes to cache as side-effect)
@@ -169,6 +180,8 @@ export function useVendors() {
     installPlugin,
     uninstallPlugin,
     setPluginTimeout,
+    setPluginSyncInterval,
+    fetchPluginRunHistory,
     fetchVendorListings,
     loadCachedListings,
     fetchSyncStatus,

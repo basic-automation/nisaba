@@ -587,6 +587,30 @@ pub struct VendorPluginInstall {
     /// means the runtime default.
     #[serde(default)]
     pub timeout_minutes: Option<i64>,
+    /// This machine's per-plugin auto-sync interval, in minutes (N-7.5). `None`
+    /// means the plugin runs on every global sync cycle; `Some(n)` means the
+    /// auto-sync path runs it at most once per `n` minutes. Manual runs are
+    /// never gated by this.
+    #[serde(default)]
+    pub sync_interval_minutes: Option<i64>,
+}
+
+/// One recorded plugin run (N-7.5): start/end, listings emitted, the error on
+/// failure, and the plugin's own log lines captured for that run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRunRecord {
+    pub id: i64,
+    pub plugin_id: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    /// `running`, `completed`, or `failed`.
+    pub status: String,
+    pub listings_emitted: i64,
+    pub error: Option<String>,
+    /// The plugin's `Nisaba.log` lines for this run, oldest first.
+    pub log_lines: Vec<String>,
+    /// What started the run: `auto`, `manual`, or `fetch`.
+    pub trigger_kind: String,
 }
 
 /// Flags indicating which capabilities a platform adapter supports.

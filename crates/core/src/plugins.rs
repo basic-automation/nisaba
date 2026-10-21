@@ -114,6 +114,38 @@ pub fn plugin_run_allowed(plugin: &VendorPluginRow, install: Option<&VendorPlugi
     installed && plugin.status == "approved"
 }
 
+/// Whether a plugin is due for an auto-sync run (N-7.5).
+///
+/// A plugin with no per-plugin interval (`None`) follows the global sync
+/// cycle and is always due. With an interval, it is due when it has never
+/// run, or when at least `interval_minutes` have elapsed since its last
+/// recorded run started. Timestamps are `"%Y-%m-%d %H:%M:%S"` UTC strings;
+/// an unparseable timestamp counts as due (fail open for freshness, never
+/// wedge a plugin out of sync forever). Manual runs never consult this.
+pub fn plugin_sync_due(
+    interval_minutes: Option<i64>,
+    last_run_started_at: Option<&str>,
+    now: &str,
+) -> bool {
+    let Some(interval) = interval_minutes else {
+        return true;
+    };
+    if interval <= 0 {
+        return true;
+    }
+    let Some(last) = last_run_started_at else {
+        return true;
+    };
+    let fmt = "%Y-%m-%d %H:%M:%S";
+    let (Ok(last), Ok(now)) = (
+        chrono::NaiveDateTime::parse_from_str(last, fmt),
+        chrono::NaiveDateTime::parse_from_str(now, fmt),
+    ) else {
+        return true;
+    };
+    (now - last).num_minutes() >= interval
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +308,7 @@ mod tests {
             enabled,
             installed_at: "2026-10-20 00:00:00".to_string(),
             timeout_minutes: None,
+            sync_interval_minutes: None,
         }
     }
 
@@ -295,5 +328,35 @@ mod tests {
         let mut rejected = plugin.clone();
         rejected.status = "rejected".to_string();
         assert!(!plugin_run_allowed(&rejected, Some(&on)));
+    }
+
+    #[test]
+    fn sync_due_without_interval_is_always_due() {
+        assert!(plugin_sync_due(None, None, "2026-10-21 10:00:00"));
+        assert!(plugin_sync_due(
+            None,
+            Some("2026-10-21 09:59:00"),
+            "2026-10-21 10:00:00"
+        ));
+        // A non-positive interval is treated as "no interval".
+        assert!(plugin_sync_due(
+            Some(0),
+            Some("2026-10-21 09:59:00"),
+            "2026-10-21 10:00:00"
+        ));
+    }
+
+    #[test]
+    fn sync_due_with_interval_waits_for_it_to_elapse() {
+        let now = "2026-10-21 10:00:00";
+        // Never run: due immediately.
+        assert!(plugin_sync_due(Some(60), None, now));
+        // Ran 30 minutes ago with a 60-minute interval: not due.
+        assert!(!plugin_sync_due(Some(60), Some("2026-10-21 09:30:00"), now));
+        // Exactly at the interval and beyond: due.
+        assert!(plugin_sync_due(Some(60), Some("2026-10-21 09:00:00"), now));
+        assert!(plugin_sync_due(Some(60), Some("2026-10-21 08:00:00"), now));
+        // Unparseable history fails open.
+        assert!(plugin_sync_due(Some(60), Some("not a date"), now));
     }
 }

@@ -50,6 +50,40 @@ pub struct VendorPluginInfo {
     /// code resets the plugin to pending and stores the new hash here, so the review
     /// card shows exactly what the admin is being asked to approve.
     pub code_hash: Option<String>,
+    /// This machine's per-plugin auto-sync interval in minutes (N-7.5); `None`
+    /// means the plugin runs on every global sync cycle.
+    pub sync_interval_minutes: Option<i64>,
+}
+
+/// One recorded plugin run, as shown in the run history on the plugin's card
+/// (N-7.5).
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginRunInfo {
+    pub id: i64,
+    pub plugin_id: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub status: String,
+    pub listings_emitted: i64,
+    pub error: Option<String>,
+    pub log_lines: Vec<String>,
+    pub trigger_kind: String,
+}
+
+impl From<nisaba_core::types::PluginRunRecord> for PluginRunInfo {
+    fn from(r: nisaba_core::types::PluginRunRecord) -> Self {
+        Self {
+            id: r.id,
+            plugin_id: r.plugin_id,
+            started_at: r.started_at,
+            finished_at: r.finished_at,
+            status: r.status,
+            listings_emitted: r.listings_emitted,
+            error: r.error,
+            log_lines: r.log_lines,
+            trigger_kind: r.trigger_kind,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,6 +564,13 @@ impl PluginStore for DbPluginStore {
 /// host-side backend (the company database in production). `args` carries the
 /// host's incremental state (`since`, `cursor`) into the plugin's
 /// `fetchListings(config, { since, cursor })`.
+/// The outcome of one plugin execution: its result plus the plugin's own
+/// log lines for the run (N-7.5), which survive a failed run.
+struct PluginExecution {
+    result: Result<FetchListingsResult, String>,
+    logs: Vec<String>,
+}
+
 async fn execute_plugin_in_thread_incremental(
     files: HashMap<String, String>,
     config: HashMap<String, String>,
@@ -538,7 +579,7 @@ async fn execute_plugin_in_thread_incremental(
     plugin_id: &str,
     store: Arc<dyn PluginStore>,
     args: &FetchListingsArgs,
-) -> Result<FetchListingsResult, String> {
+) -> Result<PluginExecution, String> {
     let plugin_id = plugin_id.to_string();
     let args = args.clone();
     tokio::task::spawn_blocking(move || {
@@ -546,8 +587,8 @@ async fn execute_plugin_in_thread_incremental(
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(
-            VendorRuntime::execute_plugin_from_files_with_store_incremental(
+        let (result, logs) = rt.block_on(
+            VendorRuntime::execute_plugin_from_files_with_store_incremental_logged(
                 &files,
                 &plugin_id,
                 store,
@@ -556,8 +597,11 @@ async fn execute_plugin_in_thread_incremental(
                 limits,
                 &args,
             ),
-        )
-        .map_err(|e| format!("Plugin execution failed: {e}"))
+        );
+        Ok(PluginExecution {
+            result: result.map_err(|e| format!("Plugin execution failed: {e}")),
+            logs,
+        })
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
@@ -575,6 +619,7 @@ async fn execute_plugin_in_thread_incremental(
 /// On success the host's sync state is recorded (`since` = this run's start,
 /// `cursor` = the plugin's returned cursor, or none for a full pull), so the
 /// next cycle can pull only what changed. Returns the merged catalog rows.
+#[allow(clippy::too_many_arguments)]
 async fn run_incremental_sync_cycle(
     db: &Db,
     plugin_id: &str,
@@ -583,18 +628,84 @@ async fn run_incremental_sync_cycle(
     batch_callback: Option<BatchCallback>,
     limits: PluginLimits,
     store: Arc<dyn PluginStore>,
+    trigger: &str,
 ) -> Result<Vec<VendorListingCache>, String> {
+    // Run history (N-7.5): every run through this cycle is recorded. A
+    // history-write failure never fails the sync itself.
+    let run_id = match db.start_plugin_run(plugin_id, trigger).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(plugin = %plugin_id, "Failed to record plugin run start: {e}");
+            None
+        }
+    };
+    let outcome = run_incremental_sync_cycle_inner(
+        db,
+        plugin_id,
+        files,
+        config,
+        batch_callback,
+        limits,
+        store,
+    )
+    .await;
+    match outcome {
+        Ok((rows, emitted, logs)) => {
+            record_run_finish(db, run_id, plugin_id, "completed", emitted, None, &logs).await;
+            Ok(rows)
+        }
+        Err((e, logs)) => {
+            record_run_finish(db, run_id, plugin_id, "failed", 0, Some(e.as_str()), &logs).await;
+            Err(e)
+        }
+    }
+}
+
+/// Close a run-history row opened by [`run_incremental_sync_cycle`]; a
+/// history-write failure is logged, never propagated.
+async fn record_run_finish(
+    db: &Db,
+    run_id: Option<i64>,
+    plugin_id: &str,
+    status: &str,
+    emitted: i64,
+    error: Option<&str>,
+    logs: &[String],
+) {
+    if let Some(run_id) = run_id {
+        if let Err(e) = db
+            .finish_plugin_run(run_id, plugin_id, status, emitted, error, logs)
+            .await
+        {
+            tracing::warn!(plugin = %plugin_id, "Failed to record plugin run end: {e}");
+        }
+    }
+}
+
+/// The sync cycle itself, returning `(merged rows, listings emitted, log
+/// lines)` on success and `(error, log lines)` on failure so the caller can
+/// record the run either way.
+#[allow(clippy::type_complexity)]
+async fn run_incremental_sync_cycle_inner(
+    db: &Db,
+    plugin_id: &str,
+    files: HashMap<String, String>,
+    config: HashMap<String, String>,
+    batch_callback: Option<BatchCallback>,
+    limits: PluginLimits,
+    store: Arc<dyn PluginStore>,
+) -> Result<(Vec<VendorListingCache>, i64, Vec<String>), (String, Vec<String>)> {
     let (since, cursor) = db
         .get_vendor_sync_state(plugin_id)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| (e.to_string(), Vec::new()))?
         .map(|(s, c)| (Some(s), c))
         .unwrap_or((None, None));
     let args = FetchListingsArgs { since, cursor };
 
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let result = execute_plugin_in_thread_incremental(
+    let execution = execute_plugin_in_thread_incremental(
         files,
         config,
         batch_callback,
@@ -603,26 +714,31 @@ async fn run_incremental_sync_cycle(
         store,
         &args,
     )
-    .await?;
+    .await
+    .map_err(|e| (e, Vec::new()))?;
+    let logs = execution.logs;
+    let result = execution.result.map_err(|e| (e, logs.clone()))?;
 
-    let (rows, new_cursor) = match result {
+    let (rows, new_cursor, emitted) = match result {
         FetchListingsResult::Full(listings) => {
+            let emitted = listings.len() as i64;
             let rows = cache_rows_or_skip(plugin_id, &listings, &now);
             db.save_vendor_listings_cache(plugin_id, &rows)
                 .await
-                .map_err(|e| e.to_string())?;
-            (rows, None)
+                .map_err(|e| (e.to_string(), logs.clone()))?;
+            (rows, None, emitted)
         }
         FetchListingsResult::Delta(delta) => {
+            let emitted = delta.changes.len() as i64;
             let changed = cache_rows_or_skip(plugin_id, &delta.changes, &now);
             db.merge_vendor_listings_cache(plugin_id, &changed, &delta.deleted)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| (e.to_string(), logs.clone()))?;
             let rows = db
                 .get_vendor_listings_cache(plugin_id)
                 .await
-                .map_err(|e| e.to_string())?;
-            (rows, delta.cursor)
+                .map_err(|e| (e.to_string(), logs.clone()))?;
+            (rows, delta.cursor, emitted)
         }
     };
 
@@ -635,7 +751,7 @@ async fn run_incremental_sync_cycle(
         tracing::warn!(plugin = %plugin_id, "Failed to save incremental sync state: {e}");
     }
 
-    Ok(rows)
+    Ok((rows, emitted, logs))
 }
 
 /// Load a plugin's effective config for a run: non-secret values from the
@@ -651,7 +767,7 @@ async fn plugin_config_for_run(db: &Db, plugin_id: &str) -> HashMap<String, Stri
 }
 
 fn build_plugin_info(p: VendorPluginRow, installed: bool, enabled: bool) -> VendorPluginInfo {
-    build_plugin_info_with_timeout(p, installed, enabled, None)
+    build_plugin_info_with_timeout(p, installed, enabled, None, None)
 }
 
 fn build_plugin_info_with_timeout(
@@ -659,6 +775,7 @@ fn build_plugin_info_with_timeout(
     installed: bool,
     enabled: bool,
     timeout_minutes: Option<i64>,
+    sync_interval_minutes: Option<i64>,
 ) -> VendorPluginInfo {
     let config_fields: Vec<serde_json::Value> = p
         .config_fields
@@ -699,6 +816,7 @@ fn build_plugin_info_with_timeout(
             .unwrap_or_else(default_timeout_minutes),
         timeout_is_default: timeout_minutes.is_none(),
         code_hash: p.code_hash,
+        sync_interval_minutes,
     }
 }
 
@@ -748,19 +866,29 @@ pub async fn list_registry_plugins(
         .map_err(|e| e.to_string())?;
     let installs = db.list_installed_plugins().await.unwrap_or_default();
 
-    let install_map: HashMap<String, (bool, bool, Option<i64>)> = installs
+    let install_map: HashMap<String, (bool, bool, Option<i64>, Option<i64>)> = installs
         .into_iter()
-        .map(|i| (i.plugin_id, (i.installed, i.enabled, i.timeout_minutes)))
+        .map(|i| {
+            (
+                i.plugin_id,
+                (
+                    i.installed,
+                    i.enabled,
+                    i.timeout_minutes,
+                    i.sync_interval_minutes,
+                ),
+            )
+        })
         .collect();
 
     let infos = plugins
         .into_iter()
         .map(|p| {
-            let (installed, enabled, timeout) = install_map
+            let (installed, enabled, timeout, interval) = install_map
                 .get(&p.id)
                 .copied()
-                .unwrap_or((false, false, None));
-            build_plugin_info_with_timeout(p, installed, enabled, timeout)
+                .unwrap_or((false, false, None, None));
+            build_plugin_info_with_timeout(p, installed, enabled, timeout, interval)
         })
         .collect();
 
@@ -1219,6 +1347,47 @@ pub async fn set_vendor_plugin_timeout(
         .map_err(|e| e.to_string())
 }
 
+/// The longest per-plugin sync interval a user may set, in minutes (28 days).
+const MAX_PLUGIN_SYNC_INTERVAL_MINUTES: u32 = 28 * 24 * 60;
+
+/// Set this machine's per-plugin auto-sync interval for an installed plugin
+/// (N-7.5); `None` restores "run on every global sync cycle". The interval
+/// gates only the auto-sync path — manual runs (Sync / Fetch) always run.
+#[tauri::command]
+pub async fn set_vendor_plugin_sync_interval(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    minutes: Option<u32>,
+) -> Result<(), String> {
+    if let Some(m) = minutes {
+        if !(1..=MAX_PLUGIN_SYNC_INTERVAL_MINUTES).contains(&m) {
+            return Err(format!(
+                "A plugin sync interval must be between 1 and {MAX_PLUGIN_SYNC_INTERVAL_MINUTES} minutes"
+            ));
+        }
+    }
+    let db = state.active_db().await?;
+    db.set_plugin_sync_interval(&plugin_id, minutes.map(i64::from))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A plugin's run history (N-7.5), newest first: start/end, listings
+/// emitted, the error on failure, and the plugin's own log lines.
+#[tauri::command]
+pub async fn get_plugin_run_history(
+    state: State<'_, AppState>,
+    plugin_id: String,
+    limit: Option<u32>,
+) -> Result<Vec<PluginRunInfo>, String> {
+    let db = state.active_db().await?;
+    let runs = db
+        .list_plugin_runs(&plugin_id, i64::from(limit.unwrap_or(20).clamp(1, 100)))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(runs.into_iter().map(PluginRunInfo::from).collect())
+}
+
 #[tauri::command]
 pub async fn uninstall_vendor_plugin(
     state: State<'_, AppState>,
@@ -1272,7 +1441,8 @@ pub async fn fetch_vendor_listings(
     // Runs the plugin with the host's incremental args and folds the result
     // into the cached catalog as a side effect (N-7.4).
     let cache_rows =
-        run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store).await?;
+        run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store, "fetch")
+            .await?;
     tracing::info!(plugin = %plugin_id, count = cache_rows.len(), "Fetched vendor listings");
 
     Ok(cache_rows.into_iter().map(cache_to_result).collect())
@@ -1380,6 +1550,7 @@ pub async fn sync_vendor_listings(
             Some(batch_callback),
             limits,
             store,
+            "manual",
         )
         .await;
 
@@ -1806,10 +1977,46 @@ pub async fn import_vendor_listings(
 
 // ── Automatic vendor sync (called by sync engine + plugin updates) ───
 
-use std::sync::atomic::{AtomicBool, Ordering};
+/// Guard against overlapping auto vendor syncs, scoped **per company**
+/// (N-7.5). The pre-N-7.5 process-wide `AUTO_VENDOR_SYNC_RUNNING` flag made
+/// one company's sync skip every other company's for its whole duration,
+/// logged only at debug. The guard is now keyed by the company database's
+/// path — each company has its own `Db` (and its own sync engine) — so a
+/// running sync blocks only another run for the *same* company.
+static AUTO_VENDOR_SYNC_RUNNING_FOR: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
 
-/// Guard to prevent overlapping auto vendor syncs.
-static AUTO_VENDOR_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+fn auto_sync_running_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    AUTO_VENDOR_SYNC_RUNNING_FOR.get_or_init(|| std::sync::Mutex::new(Default::default()))
+}
+
+/// RAII guard: dropping it releases the company's auto-sync slot, including
+/// on early return or panic.
+struct AutoSyncGuard {
+    key: String,
+}
+
+impl Drop for AutoSyncGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = auto_sync_running_set().lock() {
+            set.remove(&self.key);
+        }
+    }
+}
+
+/// Claim the auto-sync slot for one company (identified by its database
+/// path); `None` when that company already has a run in flight. Other
+/// companies' slots are independent.
+fn try_begin_auto_sync(company_key: &str) -> Option<AutoSyncGuard> {
+    let mut set = auto_sync_running_set().lock().ok()?;
+    if !set.insert(company_key.to_string()) {
+        return None;
+    }
+    Some(AutoSyncGuard {
+        key: company_key.to_string(),
+    })
+}
 
 /// Run a sync for a single vendor plugin: execute → cache → update product data → recalc.
 pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<tauri::AppHandle>) {
@@ -1865,7 +2072,9 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
 
     let limits = plugin_limits(&db, &plugin_id).await;
     let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
-    match run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store).await {
+    match run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store, "auto")
+        .await
+    {
         Ok(cache_rows) => {
             let count = cache_rows.len();
 
@@ -1923,26 +2132,19 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
     }
 }
 
-/// Run vendor sync for ALL installed+enabled plugins.
-/// Skips if another auto-sync is already running.
+/// Run vendor sync for ALL installed+enabled plugins in one company.
+/// Skips only if *this company's* auto-sync is already running (N-7.5):
+/// another company's run no longer blocks this one. Plugins with a
+/// per-plugin interval are run only when that interval has elapsed since
+/// their last recorded run; manual runs are never gated.
 pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
-    // Prevent overlapping runs — if already syncing, skip silently
-    if AUTO_VENDOR_SYNC_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        tracing::debug!("Auto vendor sync: skipping, already running");
+    let Some(_guard) = try_begin_auto_sync(db.path()) else {
+        tracing::debug!(
+            company_db = %db.path(),
+            "Auto vendor sync: skipping, already running for this company"
+        );
         return;
-    }
-
-    // Ensure flag is cleared on exit (even on early return / panic)
-    struct ResetOnDrop;
-    impl Drop for ResetOnDrop {
-        fn drop(&mut self) {
-            AUTO_VENDOR_SYNC_RUNNING.store(false, Ordering::SeqCst);
-        }
-    }
-    let _guard = ResetOnDrop;
+    };
 
     let installs = match db.list_installed_plugins().await {
         Ok(list) => list,
@@ -1976,7 +2178,25 @@ pub async fn run_vendor_sync_all(db: Arc<Db>, app: Option<tauri::AppHandle>) {
         "Auto vendor sync: refreshing all plugins"
     );
 
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for install in active {
+        // Per-plugin schedule (N-7.5): a plugin with its own interval runs
+        // at most once per interval, measured from its last recorded run.
+        if let Some(interval) = install.sync_interval_minutes {
+            let last = db
+                .last_plugin_run_started_at(&install.plugin_id)
+                .await
+                .ok()
+                .flatten();
+            if !nisaba_core::plugins::plugin_sync_due(Some(interval), last.as_deref(), &now) {
+                tracing::info!(
+                    plugin = %install.plugin_id,
+                    interval_minutes = interval,
+                    "Auto vendor sync: skipping plugin, its interval has not elapsed"
+                );
+                continue;
+            }
+        }
         run_vendor_sync_single(db.clone(), install.plugin_id, app.clone()).await;
     }
 }
@@ -1998,6 +2218,22 @@ mod tests {
     }
 
     const INDEX: &[u8] = b"export const metadata = { name: 'z', version: '1' };";
+
+    // ── N-7.5: per-company auto-sync guard ──
+
+    #[test]
+    fn auto_sync_guard_is_scoped_per_company() {
+        // One company's running sync blocks only that company, never others
+        // (the pre-N-7.5 process-wide flag skipped every company).
+        let a = try_begin_auto_sync("company-a.db").expect("first claim succeeds");
+        assert!(try_begin_auto_sync("company-a.db").is_none());
+        let b = try_begin_auto_sync("company-b.db").expect("another company is unaffected");
+        // Dropping releases exactly that company's slot.
+        drop(a);
+        let a2 = try_begin_auto_sync("company-a.db").expect("released on drop");
+        drop(a2);
+        drop(b);
+    }
 
     #[test]
     fn a_normal_plugin_zip_unpacks_with_its_root_folder_stripped() {

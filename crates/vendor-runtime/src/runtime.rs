@@ -14,8 +14,8 @@ use deno_error::JsErrorBox;
 use tracing::debug;
 
 use crate::ops::{
-    BatchCallback, BlockPrivateHosts, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult,
-    PluginStore, PluginStoreContext,
+    BatchCallback, BlockPrivateHosts, FetchPolicy, MaxResponseBytes, OutputBudget,
+    PluginLogCollector, PluginResult, PluginStore, PluginStoreContext,
 };
 use crate::types::{FetchListingsArgs, FetchListingsResult, PluginMetadata, VendorListing};
 
@@ -172,6 +172,7 @@ struct RunOptions<'a> {
     fetch_policy: FetchPolicy,
     allow_private_fetch: bool,
     store: Option<PluginStoreContext>,
+    log_collector: Option<PluginLogCollector>,
 }
 
 /// The vendor plugin runtime — wraps a deno_core JsRuntime.
@@ -348,22 +349,56 @@ impl VendorRuntime {
         limits: PluginLimits,
         args: &FetchListingsArgs,
     ) -> Result<FetchListingsResult> {
-        let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
-        let result = Self::execute_in_incremental(
-            &plugin_dir,
-            &index_path,
+        let (result, _logs) = Self::execute_plugin_from_files_with_store_incremental_logged(
+            files,
+            plugin_id,
+            store,
             config,
             batch_callback,
-            &limits,
-            Some(PluginStoreContext {
-                plugin_id: plugin_id.to_string(),
-                store,
-            }),
+            limits,
             args,
         )
         .await;
-        let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
         result
+    }
+
+    /// Like [`execute_plugin_from_files_with_store_incremental`](Self::execute_plugin_from_files_with_store_incremental),
+    /// but also returns the plugin's own log lines for the run (N-7.5 run
+    /// history). The lines are returned even when the run fails, so a failed
+    /// run's history shows what the plugin said before it errored.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_plugin_from_files_with_store_incremental_logged(
+        files: &HashMap<String, String>,
+        plugin_id: &str,
+        store: Arc<dyn PluginStore>,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: PluginLimits,
+        args: &FetchListingsArgs,
+    ) -> (Result<FetchListingsResult>, Vec<String>) {
+        let collector = PluginLogCollector::new();
+        let result = async {
+            let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
+            let result = Self::execute_in_incremental(
+                &plugin_dir,
+                &index_path,
+                config,
+                batch_callback,
+                &limits,
+                Some(PluginStoreContext {
+                    plugin_id: plugin_id.to_string(),
+                    store,
+                }),
+                args,
+                Some(collector.clone()),
+            )
+            .await;
+            let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
+            result
+        }
+        .await;
+        let logs = collector.snapshot();
+        (result, logs)
     }
 
     async fn read_metadata_in(
@@ -392,6 +427,7 @@ impl VendorRuntime {
                 fetch_policy: FetchPolicy::Deny,
                 allow_private_fetch: false,
                 store: None,
+                log_collector: None,
             },
         )
         .await?;
@@ -425,6 +461,7 @@ impl VendorRuntime {
             limits,
             store,
             fetch_args,
+            None,
         )
         .await?;
 
@@ -434,6 +471,7 @@ impl VendorRuntime {
         Ok(listings)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_in_incremental(
         root: &Path,
         index_path: &Path,
@@ -442,6 +480,7 @@ impl VendorRuntime {
         limits: &PluginLimits,
         store: Option<PluginStoreContext>,
         fetch_args: &FetchListingsArgs,
+        log_collector: Option<PluginLogCollector>,
     ) -> Result<FetchListingsResult> {
         let json = Self::run_fetch_listings(
             root,
@@ -451,6 +490,7 @@ impl VendorRuntime {
             limits,
             store,
             fetch_args,
+            log_collector,
         )
         .await?;
 
@@ -465,6 +505,7 @@ impl VendorRuntime {
     /// passed — `{ since: null, cursor: null }` when the host has no incremental
     /// state — so plugins can rely on the property existing; plugins written
     /// before N-7.4 simply ignore the extra argument.
+    #[allow(clippy::too_many_arguments)]
     async fn run_fetch_listings(
         root: &Path,
         index_path: &Path,
@@ -473,6 +514,7 @@ impl VendorRuntime {
         limits: &PluginLimits,
         store: Option<PluginStoreContext>,
         fetch_args: &FetchListingsArgs,
+        log_collector: Option<PluginLogCollector>,
     ) -> Result<String> {
         // The fetch allowlist comes from the plugin's metadata, read in an isolate of its
         // own and applied from Rust before any of this run's plugin code executes — so
@@ -512,6 +554,7 @@ impl VendorRuntime {
                 fetch_policy,
                 allow_private_fetch: limits.allow_private_fetch,
                 store,
+                log_collector,
             },
         )
         .await?;
@@ -586,6 +629,11 @@ impl VendorRuntime {
             // metadata reads get no store, so `Nisaba.store` throws there.
             if let Some(ctx) = options.store {
                 op_state.put(ctx);
+            }
+            // Run-history log capture (N-7.5): only installed when the host
+            // asked for this run's lines back.
+            if let Some(collector) = options.log_collector {
+                op_state.put(collector);
             }
         }
 

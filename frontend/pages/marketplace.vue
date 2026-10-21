@@ -301,7 +301,9 @@ function categoryColor(cat: string): string {
               </div>
               <p class="text-xs text-muted/40 line-clamp-2 mb-2">{{ plugin.description }}</p>
               <PluginNetworkAccess :plugin="plugin" class="mb-1" />
-              <PluginTimeLimit :plugin="plugin" class="mb-4" />
+              <PluginTimeLimit :plugin="plugin" class="mb-1" />
+              <PluginSyncSchedule :plugin="plugin" class="mb-1" />
+              <PluginRunHistory :plugin="plugin" class="mb-4" />
 
               <div class="mt-auto flex items-center gap-3">
                 <Button
