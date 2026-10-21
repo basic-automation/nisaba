@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -337,4 +339,174 @@ pub fn op_nisaba_emit_batch(
         (cb.0)(json);
     }
     Ok(())
+}
+
+// ── Per-plugin key–value store (`Nisaba.store`) ──────────────────────────
+
+/// Total bytes (key + value, UTF-8) one plugin may keep in `Nisaba.store`.
+/// Big enough for cursors, ETags and last-seen timestamps; small enough that
+/// a runaway plugin cannot grow the company database without bound.
+/// Documented in `plugins/template/index.ts` and `SECURITY.md`.
+pub const PLUGIN_STORE_CAP_BYTES: u64 = 1024 * 1024;
+
+/// A store key may be at most this many bytes (UTF-8).
+pub const PLUGIN_STORE_MAX_KEY_BYTES: usize = 256;
+
+/// A backend failure from the plugin store, surfaced to the plugin as a
+/// rejected promise. The message never includes key material — only what the
+/// plugin already passed in.
+#[derive(Debug)]
+pub struct StoreError(pub String);
+
+/// Host-side storage behind `Nisaba.store.get/set/delete`.
+///
+/// Scoped by `plugin_id`: a backend must never serve one plugin's keys to
+/// another. The company database gives the company half of the scoping for
+/// free (every company has its own database file); the `plugin_id` argument is
+/// the other half. The size cap is enforced by the ops, not the backend, so
+/// every backend behaves identically.
+pub trait PluginStore: Send + Sync + 'static {
+    fn get(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, StoreError>> + '_>>;
+    fn set(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + '_>>;
+    /// Delete a key. Returns whether the key existed.
+    fn delete(
+        &self,
+        plugin_id: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, StoreError>> + '_>>;
+    /// Total bytes (key + value) currently stored for this plugin, which the
+    /// `set` op charges the [`PLUGIN_STORE_CAP_BYTES`] cap against.
+    fn total_bytes(
+        &self,
+        plugin_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, StoreError>> + '_>>;
+}
+
+/// The store backend plus the plugin identity it is scoped to, installed in
+/// the `OpState` for the `fetchListings` run only. Metadata reads get no
+/// store: `Nisaba.store` throws there, because the plugin has no identity yet
+/// and a metadata read must not have side effects.
+pub struct PluginStoreContext {
+    pub plugin_id: String,
+    pub store: Arc<dyn PluginStore>,
+}
+
+fn store_context(
+    state: &OpState,
+) -> Result<(String, Arc<dyn PluginStore>), deno_error::JsErrorBox> {
+    match state.try_borrow::<PluginStoreContext>() {
+        Some(ctx) => Ok((ctx.plugin_id.clone(), ctx.store.clone())),
+        None => Err(deno_error::JsErrorBox::generic(
+            "Nisaba.store is not available in this context",
+        )),
+    }
+}
+
+fn validate_store_key(key: &str) -> Result<(), deno_error::JsErrorBox> {
+    if key.is_empty() {
+        return Err(deno_error::JsErrorBox::generic(
+            "Nisaba.store: key must be a non-empty string",
+        ));
+    }
+    if key.len() > PLUGIN_STORE_MAX_KEY_BYTES {
+        return Err(deno_error::JsErrorBox::generic(format!(
+            "Nisaba.store: key is {} bytes, the limit is {PLUGIN_STORE_MAX_KEY_BYTES}",
+            key.len()
+        )));
+    }
+    Ok(())
+}
+
+fn store_failed(context: &str, e: StoreError) -> deno_error::JsErrorBox {
+    deno_error::JsErrorBox::generic(format!("Nisaba.store.{context} failed: {}", e.0))
+}
+
+/// `Nisaba.store.get(key)` — resolves to the stored string, or `null` when
+/// the key was never set. Never sees another plugin's keys: the backend is
+/// always queried with this run's `plugin_id`.
+#[op2]
+#[string]
+pub async fn op_nisaba_store_get(
+    state: Rc<RefCell<OpState>>,
+    #[string] key: String,
+) -> Result<String, deno_error::JsErrorBox> {
+    validate_store_key(&key)?;
+    let (plugin_id, store) = {
+        let state = state.borrow();
+        store_context(&state)?
+    };
+    let value = store
+        .get(&plugin_id, &key)
+        .await
+        .map_err(|e| store_failed("get", e))?;
+    Ok(match value {
+        Some(v) => serde_json::json!({"found": true, "value": v}).to_string(),
+        None => r#"{"found":false}"#.to_string(),
+    })
+}
+
+/// `Nisaba.store.set(key, value)` — persists a string between runs. The write
+/// is charged against the per-plugin [`PLUGIN_STORE_CAP_BYTES`] cap first, so
+/// a plugin that would exceed it gets a clear rejection instead of silently
+/// growing the database.
+#[op2]
+pub async fn op_nisaba_store_set(
+    state: Rc<RefCell<OpState>>,
+    #[string] key: String,
+    #[string] value: String,
+) -> Result<(), deno_error::JsErrorBox> {
+    validate_store_key(&key)?;
+    let (plugin_id, store) = {
+        let state = state.borrow();
+        store_context(&state)?
+    };
+    let total = store
+        .total_bytes(&plugin_id)
+        .await
+        .map_err(|e| store_failed("set", e))?;
+    let existing = store
+        .get(&plugin_id, &key)
+        .await
+        .map_err(|e| store_failed("set", e))?;
+    let existing_bytes: u64 = existing
+        .map(|v| key.len() as u64 + v.len() as u64)
+        .unwrap_or(0);
+    let new_total = total.saturating_sub(existing_bytes) + key.len() as u64 + value.len() as u64;
+    if new_total > PLUGIN_STORE_CAP_BYTES {
+        return Err(deno_error::JsErrorBox::generic(format!(
+            "Nisaba.store.set: this write would exceed the per-plugin store limit of {} bytes",
+            PLUGIN_STORE_CAP_BYTES
+        )));
+    }
+    store
+        .set(&plugin_id, &key, &value)
+        .await
+        .map_err(|e| store_failed("set", e))?;
+    Ok(())
+}
+
+/// `Nisaba.store.delete(key)` — resolves to whether the key existed.
+#[op2]
+pub async fn op_nisaba_store_delete(
+    state: Rc<RefCell<OpState>>,
+    #[string] key: String,
+) -> Result<bool, deno_error::JsErrorBox> {
+    validate_store_key(&key)?;
+    let (plugin_id, store) = {
+        let state = state.borrow();
+        store_context(&state)?
+    };
+    store
+        .delete(&plugin_id, &key)
+        .await
+        .map_err(|e| store_failed("delete", e))
 }

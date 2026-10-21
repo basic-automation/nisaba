@@ -15,6 +15,7 @@ use tracing::debug;
 
 use crate::ops::{
     BatchCallback, BlockPrivateHosts, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult,
+    PluginStore, PluginStoreContext,
 };
 use crate::types::{PluginMetadata, VendorListing};
 
@@ -163,6 +164,16 @@ const STOPPED_NONE: u8 = 0;
 const STOPPED_TIMEOUT: u8 = 1;
 const STOPPED_HEAP: u8 = 2;
 
+/// The per-run knobs `run_wrapper` needs beyond the code it evaluates,
+/// bundled so the function stays under clippy's argument limit.
+struct RunOptions<'a> {
+    batch_callback: Option<BatchCallback>,
+    limits: &'a PluginLimits,
+    fetch_policy: FetchPolicy,
+    allow_private_fetch: bool,
+    store: Option<PluginStoreContext>,
+}
+
 /// The vendor plugin runtime — wraps a deno_core JsRuntime.
 ///
 /// Every entry point writes the plugin into a fresh directory of its own under the
@@ -278,8 +289,45 @@ impl VendorRuntime {
         limits: PluginLimits,
     ) -> Result<Vec<VendorListing>> {
         let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
-        let result =
-            Self::execute_in(&plugin_dir, &index_path, config, batch_callback, &limits).await;
+        let result = Self::execute_in(
+            &plugin_dir,
+            &index_path,
+            config,
+            batch_callback,
+            &limits,
+            None,
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
+        result
+    }
+
+    /// Execute a multi-file plugin's fetchListings with a per-plugin key–value
+    /// store behind `Nisaba.store`. `plugin_id` scopes every key the plugin
+    /// reads and writes; `store` is the host-side backend (the company
+    /// database in the app, an in-memory map in tests). Values persist between
+    /// runs and are never shared between plugins.
+    pub async fn execute_plugin_from_files_with_store(
+        files: &HashMap<String, String>,
+        plugin_id: &str,
+        store: Arc<dyn PluginStore>,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: PluginLimits,
+    ) -> Result<Vec<VendorListing>> {
+        let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
+        let result = Self::execute_in(
+            &plugin_dir,
+            &index_path,
+            config,
+            batch_callback,
+            &limits,
+            Some(PluginStoreContext {
+                plugin_id: plugin_id.to_string(),
+                store,
+            }),
+        )
+        .await;
         let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
         result
     }
@@ -304,10 +352,13 @@ impl VendorRuntime {
             root,
             wrapper_path,
             &wrapper_code,
-            None,
-            &PluginLimits::metadata(),
-            FetchPolicy::Deny,
-            false,
+            RunOptions {
+                batch_callback: None,
+                limits: &PluginLimits::metadata(),
+                fetch_policy: FetchPolicy::Deny,
+                allow_private_fetch: false,
+                store: None,
+            },
         )
         .await?;
 
@@ -329,6 +380,7 @@ impl VendorRuntime {
         config: HashMap<String, String>,
         batch_callback: Option<BatchCallback>,
         limits: &PluginLimits,
+        store: Option<PluginStoreContext>,
     ) -> Result<Vec<VendorListing>> {
         // The fetch allowlist comes from the plugin's metadata, read in an isolate of its
         // own and applied from Rust before any of this run's plugin code executes — so
@@ -360,10 +412,13 @@ impl VendorRuntime {
             root,
             &wrapper_path,
             &wrapper_code,
-            batch_callback,
-            limits,
-            fetch_policy,
-            limits.allow_private_fetch,
+            RunOptions {
+                batch_callback,
+                limits,
+                fetch_policy,
+                allow_private_fetch: limits.allow_private_fetch,
+                store,
+            },
         )
         .await?;
 
@@ -387,16 +442,14 @@ impl VendorRuntime {
         root: &Path,
         wrapper_path: &Path,
         wrapper_code: &str,
-        batch_callback: Option<BatchCallback>,
-        limits: &PluginLimits,
-        fetch_policy: FetchPolicy,
-        allow_private_fetch: bool,
+        options: RunOptions<'_>,
     ) -> Result<JsRuntime> {
         tokio::fs::write(wrapper_path, wrapper_code).await?;
 
         let wrapper_url = ModuleSpecifier::from_file_path(wrapper_path)
             .map_err(|_| anyhow!("Invalid wrapper path"))?;
 
+        let limits = options.limits;
         let mut runtime = Self::create_runtime(root.to_path_buf(), limits);
         let stopped = Arc::new(AtomicU8::new(STOPPED_NONE));
 
@@ -431,12 +484,17 @@ impl VendorRuntime {
                 remaining: limits.max_output_bytes,
             });
             op_state.put(MaxResponseBytes(limits.max_response_bytes));
-            op_state.put(fetch_policy);
+            op_state.put(options.fetch_policy);
             // The SSRF guard is on unless the caller explicitly opted out for
             // loopback test fixtures (`PluginLimits::allow_private_fetch`).
-            op_state.put(BlockPrivateHosts(!allow_private_fetch));
-            if let Some(cb) = batch_callback {
+            op_state.put(BlockPrivateHosts(!options.allow_private_fetch));
+            if let Some(cb) = options.batch_callback {
                 op_state.put(cb);
+            }
+            // The per-plugin store is only installed for the fetchListings run:
+            // metadata reads get no store, so `Nisaba.store` throws there.
+            if let Some(ctx) = options.store {
+                op_state.put(ctx);
             }
         }
 
