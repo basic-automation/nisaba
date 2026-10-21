@@ -125,7 +125,7 @@ fn a_listing_carries_the_summary_title_price_and_main_image() {
     let pants = to_listing(&item("PANTS-RIPSTOP-M"));
     assert_eq!(pants.title, "Ripstop Field Pants — Medium");
     assert_eq!(pants.sku.as_deref(), Some("PANTS-RIPSTOP-M"));
-    assert_eq!(pants.price, Some(48.00));
+    assert_eq!(pants.price, Some(rust_decimal::Decimal::new(4800, 2)));
     assert_eq!(
         pants.image_url.as_deref(),
         Some("https://images.example.test/pants-main.jpg")
@@ -141,23 +141,26 @@ fn price_comes_from_the_configured_marketplace_and_keeps_its_currency() {
 
     let ca = to_full_listing_for_marketplaces(&cap, &[CA_MARKETPLACE.to_string()]);
     let ca_price = ca.price.expect("a CA price");
-    assert_eq!(ca_price.amount, 32.50);
+    assert_eq!(ca_price.amount, rust_decimal::Decimal::new(3250, 2));
     assert_eq!(ca_price.currency, "CAD");
     assert_eq!(
         to_listing_for_marketplaces(&cap, &[CA_MARKETPLACE.to_string()]).price,
-        Some(32.50)
+        Some(rust_decimal::Decimal::new(3250, 2))
     );
 
     let us = to_full_listing_for_marketplaces(&cap, &[US_MARKETPLACE.to_string()]);
     let us_price = us.price.expect("a US price");
-    assert_eq!(us_price.amount, 24.00);
+    assert_eq!(us_price.amount, rust_decimal::Decimal::new(2400, 2));
     assert_eq!(us_price.currency, "USD");
 
     // Order of the returned offers must not change the selection.
     let mut reversed = cap.clone();
     reversed.offers.reverse();
     let ca_reversed = to_full_listing_for_marketplaces(&reversed, &[CA_MARKETPLACE.to_string()]);
-    assert_eq!(ca_reversed.price.expect("a CA price").amount, 32.50);
+    assert_eq!(
+        ca_reversed.price.expect("a CA price").amount,
+        rust_decimal::Decimal::new(3250, 2)
+    );
 
     // Configured order wins when several configured marketplaces have offers.
     let both = to_full_listing_for_marketplaces(
