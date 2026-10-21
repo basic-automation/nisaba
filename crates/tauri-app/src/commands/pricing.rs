@@ -1,4 +1,6 @@
 use nisaba_core::types::{ListingPrice, Platform, PricingSnapshot};
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use tauri::State;
 
 use crate::state::AppState;
@@ -46,6 +48,10 @@ pub async fn update_price(
             .map_err(|e| format!("{plat} auth failed: {e}"))?;
     }
 
+    // The frontend speaks JSON numbers (f64); convert via the shortest
+    // round-trip representation so 19.99 stays 19.99.
+    let amount =
+        Decimal::from_f64(amount).ok_or_else(|| format!("Invalid price amount: {amount}"))?;
     let price = ListingPrice { amount, currency };
     adapter
         .set_price(&platform_item_id, price)
