@@ -1,6 +1,7 @@
 use nisaba_core::error::SyncError;
 use nisaba_core::types::Platform;
 use reqwest::Client;
+use rust_decimal::Decimal;
 use serde_json::json;
 use tracing::{debug, warn};
 
@@ -49,7 +50,7 @@ pub fn build_quantity_patch_request(marketplace_id: &str, qty: i64) -> AmazonPat
 /// single-wrapping rule as [`build_quantity_patch_request`].
 pub fn build_price_patch_request(
     marketplace_id: &str,
-    amount: f64,
+    amount: Decimal,
     currency: &str,
 ) -> AmazonPatchRequest {
     AmazonPatchRequest {
@@ -412,7 +413,7 @@ impl AmazonClient {
         seller_id: &str,
         sku: &str,
         marketplace_ids: &[String],
-        amount: f64,
+        amount: Decimal,
         currency: &str,
     ) -> Result<(), SyncError> {
         for marketplace_id in marketplace_ids {
@@ -469,7 +470,7 @@ impl AmazonClient {
             )?;
         }
 
-        debug!(sku = sku, amount = amount, "Updated Amazon price");
+        debug!(sku = sku, amount = %amount, "Updated Amazon price");
         Ok(())
     }
 
@@ -661,7 +662,7 @@ mod tests {
 
     #[test]
     fn price_patch_body_serialises_as_single_wrapped_value_array() {
-        let body = build_price_patch_request("ATVPDKIKX0DER", 19.99, "USD");
+        let body = build_price_patch_request("ATVPDKIKX0DER", Decimal::new(1999, 2), "USD");
         let value = serde_json::to_value(&body).unwrap();
         let patch_value = &value["patches"][0]["value"];
         assert!(patch_value.is_array());
@@ -676,6 +677,24 @@ mod tests {
             json!("19.99")
         );
         assert!(!serde_json::to_string(&body).unwrap().contains("[[{"));
+    }
+
+    #[test]
+    fn price_patch_body_serialises_a_computed_price_exactly() {
+        // N-6.1: 0.1 + 0.2 in f64 is 0.30000000000000004; the Amazon patch
+        // body must carry "0.30".
+        use std::str::FromStr;
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        let body = build_price_patch_request("ATVPDKIKX0DER", amount, "USD");
+        let text = serde_json::to_string(&body).unwrap();
+        assert!(
+            text.contains(r#""value_with_tax":"0.30""#),
+            "price must serialize exactly, body: {text}"
+        );
+        assert!(
+            !text.contains("0.30000000000000004"),
+            "f64 artifact leaked into the Amazon price body: {text}"
+        );
     }
 
     fn assert_single_wrapped(raw_request: &str) {
@@ -751,7 +770,7 @@ mod tests {
                 "seller-1",
                 "SKU-1",
                 &["ATVPDKIKX0DER".to_string()],
-                19.99,
+                Decimal::new(1999, 2),
                 "USD",
             )
             .await
@@ -772,7 +791,7 @@ mod tests {
                 "seller-1",
                 "SKU-1",
                 &["ATVPDKIKX0DER".to_string()],
-                19.99,
+                Decimal::new(1999, 2),
                 "USD",
             )
             .await
@@ -789,7 +808,7 @@ mod tests {
                 "seller-1",
                 "SKU-1",
                 &["ATVPDKIKX0DER".to_string()],
-                19.99,
+                Decimal::new(1999, 2),
                 "USD",
             )
             .await
