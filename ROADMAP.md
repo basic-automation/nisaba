@@ -84,7 +84,7 @@ are referenced rather than repeated.
 
 - [x] Transactional migrations, plus upgrade tests from a populated database at *every
       released version* (0.1.0 onward), run in CI (Phase 1).
-- [ ] Automatic database backup before every migration and on a schedule (keep the last N),
+- [x] Automatic database backup before every migration and on a schedule (keep the last N),
       with a *Restore from backup* action in the UI. Backups land next to the database and
       never leave the machine.
 - [x] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1) — fixed in PR #5.
