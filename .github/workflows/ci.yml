@@ -146,9 +146,15 @@ jobs:
 
       - run: npm ci
 
+      # vue-tsc is pinned in frontend/package.json (devDependencies) and
+      # installed by `npm ci` above, so this uses the pinned version —
+      # no `npx` fetch of an unpinned, incompatible vue-tsc. A typecheck
+      # failure fails the job (no continue-on-error).
       - name: Typecheck
-        run: npx nuxt typecheck
-        continue-on-error: true
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run generate

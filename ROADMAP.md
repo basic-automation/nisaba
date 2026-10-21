@@ -250,7 +250,7 @@ are referenced rather than repeated.
 - [ ] `cleanup.ps1` and `parse_har.py` were purged from history but still sit untracked in
       at least one checkout and are not gitignored, so a `git add -A` re-adds them. Ignore
       them, or delete the local copies.
-- [ ] **The frontend typecheck has never run.** `ci.yml` runs `npx nuxt typecheck` with
+- [x] **The frontend typecheck has never run.** `ci.yml` runs `npx nuxt typecheck` with
       `continue-on-error: true`, and `vue-tsc` is not a devDependency. On master
       (run 36194520101) `npx` fetched an incompatible `vue-tsc`, which crashed with
       `ERR_PACKAGE_PATH_NOT_EXPORTED './lib/tsc'`. Pin `vue-tsc` as a devDependency, fix the

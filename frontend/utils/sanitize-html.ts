@@ -1,4 +1,4 @@
-import DOMPurify from 'dompurify'
+import DOMPurify, { type Config as DOMPurifyConfig } from 'dompurify'
 
 /**
  * Sanitise untrusted HTML (marketplace / vendor-plugin listing descriptions)
@@ -13,7 +13,7 @@ import DOMPurify from 'dompurify'
  * string so untrusted markup is never rendered outside the hardened
  * client-side path.
  */
-const SANITIZE_CONFIG: DOMPurify.Config = {
+const SANITIZE_CONFIG = {
   // Tight allowlist: formatting, links, lists, tables, images. No
   // executable or embedding elements.
   ALLOWED_TAGS: [
@@ -36,9 +36,12 @@ const SANITIZE_CONFIG: DOMPurify.Config = {
   // rather than auditing CSS values.
   FORBID_ATTR: ['style'],
   ALLOW_DATA_ATTR: false,
+  // Always return a plain string, never a TrustedHTML object: callers bind
+  // the result as a string and the tests compare it as one.
+  RETURN_TRUSTED_TYPE: false,
   // Keep DOMPurify's default URI allowlist (blocks javascript:, data:text/html,
   // etc.).
-}
+} satisfies DOMPurifyConfig
 
 function hasDom(): boolean {
   return typeof window !== 'undefined' && typeof window.document !== 'undefined'
