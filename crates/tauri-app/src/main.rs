@@ -15,7 +15,7 @@ use nisaba_core::config::{
     AmazonConfig, AppConfig, EbayConfig, SquarespaceConfig, XmrBazaarConfig,
 };
 use nisaba_core::crypto;
-use nisaba_core::db::Db;
+use nisaba_core::db::{BackupConfig, Db};
 use nisaba_core::sync_engine::SyncEngine;
 use nisaba_p2p::types::{P2PCommand, P2PEvent};
 use nisaba_p2p::P2PManager;
@@ -29,6 +29,52 @@ use tracing_subscriber::Layer as _;
 use crate::commands::config::build_adapters;
 use crate::log_capture::{CaptureLayer, LogBuffer};
 use crate::state::{AppState, CompanyContext};
+
+/// N-8.1: periodic database backups of the app database.
+///
+/// Wakes every minute, re-reads the live `[database]` config (so schedule
+/// changes apply without a restart), and writes a `scheduled` backup when
+/// the newest backup is older than the configured interval. Failures are
+/// logged, never fatal: the next tick retries.
+async fn backup_scheduler(handle: tauri::AppHandle, db: Arc<Db>) {
+    use std::time::Duration;
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let cfg = {
+            let state: tauri::State<'_, AppState> = handle.state();
+            let config = state.config.read().await;
+            BackupConfig::from_database_config(&config.database)
+        };
+        if !cfg.enabled || cfg.interval_secs == 0 {
+            continue;
+        }
+        let due = match db.list_backups(&cfg).await {
+            Ok(list) => match list.first() {
+                None => true,
+                Some(newest) => chrono::DateTime::parse_from_rfc3339(&newest.created_at)
+                    .map(|t| {
+                        chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc))
+                            >= chrono::Duration::seconds(cfg.interval_secs as i64)
+                    })
+                    .unwrap_or(true),
+            },
+            Err(e) => {
+                warn!(error = %e, "Scheduled backup: could not list backups; will retry");
+                false
+            }
+        };
+        if !due {
+            continue;
+        }
+        match db
+            .backup_now(&cfg, nisaba_core::db::BackupReason::Scheduled)
+            .await
+        {
+            Ok(path) => info!(backup = %path.display(), "Wrote scheduled database backup"),
+            Err(e) => warn!(error = %e, "Scheduled database backup failed; will retry"),
+        }
+    }
+}
 
 fn main() {
     // Install rustls crypto provider before any TLS usage.
@@ -85,7 +131,10 @@ fn main() {
                             .await
                             .expect("Failed to open database"),
                     );
-                    app_db.migrate().await.expect("Failed to run migrations");
+                    app_db
+                        .migrate_with_backup(&BackupConfig::from_database_config(&config.database))
+                        .await
+                        .expect("Failed to run migrations");
                     info!("App database ready at {}", config.database.path);
 
                     let active_id = app_db
@@ -108,6 +157,20 @@ fn main() {
             };
             handle.manage(state);
             info!("App state managed — frontend commands available");
+
+            // ── N-8.1: scheduled database backups ─────────────────────
+            // Wakes every minute and writes a `scheduled` backup of the app
+            // database when the newest backup is older than the configured
+            // interval. The live config is re-read each tick, so schedule
+            // changes apply without a restart. A zero interval (or disabled
+            // backups) idles the task; pre-migration backups are separate.
+            {
+                let sched_handle = handle.clone();
+                let sched_db = app_db.clone();
+                tauri::async_runtime::spawn(async move {
+                    backup_scheduler(sched_handle, sched_db).await;
+                });
+            }
 
             // ── Phase 2: Company initialization (slow, in background) ──
             tauri::async_runtime::spawn(async move {
@@ -262,6 +325,10 @@ fn main() {
             // Export / Import
             commands::export_import::export_data,
             commands::export_import::import_data,
+            // Backups (N-8.1)
+            commands::backup::list_backups,
+            commands::backup::backup_now,
+            commands::backup::restore_backup,
             // Company / P2P
             commands::company::create_company,
             commands::company::join_company,
