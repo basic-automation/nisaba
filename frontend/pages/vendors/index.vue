@@ -155,7 +155,7 @@ const totalVariantCount = computed(() => filteredListings.value.length)
 
 // Cache vendor listing images to local disk whenever listings change
 watch(filteredListings, (items) => {
-  const urls = items.map(l => l.image_url).filter(Boolean)
+  const urls = items.flatMap(l => l.images?.length ? l.images : (l.image_url ? [l.image_url] : []))
   if (urls.length > 0) ensureCached(urls)
 })
 
@@ -416,11 +416,18 @@ async function handleImport() {
         group_key: l.group_key ?? null,
         title: l.title,
         sku: l.sku || l.vendor_item_id,
-        quantity: l.quantity ?? 0,
+        // N-7.2: unknown vendor stock (null) must reach the backend as null —
+        // never coerce it to 0 (out of stock) here.
+        quantity: l.quantity ?? null,
         price: l.price ?? null,
         currency: l.currency ?? null,
-        image_url: l.image_url,
+        images: l.images ?? (l.image_url ? [l.image_url] : []),
         url: l.url ?? null,
+        upc: l.upc ?? null,
+        brand: l.brand ?? null,
+        mpn: l.mpn ?? null,
+        weight: l.weight ?? null,
+        dimensions: l.dimensions ?? null,
         extras: l.extras || {},
         variant_attributes: l.variant_attributes || {},
       }))
