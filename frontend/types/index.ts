@@ -35,6 +35,10 @@ export interface PlatformMapping {
   platform_sku: string | null
   is_active: boolean
   variant_id: string | null
+  // Soft-delete tombstone (ISO timestamp) or null for live mappings.
+  // Only present on mappings that carry one (e.g. export payloads);
+  // live-mapping responses omit deleted rows entirely.
+  deleted_at?: string | null
 }
 
 export interface PlatformListing {

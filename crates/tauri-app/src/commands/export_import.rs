@@ -11,25 +11,10 @@ pub async fn export_data(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let db = state.active_db().await?;
-    let products = db.list_products().await.map_err(|e| e.to_string())?;
-    let platform_mappings = db.list_all_mappings().await.map_err(|e| e.to_string())?;
-    let platform_snapshots = db.list_all_snapshots().await.map_err(|e| e.to_string())?;
-    let xmr_processed_orders = db
-        .list_xmr_processed_orders()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let product_variants = db.list_all_variants().await.map_err(|e| e.to_string())?;
-
-    let export = ExportData {
-        version: 2,
-        exported_at: chrono::Utc::now().to_rfc3339(),
-        products,
-        product_variants,
-        platform_mappings,
-        platform_snapshots,
-        xmr_processed_orders,
-    };
+    // Built in core (Db::export_data) so the export the UI writes is the
+    // exact one the round-trip test covers, stamped with the current
+    // format version (nisaba_core::types::EXPORT_FORMAT_VERSION).
+    let export = db.export_data().await.map_err(|e| e.to_string())?;
 
     let json = serde_json::to_string_pretty(&export).map_err(|e| e.to_string())?;
 
@@ -89,12 +74,9 @@ pub async fn import_data(
     let data: ExportData =
         serde_json::from_str(&contents).map_err(|e| format!("Invalid export file: {e}"))?;
 
-    if data.version != 1 && data.version != 2 {
-        return Err(format!(
-            "Unsupported export version {}. Expected 1 or 2.",
-            data.version
-        ));
-    }
+    // Compat shim lives in core: every earlier 1.x format imports, and
+    // Db::import_data re-checks before writing anything.
+    data.validate_version()?;
 
     let db = state.active_db().await?;
     db.import_data(&data).await.map_err(|e| e.to_string())?;
