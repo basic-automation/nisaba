@@ -9,7 +9,10 @@ use base64::Engine as _;
 use nisaba_core::crypto::OsKeyringPluginSecrets;
 use nisaba_core::db::Db;
 use nisaba_core::types::{decimal_money, VendorListingCache, VendorPluginRow};
-use nisaba_vendor_runtime::{BatchCallback, PluginLimits, PluginStore, StoreError, VendorRuntime};
+use nisaba_vendor_runtime::{
+    BatchCallback, FetchListingsArgs, FetchListingsResult, PluginLimits, PluginStore, StoreError,
+    VendorRuntime,
+};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -160,29 +163,7 @@ fn cache_rows_or_skip(
     out
 }
 
-/// A live plugin listing (not yet cached) as a frontend result.
-fn listing_to_result(l: nisaba_vendor_runtime::VendorListing) -> VendorListingResult {
-    VendorListingResult {
-        vendor_item_id: l.vendor_item_id,
-        title: l.title,
-        price: l.price,
-        currency: l.currency,
-        quantity: l.quantity,
-        sku: l.sku,
-        image_url: l.images.first().cloned(),
-        images: l.images,
-        url: l.url,
-        upc: l.upc,
-        brand: l.brand,
-        mpn: l.mpn,
-        weight: l.weight,
-        dimensions: l.dimensions,
-        extras: l.extras,
-        group_key: l.group_key,
-        variant_attributes: l.variant_attributes,
-    }
-}
-
+/// A cached listing as a frontend result.
 fn cache_to_result(c: VendorListingCache) -> VendorListingResult {
     let image_url = c.primary_image().map(str::to_string);
     let images = c.images_resolved();
@@ -542,36 +523,119 @@ impl PluginStore for DbPluginStore {
     }
 }
 
-/// Run VendorRuntime::execute_plugin_from_files in a thread that owns a LocalSet.
+/// Run VendorRuntime::execute_plugin_from_files_with_store_incremental in a thread
+/// that owns a LocalSet.
 ///
 /// `plugin_id` scopes the `Nisaba.store` key–value store; `store` is its
-/// host-side backend (the company database in production).
-async fn execute_plugin_in_thread(
+/// host-side backend (the company database in production). `args` carries the
+/// host's incremental state (`since`, `cursor`) into the plugin's
+/// `fetchListings(config, { since, cursor })`.
+async fn execute_plugin_in_thread_incremental(
     files: HashMap<String, String>,
     config: HashMap<String, String>,
     batch_callback: Option<BatchCallback>,
     limits: PluginLimits,
     plugin_id: &str,
     store: Arc<dyn PluginStore>,
-) -> Result<Vec<nisaba_vendor_runtime::VendorListing>, String> {
+    args: &FetchListingsArgs,
+) -> Result<FetchListingsResult, String> {
     let plugin_id = plugin_id.to_string();
+    let args = args.clone();
     tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("Runtime error: {e}"))?;
-        rt.block_on(VendorRuntime::execute_plugin_from_files_with_store(
-            &files,
-            &plugin_id,
-            store,
-            config,
-            batch_callback,
-            limits,
-        ))
+        rt.block_on(
+            VendorRuntime::execute_plugin_from_files_with_store_incremental(
+                &files,
+                &plugin_id,
+                store,
+                config,
+                batch_callback,
+                limits,
+                &args,
+            ),
+        )
         .map_err(|e| format!("Plugin execution failed: {e}"))
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// One vendor sync cycle: execute the plugin with the host's incremental args,
+/// then fold the result into the cached catalog.
+///
+/// - A full catalog (plugins that ignore `{ since, cursor }`) replaces the
+///   cache, as before — full-pull semantics are unchanged.
+/// - A `{ changes, deleted, cursor }` delta is merged: changes are upserted by
+///   `vendor_item_id`, deleted ids are removed, untouched rows keep their
+///   stored `fetched_at`.
+///
+/// On success the host's sync state is recorded (`since` = this run's start,
+/// `cursor` = the plugin's returned cursor, or none for a full pull), so the
+/// next cycle can pull only what changed. Returns the merged catalog rows.
+async fn run_incremental_sync_cycle(
+    db: &Db,
+    plugin_id: &str,
+    files: HashMap<String, String>,
+    config: HashMap<String, String>,
+    batch_callback: Option<BatchCallback>,
+    limits: PluginLimits,
+    store: Arc<dyn PluginStore>,
+) -> Result<Vec<VendorListingCache>, String> {
+    let (since, cursor) = db
+        .get_vendor_sync_state(plugin_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(s, c)| (Some(s), c))
+        .unwrap_or((None, None));
+    let args = FetchListingsArgs { since, cursor };
+
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let result = execute_plugin_in_thread_incremental(
+        files,
+        config,
+        batch_callback,
+        limits,
+        plugin_id,
+        store,
+        &args,
+    )
+    .await?;
+
+    let (rows, new_cursor) = match result {
+        FetchListingsResult::Full(listings) => {
+            let rows = cache_rows_or_skip(plugin_id, &listings, &now);
+            db.save_vendor_listings_cache(plugin_id, &rows)
+                .await
+                .map_err(|e| e.to_string())?;
+            (rows, None)
+        }
+        FetchListingsResult::Delta(delta) => {
+            let changed = cache_rows_or_skip(plugin_id, &delta.changes, &now);
+            db.merge_vendor_listings_cache(plugin_id, &changed, &delta.deleted)
+                .await
+                .map_err(|e| e.to_string())?;
+            let rows = db
+                .get_vendor_listings_cache(plugin_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            (rows, delta.cursor)
+        }
+    };
+
+    // A state-save failure must not fail the sync: the catalog is already
+    // merged, and the next run simply retries the same window.
+    if let Err(e) = db
+        .set_vendor_sync_state(plugin_id, &now, new_cursor.as_deref())
+        .await
+    {
+        tracing::warn!(plugin = %plugin_id, "Failed to save incremental sync state: {e}");
+    }
+
+    Ok(rows)
 }
 
 /// Load a plugin's effective config for a run: non-secret values from the
@@ -1204,18 +1268,14 @@ pub async fn fetch_vendor_listings(
     let files = parse_files_json(&plugin.files_json)?;
     let limits = plugin_limits(&db, &plugin_id).await;
     let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
-    let result = execute_plugin_in_thread(files, config, None, limits, &plugin_id, store).await?;
 
-    // Save to cache as side-effect
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let cache_rows: Vec<VendorListingCache> = cache_rows_or_skip(&plugin_id, &result, &now);
-    if let Err(e) = db.save_vendor_listings_cache(&plugin_id, &cache_rows).await {
-        tracing::error!(plugin = %plugin_id, "Failed to save vendor listings cache: {e}");
-    } else {
-        tracing::info!(plugin = %plugin_id, count = cache_rows.len(), "Saved vendor listings cache");
-    }
+    // Runs the plugin with the host's incremental args and folds the result
+    // into the cached catalog as a side effect (N-7.4).
+    let cache_rows =
+        run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store).await?;
+    tracing::info!(plugin = %plugin_id, count = cache_rows.len(), "Fetched vendor listings");
 
-    Ok(result.into_iter().map(listing_to_result).collect())
+    Ok(cache_rows.into_iter().map(cache_to_result).collect())
 }
 
 // ── Vendor Cache Commands ─────────────────────────────────────
@@ -1312,64 +1372,55 @@ pub async fn sync_vendor_listings(
     let limits = plugin_limits(&db, &plugin_id).await;
     let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
     tokio::spawn(async move {
-        let result =
-            execute_plugin_in_thread(files, config, Some(batch_callback), limits, &pid, store)
-                .await;
+        let result = run_incremental_sync_cycle(
+            &db_spawn,
+            &pid,
+            files,
+            config,
+            Some(batch_callback),
+            limits,
+            store,
+        )
+        .await;
 
         match result {
-            Ok(vendor_listings) => {
-                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                let cache_rows: Vec<VendorListingCache> =
-                    cache_rows_or_skip(&pid, &vendor_listings, &now);
+            Ok(cache_rows) => {
                 let count = cache_rows.len();
 
-                if let Err(e) = db_spawn.save_vendor_listings_cache(&pid, &cache_rows).await {
-                    tracing::error!(plugin = %pid, "Failed to save vendor listings cache: {e}");
-                    let _ = app_handle.emit(
-                        "vendor-sync",
-                        VendorSyncEvent {
-                            plugin_id: pid.clone(),
-                            status: "completed".to_string(),
-                            listing_count: count,
-                            message: format!("Synced {count} listings (cache save failed: {e})"),
-                        },
-                    );
-                } else {
-                    // Update permanent product_vendor_data with fresh values
-                    match db_spawn
-                        .update_product_vendor_data_from_cache(&pid, &cache_rows)
-                        .await
-                    {
-                        Ok(n) if n > 0 => {
-                            tracing::info!(plugin = %pid, updated = n, "Updated product vendor data from sync");
-                            // Recalc product quantities to reflect updated vendor stock
-                            match db_spawn.recalc_products_for_plugin(&pid).await {
-                                Ok(r) if r > 0 => {
-                                    tracing::info!(plugin = %pid, recalced = r, "Recalculated product quantities after vendor sync")
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    tracing::warn!(plugin = %pid, "Failed to recalc products after vendor sync: {e}")
-                                }
+                // Update permanent product_vendor_data with fresh values
+                match db_spawn
+                    .update_product_vendor_data_from_cache(&pid, &cache_rows)
+                    .await
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(plugin = %pid, updated = n, "Updated product vendor data from sync");
+                        // Recalc product quantities to reflect updated vendor stock
+                        match db_spawn.recalc_products_for_plugin(&pid).await {
+                            Ok(r) if r > 0 => {
+                                tracing::info!(plugin = %pid, recalced = r, "Recalculated product quantities after vendor sync")
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(plugin = %pid, "Failed to recalc products after vendor sync: {e}")
                             }
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(plugin = %pid, "Failed to update product vendor data: {e}")
-                        }
                     }
-
-                    tracing::info!(plugin = %pid, count, "Saved vendor listings cache");
-                    let _ = app_handle.emit(
-                        "vendor-sync",
-                        VendorSyncEvent {
-                            plugin_id: pid.clone(),
-                            status: "completed".to_string(),
-                            listing_count: count,
-                            message: format!("Synced {count} listings"),
-                        },
-                    );
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(plugin = %pid, "Failed to update product vendor data: {e}")
+                    }
                 }
+
+                tracing::info!(plugin = %pid, count, "Saved vendor listings cache");
+                let _ = app_handle.emit(
+                    "vendor-sync",
+                    VendorSyncEvent {
+                        plugin_id: pid.clone(),
+                        status: "completed".to_string(),
+                        listing_count: count,
+                        message: format!("Synced {count} listings"),
+                    },
+                );
             }
             Err(e) => {
                 let _ = app_handle.emit(
@@ -1814,17 +1865,9 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
 
     let limits = plugin_limits(&db, &plugin_id).await;
     let store: Arc<dyn PluginStore> = Arc::new(DbPluginStore { db: db.clone() });
-    match execute_plugin_in_thread(files, config, None, limits, &plugin_id, store).await {
-        Ok(vendor_listings) => {
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let cache_rows: Vec<VendorListingCache> =
-                cache_rows_or_skip(&plugin_id, &vendor_listings, &now);
+    match run_incremental_sync_cycle(&db, &plugin_id, files, config, None, limits, store).await {
+        Ok(cache_rows) => {
             let count = cache_rows.len();
-
-            if let Err(e) = db.save_vendor_listings_cache(&plugin_id, &cache_rows).await {
-                tracing::error!(plugin = %plugin_id, "Auto vendor sync: cache save failed: {e}");
-                return;
-            }
 
             match db
                 .update_product_vendor_data_from_cache(&plugin_id, &cache_rows)
