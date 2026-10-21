@@ -119,6 +119,47 @@ impl From<VendorListingWire> for VendorListing {
     }
 }
 
+/// What the host hands a plugin's `fetchListings` as its second argument
+/// (N-7.4, incremental sync).
+///
+/// `since` is the UTC timestamp (`"%Y-%m-%d %H:%M:%S"`) of the last successful
+/// sync — `None` on the first run, when the plugin should return the whole
+/// catalog. `cursor` is the opaque cursor the plugin returned on the previous
+/// run — `None` when the plugin never returned one (or never ran). A plugin
+/// may ignore both and keep returning the full catalog; the host then keeps
+/// full-pull semantics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FetchListingsArgs {
+    pub since: Option<String>,
+    pub cursor: Option<String>,
+}
+
+/// The delta a plugin may return from `fetchListings` instead of the full
+/// catalog: only what changed since `since`/`cursor`, the ids that disappeared,
+/// and the cursor for the next run. The host merges it into the cached catalog:
+/// `changes` are upserted by `vendor_item_id`, `deleted` ids are removed, and
+/// everything else keeps its cached row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDelta {
+    pub changes: Vec<VendorListing>,
+    #[serde(default)]
+    pub deleted: Vec<String>,
+    pub cursor: Option<String>,
+}
+
+/// What a plugin's `fetchListings` may return.
+///
+/// An array keeps the pre-N-7.4 full-pull semantics — plugins that ignore
+/// `{ since, cursor }` need no changes, and the host replaces the cached
+/// catalog with it. An object is a [`ListingDelta`] and is merged into the
+/// cached catalog instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FetchListingsResult {
+    Full(Vec<VendorListing>),
+    Delta(ListingDelta),
+}
+
 /// The plugin API major version this host implements.
 ///
 /// This is the frozen plugin surface documented in `plugins/template` and

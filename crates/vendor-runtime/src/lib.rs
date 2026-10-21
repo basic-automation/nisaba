@@ -25,4 +25,7 @@ pub use ops::{
     PLUGIN_STORE_CAP_BYTES, PLUGIN_STORE_MAX_KEY_BYTES,
 };
 pub use runtime::{PluginLimits, VendorRuntime};
-pub use types::{ConfigField, PluginInfo, PluginMetadata, VendorListing, HOST_PLUGIN_API_VERSION};
+pub use types::{
+    ConfigField, FetchListingsArgs, FetchListingsResult, ListingDelta, PluginInfo, PluginMetadata,
+    VendorListing, HOST_PLUGIN_API_VERSION,
+};

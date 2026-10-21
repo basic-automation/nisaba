@@ -63,8 +63,16 @@ The frozen v1 surface is:
   `config_fields` (each with `key`, `label`, `required`, `secret`,
   `placeholder`), `category`, `icon`, `allowed_hosts`.
 - **Entry points**: an exported `metadata` object literal (read before any run,
-  with no network access) and an exported async `fetchListings(config)` that
-  returns the whole catalog as `VendorListing[]`.
+  with no network access) and an exported async
+  `fetchListings(config, { since, cursor })`. `since` is the UTC timestamp of
+  the last successful sync (`null` on the first run) and `cursor` the opaque
+  cursor the plugin returned last time. It returns either the whole catalog as
+  `VendorListing[]` (plugins that ignore the second argument keep these
+  full-pull semantics, and the host replaces the cached catalog) or a
+  `{ changes, deleted, cursor }` delta, which the host merges into the cached
+  catalog: `changes` are upserted by `vendor_item_id`, `deleted` ids are
+  removed, untouched rows keep their stored `fetched_at`. The host records the
+  returned cursor for the next run; a re-install starts from a full pull.
 - **The `Nisaba` host object**: `fetch` (only to `allowed_hosts`; redirects are
   followed only to listed hosts), `sleep` (the only way to wait — there are no
   timers), `emitBatch` (progress batches; the array `fetchListings` returns is
