@@ -166,33 +166,41 @@ export async function fetchListings(
       if (!detail || !detail.skus || detail.skus.length === 0) continue
 
       for (const sku of detail.skus) {
-        const qty = inventoryMap[sku.upc] ?? 0
+        // quantity: null = the inventory feed had no figure for this UPC
+        // (unknown); 0 = out of stock. Never coerce one into the other.
+        const qty = inventoryMap[sku.upc] ?? null
         // Prefer image from skuImages query, fall back to sku.image field
         const imageFilename = skuImageMap[sku.sku_code] ?? sku.image
         const imageUrl = resolveImageUrl(imageFilename, imageBase)
         const attrs = buildVariantAttributes(sku)
 
         const extras: Record<string, string> = {}
-        if (sku.upc) extras.upc = sku.upc
-        if (sku.weight != null) extras.weight = String(sku.weight)
         if (detail.product_line_code) extras.product_line_code = detail.product_line_code
         if (detail.short_description) extras.description = detail.short_description
         const prices = sku.prices
         if (prices?.case_price != null) extras.dealer_price = String(prices.case_price)
         if (prices?.map_price != null) extras.map_price = String(prices.map_price)
 
-        // Use MAP (minimum advertised price) as listing price, fall back to base price
+        // Use MAP (minimum advertised price) as listing price, fall back to base price.
+        // Decimal text, never binary floating point.
         const skuPrice = prices?.map_price ?? prices?.price ?? null
 
         listings.push({
           vendor_item_id: sku.sku_code,
           title: detail.product_line_name,
-          price: skuPrice,
+          price: skuPrice != null ? String(skuPrice) : null,
           currency: 'USD',
           quantity: qty,
           sku: sku.sku_code,
-          image_url: imageUrl,
+          images: imageUrl ? [imageUrl] : [],
           url: null,
+          upc: sku.upc ?? null,
+          brand: 'Rothco',
+          mpn: null,
+          // The Rothco API documents no weight unit; it is a US wholesaler and
+          // the values behave as pounds. Correct the unit here if that changes.
+          weight: sku.weight != null ? { value: Number(sku.weight), unit: 'lb' } : null,
+          dimensions: null,
           extras,
           group_key: detail.product_line_code || String(detail.product_line_id),
           variant_attributes: attrs,
@@ -269,8 +277,8 @@ async function gql(
 // v2: inventory query is now paginated
 async function fetchInventory(
   token: string
-): Promise<Record<string, number>> {
-  const map: Record<string, number> = {}
+): Promise<Record<string, number | null>> {
+  const map: Record<string, number | null> = {}
   let page = 1
   let hasMore = true
 
@@ -283,7 +291,8 @@ async function fetchInventory(
     const data = resp.data.inventory
     for (const item of data.data) {
       const level = parseInt(item.inventory_level, 10)
-      map[item.upc] = isNaN(level) ? 0 : level
+      // An unparseable level is unknown stock, not zero stock.
+      map[item.upc] = isNaN(level) ? null : level
     }
 
     hasMore = data.paginatorInfo.hasMorePages
