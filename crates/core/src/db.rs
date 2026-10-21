@@ -18,7 +18,7 @@ use crate::types::{
     VendorPluginRow, Weight, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 26;
+const CURRENT_SCHEMA_VERSION: i64 = 27;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -1281,6 +1281,15 @@ impl Db {
                 conn.execute_batch(include_str!("../../../migrations/026_plugin_kv_store.sql"))
                     .await?;
                 debug!("Applied migration 026_plugin_kv_store.sql");
+            }
+            27 => {
+                // Host-owned incremental-sync state for `fetchListings({ since,
+                // cursor })` (N-7.4).
+                conn.execute_batch(include_str!(
+                    "../../../migrations/027_vendor_sync_state.sql"
+                ))
+                .await?;
+                debug!("Applied migration 027_vendor_sync_state.sql");
             }
             _ => {}
         }
@@ -4209,6 +4218,9 @@ impl Db {
         .await?;
         // A removed plugin's cursors must not linger for a later re-install.
         self.clear_plugin_store(plugin_id).await?;
+        // Same for the host's incremental-sync state: a re-install starts
+        // from a full pull, never a stale cursor.
+        self.clear_vendor_sync_state(plugin_id).await?;
         Ok(())
     }
 
@@ -4482,6 +4494,129 @@ impl Db {
     pub async fn clear_vendor_listings_cache(&self, plugin_id: &str) -> Result<(), SyncError> {
         self.execute_write(
             "DELETE FROM vendor_listings_cache WHERE plugin_id = ?1",
+            params![plugin_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Merge an incremental delta into the cached catalog (N-7.4), in one
+    /// transaction: `changes` are upserted by `(plugin_id, vendor_item_id)`
+    /// and `deleted` ids are removed. Rows the delta does not mention keep
+    /// their stored `fetched_at` — only genuinely changed rows get a new one.
+    pub async fn merge_vendor_listings_cache(
+        &self,
+        plugin_id: &str,
+        changes: &[VendorListingCache],
+        deleted: &[String],
+    ) -> Result<(), SyncError> {
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+
+        // Deduplicate by (plugin_id, vendor_item_id) — last occurrence wins,
+        // mirroring save_vendor_listings_cache.
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped: Vec<&VendorListingCache> = Vec::with_capacity(changes.len());
+        for l in changes.iter().rev() {
+            if seen.insert(&l.vendor_item_id) {
+                deduped.push(l);
+            }
+        }
+        deduped.reverse();
+
+        for l in deduped {
+            let extras_json = serde_json::to_string(&l.extras)
+                .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+            let variant_attrs_json = serde_json::to_string(&l.variant_attributes)
+                .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO vendor_listings_cache
+                 (plugin_id, vendor_item_id, title, price, currency, quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json, fetched_at,
+                  images_json, upc, brand, mpn, weight_json, dimensions_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         ?14, ?15, ?16, ?17, ?18, ?19)",
+                params![
+                    plugin_id,
+                    l.vendor_item_id.clone(),
+                    l.title.clone(),
+                    decimal_param_opt(l.price.as_ref()),
+                    l.currency.clone(),
+                    l.quantity,
+                    l.sku.clone(),
+                    // Legacy column, kept NULL on new rows (N-7.2).
+                    Option::<String>::None,
+                    l.url.clone(),
+                    extras_json,
+                    l.group_key.clone(),
+                    variant_attrs_json,
+                    l.fetched_at.clone(),
+                    json_param(&l.images),
+                    l.upc.clone(),
+                    l.brand.clone(),
+                    l.mpn.clone(),
+                    json_param_opt(l.weight.as_ref()),
+                    json_param_opt(l.dimensions.as_ref()),
+                ],
+            )
+            .await?;
+        }
+
+        for id in deleted {
+            conn.execute(
+                "DELETE FROM vendor_listings_cache WHERE plugin_id = ?1 AND vendor_item_id = ?2",
+                params![plugin_id, id.as_str()],
+            )
+            .await?;
+        }
+
+        conn.execute("COMMIT", ()).await?;
+        Ok(())
+    }
+
+    /// Incremental-sync state for a plugin: `(last_since, cursor)` as recorded
+    /// by the last successful sync. `None` means the plugin has never synced
+    /// (or the state was cleared), so the next run is a full pull.
+    pub async fn get_vendor_sync_state(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT last_since, cursor FROM vendor_sync_state WHERE plugin_id = ?1",
+                params![plugin_id],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Ok(Some((row.get::<String>(0)?, row.get::<Option<String>>(1)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Record the host's incremental-sync state after a successful sync run:
+    /// `last_since` is the run's start timestamp, `cursor` the cursor the
+    /// plugin returned (`None` when it returned a full catalog or no cursor).
+    pub async fn set_vendor_sync_state(
+        &self,
+        plugin_id: &str,
+        last_since: &str,
+        cursor: Option<&str>,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "INSERT OR REPLACE INTO vendor_sync_state (plugin_id, last_since, cursor, updated_at)
+             VALUES (?1, ?2, ?3, strftime('%Y-%m-%d %H:%M:%S', 'now'))",
+            params![plugin_id, last_since, cursor],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Clear a plugin's incremental-sync state. Called on uninstall so a
+    /// re-install starts from a full pull, never a stale cursor.
+    pub async fn clear_vendor_sync_state(&self, plugin_id: &str) -> Result<(), SyncError> {
+        self.execute_write(
+            "DELETE FROM vendor_sync_state WHERE plugin_id = ?1",
             params![plugin_id],
         )
         .await?;
@@ -7301,6 +7436,108 @@ mod tests {
                 unit: "in".to_string()
             })
         );
+    }
+
+    /// N-7.4: `merge_vendor_listings_cache` upserts changed rows, removes
+    /// deleted ids, and leaves untouched rows — including their stored
+    /// `fetched_at` — alone.
+    #[tokio::test]
+    async fn merge_vendor_listings_cache_applies_changes_and_deletes() {
+        let (_dir, db) = migrated_test_db("merge-cache.db").await;
+
+        let row = |id: &str, title: &str, fetched_at: &str| VendorListingCache {
+            plugin_id: "plug".to_string(),
+            vendor_item_id: id.to_string(),
+            title: title.to_string(),
+            price: None,
+            currency: None,
+            quantity: None,
+            sku: None,
+            images: vec![],
+            image_url: None,
+            url: None,
+            upc: None,
+            brand: None,
+            mpn: None,
+            weight: None,
+            dimensions: None,
+            extras: HashMap::new(),
+            group_key: None,
+            variant_attributes: HashMap::new(),
+            fetched_at: fetched_at.to_string(),
+        };
+
+        db.save_vendor_listings_cache(
+            "plug",
+            &[
+                row("a", "Apple", "2026-10-20 00:00:00"),
+                row("b", "Banana", "2026-10-20 00:00:00"),
+                row("c", "Cherry", "2026-10-20 00:00:00"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Second run: "a" changed, "d" is new, "b" is gone at the supplier.
+        db.merge_vendor_listings_cache(
+            "plug",
+            &[
+                row("a", "Apple (new harvest)", "2026-10-21 08:00:00"),
+                row("d", "Date", "2026-10-21 08:00:00"),
+            ],
+            &["b".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let mut rows = db.get_vendor_listings_cache("plug").await.unwrap();
+        rows.sort_by(|x, y| x.vendor_item_id.cmp(&y.vendor_item_id));
+        assert_eq!(rows.len(), 3);
+
+        let a = &rows[0];
+        assert_eq!(a.vendor_item_id, "a");
+        assert_eq!(a.title, "Apple (new harvest)");
+        assert_eq!(a.fetched_at, "2026-10-21 08:00:00");
+
+        let c = &rows[1];
+        assert_eq!(c.vendor_item_id, "c");
+        assert_eq!(c.title, "Cherry");
+        // Untouched rows keep their stored fetched_at.
+        assert_eq!(c.fetched_at, "2026-10-20 00:00:00");
+
+        let d = &rows[2];
+        assert_eq!(d.vendor_item_id, "d");
+        assert_eq!(d.title, "Date");
+        assert_eq!(d.fetched_at, "2026-10-21 08:00:00");
+    }
+
+    /// N-7.4: the host's incremental-sync state (`since` + `cursor`) round-trips
+    /// and clears.
+    #[tokio::test]
+    async fn vendor_sync_state_round_trips_and_clears() {
+        let (_dir, db) = migrated_test_db("sync-state.db").await;
+
+        assert_eq!(db.get_vendor_sync_state("plug").await.unwrap(), None);
+
+        db.set_vendor_sync_state("plug", "2026-10-21 08:00:00", Some("c1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_vendor_sync_state("plug").await.unwrap(),
+            Some(("2026-10-21 08:00:00".to_string(), Some("c1".to_string())))
+        );
+
+        // A full pull records no cursor.
+        db.set_vendor_sync_state("plug", "2026-10-21 09:00:00", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_vendor_sync_state("plug").await.unwrap(),
+            Some(("2026-10-21 09:00:00".to_string(), None))
+        );
+
+        db.clear_vendor_sync_state("plug").await.unwrap();
+        assert_eq!(db.get_vendor_sync_state("plug").await.unwrap(), None);
     }
 
     /// N-7.2: migration 025 adds the frozen-schema columns (`images_json`,
