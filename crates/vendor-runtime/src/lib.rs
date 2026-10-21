@@ -21,8 +21,8 @@ extension!(
 );
 
 pub use ops::{
-    BatchCallback, BlockPrivateHosts, FetchPolicy, PluginStore, PluginStoreContext, StoreError,
-    PLUGIN_STORE_CAP_BYTES, PLUGIN_STORE_MAX_KEY_BYTES,
+    BatchCallback, BlockPrivateHosts, FetchPolicy, PluginLogCollector, PluginStore,
+    PluginStoreContext, StoreError, PLUGIN_STORE_CAP_BYTES, PLUGIN_STORE_MAX_KEY_BYTES,
 };
 pub use runtime::{PluginLimits, VendorRuntime};
 pub use types::{

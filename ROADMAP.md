@@ -658,8 +658,12 @@ write surfaces as `Err`.
       (`vendor-runtime/src/ops.rs` ~29–52) checks host *names* only, so a plugin whose
       allowed host resolves to loopback or a LAN address reaches it. Refuse private,
       loopback and link-local addresses after DNS resolution.
-- [ ] `AUTO_VENDOR_SYNC_RUNNING` (`vendors.rs` ~1482) is a process-wide flag, so one
+- [x] `AUTO_VENDOR_SYNC_RUNNING` (`vendors.rs` ~1482) is a process-wide flag, so one
       company's vendor sync skips every other company's, logged only at `debug`.
+      → Done (N-7.5): the process-wide flag is gone; the auto-sync guard is
+      keyed per company (by database path), so one company's running sync
+      blocks only that company's next run. Covered by a unit test claiming
+      two companies' slots independently.
 - [x] Surface each plugin's network access at install time (first install only — in-place
       updates skip it; see the re-approval item above). The marketplace cards show
       the declared hosts, "No network access", or an amber "Unrestricted" warning when a
@@ -749,9 +753,20 @@ six operations (`fetch`, `sleep`, `log`, `emitBatch`, `store`, `setResult`) and 
       `Nisaba.parseXml`. Decide whether to support SFTP (an `sftp://` entry in
       `allowed_hosts`), a `file` config field the host reads with the user's consent, or
       both.
-- [ ] Per-plugin schedule (an interval, plus manual runs) and a **run history** in the UI:
+- [x] Per-plugin schedule (an interval, plus manual runs) and a **run history** in the UI:
       start and end time, listings emitted, errors, and the plugin's own log lines (which
       are already routed into the app log).
+      → Done (N-7.5): migration 028 adds `plugin_run_history` and
+      `vendor_plugin_installs.sync_interval_minutes`. Every run through the
+      shared sync cycle (auto, manual Sync, direct Fetch) records start/end,
+      status, listings emitted, the error on failure, and the plugin's
+      `Nisaba.log` lines (captured per run by the runtime's log collector,
+      which also returns them for failed runs). The marketplace installed
+      card shows the history (`PluginRunHistory.vue`), a per-plugin
+      interval picker plus Run now (`PluginSyncSchedule.vue`); the auto-sync
+      path honours the interval via `plugin_sync_due` against the last
+      recorded run, and manual runs are never gated. DB round-trip, due-ness
+      and runtime log-capture tests cover the pieces.
 - [ ] **Capabilities manifest.** Next to `allowed_hosts`, a plugin declares what it does:
       `catalog` today, and `orders`, `marketplace` and `notify` later. The install card
       shows the capabilities, the host refuses calls outside them, and a capability change

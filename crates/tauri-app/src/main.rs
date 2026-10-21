@@ -373,6 +373,8 @@ fn main() {
             commands::vendors::install_vendor_plugin,
             commands::vendors::uninstall_vendor_plugin,
             commands::vendors::set_vendor_plugin_timeout,
+            commands::vendors::set_vendor_plugin_sync_interval,
+            commands::vendors::get_plugin_run_history,
             commands::vendors::fetch_vendor_listings,
             commands::vendors::get_cached_vendor_listings,
             commands::vendors::sync_vendor_listings,

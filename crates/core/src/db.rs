@@ -13,12 +13,12 @@ use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
 use crate::types::{
     AuthToken, Dimensions, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto,
-    NewSyncEvent, Platform, PlatformMapping, PlatformSnapshot, PricingSnapshot, Product,
-    ProductVariant, StockEvent, StockEventKind, SyncEvent, VendorListingCache, VendorPluginInstall,
-    VendorPluginRow, Weight, XmrProcessedOrder,
+    NewSyncEvent, Platform, PlatformMapping, PlatformSnapshot, PluginRunRecord, PricingSnapshot,
+    Product, ProductVariant, StockEvent, StockEventKind, SyncEvent, VendorListingCache,
+    VendorPluginInstall, VendorPluginRow, Weight, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 27;
+const CURRENT_SCHEMA_VERSION: i64 = 28;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -1327,6 +1327,22 @@ impl Db {
                 ))
                 .await?;
                 debug!("Applied migration 027_vendor_sync_state.sql");
+            }
+            28 => {
+                // Plugin run history + per-plugin sync interval (N-7.5).
+                conn.execute_batch(include_str!(
+                    "../../../migrations/028_plugin_run_history.sql"
+                ))
+                .await?;
+                // Idempotent like steps 018/019/025: a re-run after the
+                // column already exists must not fail the step.
+                let _ = conn
+                    .execute(
+                        "ALTER TABLE vendor_plugin_installs ADD COLUMN sync_interval_minutes INTEGER",
+                        (),
+                    )
+                    .await;
+                debug!("Applied migration 028_plugin_run_history.sql");
             }
             _ => {}
         }
@@ -4217,7 +4233,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT plugin_id, installed, enabled, installed_at, timeout_minutes
+                "SELECT plugin_id, installed, enabled, installed_at, timeout_minutes, sync_interval_minutes
                  FROM vendor_plugin_installs ORDER BY installed_at",
                 (),
             )
@@ -4231,6 +4247,7 @@ impl Db {
                 enabled: row.get::<bool>(2)?,
                 installed_at: row.get::<String>(3)?,
                 timeout_minutes: row.get::<Option<i64>>(4)?,
+                sync_interval_minutes: row.get::<Option<i64>>(5)?,
             });
         }
         Ok(installs)
@@ -4258,6 +4275,8 @@ impl Db {
         // Same for the host's incremental-sync state: a re-install starts
         // from a full pull, never a stale cursor.
         self.clear_vendor_sync_state(plugin_id).await?;
+        // And its run history belongs to the removed install.
+        self.clear_plugin_run_history(plugin_id).await?;
         Ok(())
     }
 
@@ -4372,6 +4391,148 @@ impl Db {
         self.execute_write(
             "UPDATE vendor_plugin_installs SET enabled = ?1 WHERE plugin_id = ?2",
             params![enabled, plugin_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set this machine's per-plugin auto-sync interval (N-7.5); `None`
+    /// restores "follow the global sync cycle". Manual runs ignore it.
+    pub async fn set_plugin_sync_interval(
+        &self,
+        plugin_id: &str,
+        interval_minutes: Option<i64>,
+    ) -> Result<(), SyncError> {
+        self.execute_write(
+            "UPDATE vendor_plugin_installs SET sync_interval_minutes = ?1 WHERE plugin_id = ?2",
+            params![interval_minutes, plugin_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    // ── Plugin Run History (N-7.5) ────────────────────────────
+
+    /// How many runs are kept per plugin; older rows are pruned on finish.
+    pub const PLUGIN_RUN_HISTORY_KEEP: i64 = 50;
+
+    /// Open a run-history row for a run that is starting now. Returns its id
+    /// for [`finish_plugin_run`](Self::finish_plugin_run).
+    pub async fn start_plugin_run(
+        &self,
+        plugin_id: &str,
+        trigger_kind: &str,
+    ) -> Result<i64, SyncError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO plugin_run_history (plugin_id, started_at, status, trigger_kind)
+             VALUES (?1, strftime('%Y-%m-%d %H:%M:%S', 'now'), 'running', ?2)",
+            params![plugin_id, trigger_kind],
+        )
+        .await?;
+        let mut rows = conn.query("SELECT last_insert_rowid()", ()).await?;
+        let id: i64 = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?
+            .unwrap_or(0);
+        Ok(id)
+    }
+
+    /// Close a run-history row: end time, final status, listings emitted,
+    /// the error on failure, and the plugin's own log lines for the run.
+    /// Prunes the plugin's history to the most recent runs afterwards.
+    pub async fn finish_plugin_run(
+        &self,
+        run_id: i64,
+        plugin_id: &str,
+        status: &str,
+        listings_emitted: i64,
+        error: Option<&str>,
+        log_lines: &[String],
+    ) -> Result<(), SyncError> {
+        let log_json = serde_json::to_string(log_lines)
+            .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
+        self.execute_write(
+            "UPDATE plugin_run_history
+             SET finished_at = strftime('%Y-%m-%d %H:%M:%S', 'now'), status = ?1,
+                 listings_emitted = ?2, error = ?3, log_lines = ?4
+             WHERE id = ?5",
+            params![status, listings_emitted, error, log_json, run_id],
+        )
+        .await?;
+        self.execute_write(
+            "DELETE FROM plugin_run_history
+             WHERE plugin_id = ?1 AND id NOT IN (
+                 SELECT id FROM plugin_run_history WHERE plugin_id = ?1
+                 ORDER BY started_at DESC, id DESC LIMIT ?2
+             )",
+            params![plugin_id, Self::PLUGIN_RUN_HISTORY_KEEP],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A plugin's recorded runs, newest first.
+    pub async fn list_plugin_runs(
+        &self,
+        plugin_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PluginRunRecord>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, plugin_id, started_at, finished_at, status, listings_emitted, error, log_lines, trigger_kind
+                 FROM plugin_run_history WHERE plugin_id = ?1
+                 ORDER BY started_at DESC, id DESC LIMIT ?2",
+                params![plugin_id, limit.max(1)],
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let log_json: String = row.get::<String>(7)?;
+            out.push(PluginRunRecord {
+                id: row.get::<i64>(0)?,
+                plugin_id: row.get::<String>(1)?,
+                started_at: row.get::<String>(2)?,
+                finished_at: row.get::<Option<String>>(3)?,
+                status: row.get::<String>(4)?,
+                listings_emitted: row.get::<i64>(5)?,
+                error: row.get::<Option<String>>(6)?,
+                log_lines: serde_json::from_str(&log_json).unwrap_or_default(),
+                trigger_kind: row.get::<String>(8)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// When the plugin's most recent recorded run started, if any. The
+    /// auto-sync path compares this against the per-plugin interval.
+    pub async fn last_plugin_run_started_at(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<String>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT started_at FROM plugin_run_history WHERE plugin_id = ?1
+                 ORDER BY started_at DESC, id DESC LIMIT 1",
+                params![plugin_id],
+            )
+            .await?;
+        if let Some(row) = rows.next().await? {
+            Ok(Some(row.get::<String>(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Drop a plugin's whole run history. Called on uninstall.
+    pub async fn clear_plugin_run_history(&self, plugin_id: &str) -> Result<(), SyncError> {
+        self.execute_write(
+            "DELETE FROM plugin_run_history WHERE plugin_id = ?1",
+            params![plugin_id],
         )
         .await?;
         Ok(())
@@ -5712,6 +5873,7 @@ mod tests {
         "platform_mappings",
         "platform_snapshots",
         "plugin_kv_store",
+        "plugin_run_history",
         "pricing_snapshots",
         "products",
         "product_variants",
@@ -7996,6 +8158,74 @@ mod tests {
 
         db.clear_vendor_sync_state("plug").await.unwrap();
         assert_eq!(db.get_vendor_sync_state("plug").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn plugin_run_history_records_runs_and_interval_round_trips() {
+        let (_dir, db) = migrated_test_db("run-history.db").await;
+        db.upsert_registry_plugin(&registry_row("plug", None))
+            .await
+            .unwrap();
+        db.install_plugin("plug").await.unwrap();
+
+        // Interval defaults to None (global cycle) and round-trips.
+        let installs = db.list_installed_plugins().await.unwrap();
+        assert_eq!(installs[0].sync_interval_minutes, None);
+        db.set_plugin_sync_interval("plug", Some(120))
+            .await
+            .unwrap();
+        let installs = db.list_installed_plugins().await.unwrap();
+        assert_eq!(installs[0].sync_interval_minutes, Some(120));
+        db.set_plugin_sync_interval("plug", None).await.unwrap();
+        let installs = db.list_installed_plugins().await.unwrap();
+        assert_eq!(installs[0].sync_interval_minutes, None);
+
+        // A completed run records start/end, listings, and log lines.
+        assert_eq!(db.last_plugin_run_started_at("plug").await.unwrap(), None);
+        let run = db.start_plugin_run("plug", "manual").await.unwrap();
+        assert!(db
+            .last_plugin_run_started_at("plug")
+            .await
+            .unwrap()
+            .is_some());
+        let running = db.list_plugin_runs("plug", 10).await.unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].status, "running");
+        assert_eq!(running[0].finished_at, None);
+
+        db.finish_plugin_run(
+            run,
+            "plug",
+            "completed",
+            42,
+            None,
+            &["[info] hello".to_string(), "[warn] slow".to_string()],
+        )
+        .await
+        .unwrap();
+        let runs = db.list_plugin_runs("plug", 10).await.unwrap();
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[0].listings_emitted, 42);
+        assert_eq!(runs[0].error, None);
+        assert!(runs[0].finished_at.is_some());
+        assert_eq!(runs[0].log_lines.len(), 2);
+        assert_eq!(runs[0].trigger_kind, "manual");
+
+        // A failed run records its error; newest comes first.
+        let run2 = db.start_plugin_run("plug", "auto").await.unwrap();
+        db.finish_plugin_run(run2, "plug", "failed", 0, Some("boom"), &[])
+            .await
+            .unwrap();
+        let runs = db.list_plugin_runs("plug", 10).await.unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].status, "failed");
+        assert_eq!(runs[0].error.as_deref(), Some("boom"));
+
+        // Runs are scoped per plugin.
+        assert!(db.list_plugin_runs("other", 10).await.unwrap().is_empty());
+
+        db.clear_plugin_run_history("plug").await.unwrap();
+        assert!(db.list_plugin_runs("plug", 10).await.unwrap().is_empty());
     }
 
     /// N-7.2: migration 025 adds the frozen-schema columns (`images_json`,

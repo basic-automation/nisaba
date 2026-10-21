@@ -313,6 +313,22 @@ export interface VendorPluginInfo {
   /** This machine's time limit for one run, in minutes. */
   timeout_minutes: number
   timeout_is_default: boolean
+  code_hash?: string | null
+  /** Per-plugin auto-sync interval in minutes (N-7.5); null = every global cycle. */
+  sync_interval_minutes: number | null
+}
+
+/** One recorded plugin run (N-7.5 run history). */
+export interface PluginRunInfo {
+  id: number
+  plugin_id: string
+  started_at: string
+  finished_at: string | null
+  status: 'running' | 'completed' | 'failed' | string
+  listings_emitted: number
+  error: string | null
+  log_lines: string[]
+  trigger_kind: 'auto' | 'manual' | 'fetch' | string
 }
 
 // Vendor sync types
