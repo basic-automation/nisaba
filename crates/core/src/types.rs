@@ -280,10 +280,16 @@ pub struct ProductVariant {
     pub name: String,
     pub attributes: HashMap<String, String>,
     pub quantity: i64,
+    /// On-hand stock excluding vendor/dropship contributions. Serialized
+    /// since format v2; `#[serde(default)]` is the compat shim for older
+    /// payloads that lack it (they import as 0 rather than failing).
+    #[serde(default)]
     pub on_hand_quantity: i64,
     pub image_url: Option<String>,
     pub sort_order: i32,
+    #[serde(default)]
     pub source_plugin_id: Option<String>,
+    #[serde(default)]
     pub source_vendor_item_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -298,6 +304,14 @@ pub struct PlatformMapping {
     pub platform_sku: Option<String>,
     pub is_active: bool,
     pub variant_id: Option<String>,
+    /// Soft-delete tombstone, faithfully carried so an export/import
+    /// round-trip never revives a deleted mapping as active: `Some(ts)`
+    /// means the mapping was deleted at that time and must stay deleted.
+    /// Live mappings have `None`. `#[serde(default)]` keeps payloads from
+    /// before this field existed (export format < 3, older peers)
+    /// deserializable; they read as live mappings.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -778,6 +792,30 @@ impl StockEvent {
     }
 }
 
+/// The export format version written by this build (N-8.2).
+///
+/// Format history (all 1.x-era formats stay importable — see
+/// [`ExportData::validate_version`]):
+/// - **v1**: products, platform mappings, platform snapshots and XMR
+///   processed orders. No `product_variants` section (the field defaults
+///   to empty; import's fixup rebuilds a default variant per product).
+/// - **v2**: adds the `product_variants` section. The importer dropped
+///   `on_hand_quantity` and the variant source links on the floor, and
+///   mappings carried no `deleted_at`, so soft-deleted mappings came
+///   back as active.
+/// - **v3** (current): lossless. Import preserves `on_hand_quantity`,
+///   `source_plugin_id` / `source_vendor_item_id`, mapping and snapshot
+///   ids, snapshot `variant_id`, and mappings carry `deleted_at` so
+///   tombstones stay tombstones.
+pub const EXPORT_FORMAT_VERSION: u32 = 3;
+
+/// The oldest export format version this build can import.
+pub const MIN_EXPORT_FORMAT_VERSION: u32 = 1;
+
+/// A full, lossless export of the catalog database (see
+/// [`EXPORT_FORMAT_VERSION`] for the format history). Contains no
+/// secrets: products, variants, platform mappings/snapshots and XMR
+/// processed-order markers only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportData {
     pub version: u32,
@@ -790,10 +828,64 @@ pub struct ExportData {
     pub xmr_processed_orders: Vec<XmrProcessedOrder>,
 }
 
+impl ExportData {
+    /// The compat shim for older exports: every format version from
+    /// [`MIN_EXPORT_FORMAT_VERSION`] through [`EXPORT_FORMAT_VERSION`]
+    /// is accepted, and serde defaults fill in the sections/fields the
+    /// older formats lacked (see the history on
+    /// [`EXPORT_FORMAT_VERSION`]). Anything outside that range — a
+    /// version-0 file, or one written by a newer build — is rejected so
+    /// an import never silently mangles a format it does not understand.
+    pub fn validate_version(&self) -> Result<(), String> {
+        if (MIN_EXPORT_FORMAT_VERSION..=EXPORT_FORMAT_VERSION).contains(&self.version) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Unsupported export version {}. This build imports versions {} through {}.",
+                self.version, MIN_EXPORT_FORMAT_VERSION, EXPORT_FORMAT_VERSION
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn export_version_shim_accepts_earlier_1x_and_rejects_the_rest() {
+        let data = |version: u32| ExportData {
+            version,
+            exported_at: String::new(),
+            products: Vec::new(),
+            product_variants: Vec::new(),
+            platform_mappings: Vec::new(),
+            platform_snapshots: Vec::new(),
+            xmr_processed_orders: Vec::new(),
+        };
+        for v in MIN_EXPORT_FORMAT_VERSION..=EXPORT_FORMAT_VERSION {
+            assert!(data(v).validate_version().is_ok(), "v{v} must import");
+        }
+        assert!(data(0).validate_version().is_err());
+        assert!(data(EXPORT_FORMAT_VERSION + 1).validate_version().is_err());
+    }
+
+    #[test]
+    fn variant_payload_without_newer_fields_uses_shim_defaults() {
+        // Export payloads from before on_hand_quantity / source links
+        // were serialized must still deserialize (compat shim), with the
+        // missing fields defaulted rather than dropping the variant.
+        let v: ProductVariant = serde_json::from_str(
+            r#"{"id":"v1","product_id":"p1","sku":"S","name":"N",
+                "attributes":{},"quantity":5,"image_url":null,
+                "sort_order":0,"created_at":"","updated_at":""}"#,
+        )
+        .unwrap();
+        assert_eq!(v.on_hand_quantity, 0);
+        assert!(v.source_plugin_id.is_none());
+        assert!(v.source_vendor_item_id.is_none());
+    }
 
     #[test]
     fn decimal_money_never_emits_f64_artifacts() {

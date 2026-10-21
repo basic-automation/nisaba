@@ -1975,7 +1975,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id, deleted_at
                  FROM platform_mappings WHERE product_id = ?1 AND deleted_at IS NULL",
                 params![product_id],
             )
@@ -1992,7 +1992,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id, deleted_at
                  FROM platform_mappings WHERE is_active = TRUE AND deleted_at IS NULL",
                 (),
             )
@@ -2013,7 +2013,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id, deleted_at
                  FROM platform_mappings WHERE platform = ?1 AND platform_item_id = ?2 AND deleted_at IS NULL",
                 params![platform, platform_item_id],
             )
@@ -2065,7 +2065,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id, deleted_at
                  FROM platform_mappings
                  WHERE product_id = ?1 AND platform = ?2
                    AND COALESCE(variant_id, '') = COALESCE(?3, '')
@@ -2987,11 +2987,16 @@ impl Db {
 
     // ── Export / Import ──────────────────────────────────────
 
+    /// Every mapping, *including* soft-deleted ones — the export path.
+    /// Tombstones carry their `deleted_at` in the returned structs so an
+    /// export/import round-trip keeps them deleted instead of reviving
+    /// them as active mappings the sync engine would push to (N-8.2).
+    /// Live-traffic callers want `list_all_active_mappings` instead.
     pub async fn list_all_mappings(&self) -> Result<Vec<PlatformMapping>, SyncError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id
+                "SELECT id, product_id, platform, platform_item_id, platform_sku, is_active, variant_id, deleted_at
                  FROM platform_mappings",
                 (),
             )
@@ -5138,7 +5143,28 @@ impl Db {
 
     // ── Export / Import ──────────────────────────────────────
 
+    /// Build the current-format export of the whole catalog (N-8.2).
+    /// The single construction site for [`ExportData`], so the Tauri
+    /// command and the round-trip test exercise exactly the same code.
+    pub async fn export_data(&self) -> Result<ExportData, SyncError> {
+        Ok(ExportData {
+            version: crate::types::EXPORT_FORMAT_VERSION,
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            products: self.list_products().await?,
+            product_variants: self.list_all_variants().await?,
+            platform_mappings: self.list_all_mappings().await?,
+            platform_snapshots: self.list_all_snapshots().await?,
+            xmr_processed_orders: self.list_xmr_processed_orders().await?,
+        })
+    }
+
+    /// Import an export of any supported format version (see
+    /// [`ExportData::validate_version`]). Lossless for format v3: variant
+    /// `on_hand_quantity` and source links, mapping ids and `deleted_at`
+    /// tombstones, and snapshot ids and `variant_id` all survive.
     pub async fn import_data(&self, data: &ExportData) -> Result<(), SyncError> {
+        data.validate_version().map_err(SyncError::DatabaseError)?;
+
         let conn = self.connect().await?;
 
         conn.execute("BEGIN IMMEDIATE", ()).await?;
@@ -5166,8 +5192,8 @@ impl Db {
             let attrs_json = serde_json::to_string(&variant.attributes)
                 .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
             conn.execute(
-                "INSERT OR REPLACE INTO product_variants (id, product_id, sku, name, attributes_json, quantity, image_url, sort_order, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO product_variants (id, product_id, sku, name, attributes_json, quantity, on_hand_quantity, image_url, sort_order, source_plugin_id, source_vendor_item_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     variant.id.clone(),
                     variant.product_id.clone(),
@@ -5175,8 +5201,11 @@ impl Db {
                     variant.name.clone(),
                     attrs_json,
                     variant.quantity,
+                    variant.on_hand_quantity,
                     variant.image_url.clone(),
                     variant.sort_order as i64,
+                    variant.source_plugin_id.clone(),
+                    variant.source_vendor_item_id.clone(),
                     variant.created_at.clone(),
                     variant.updated_at.clone(),
                 ],
@@ -5186,14 +5215,16 @@ impl Db {
 
         for mapping in &data.platform_mappings {
             conn.execute(
-                "INSERT OR IGNORE INTO platform_mappings (product_id, platform, platform_item_id, platform_sku, is_active, variant_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO platform_mappings (id, product_id, platform, platform_item_id, platform_sku, is_active, deleted_at, variant_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    mapping.id,
                     mapping.product_id.clone(),
                     mapping.platform.as_str(),
                     mapping.platform_item_id.clone(),
                     mapping.platform_sku.clone(),
                     mapping.is_active,
+                    mapping.deleted_at.clone(),
                     mapping.variant_id.clone(),
                 ],
             )
@@ -5202,11 +5233,13 @@ impl Db {
 
         for snapshot in &data.platform_snapshots {
             conn.execute(
-                "INSERT OR REPLACE INTO platform_snapshots (product_id, platform, last_known_quantity, last_polled_at, last_pushed_at, version_tag)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO platform_snapshots (id, product_id, platform, variant_id, last_known_quantity, last_polled_at, last_pushed_at, version_tag)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
+                    snapshot.id,
                     snapshot.product_id.clone(),
                     snapshot.platform.as_str(),
+                    snapshot.variant_id.clone().unwrap_or_default(),
                     snapshot.last_known_quantity,
                     snapshot.last_polled_at.clone(),
                     snapshot.last_pushed_at.clone(),
@@ -5810,6 +5843,7 @@ fn parse_mapping(row: &turso::Row) -> Result<PlatformMapping, SyncError> {
         platform_sku: row.get::<Option<String>>(4)?,
         is_active: row.get::<bool>(5)?,
         variant_id: row.get::<Option<String>>(6)?,
+        deleted_at: row.get::<Option<String>>(7)?,
     })
 }
 
@@ -6629,6 +6663,229 @@ mod tests {
             .await
             .unwrap();
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
+    // ── N-8.2: lossless, versioned export/import ─────────────────
+
+    #[tokio::test]
+    async fn export_import_round_trip_is_lossless() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Db::open(dir.path().join("src.db").to_str().unwrap())
+            .await
+            .unwrap();
+        src.migrate().await.unwrap();
+
+        // A product whose variant carries the fields the old importer
+        // dropped: on_hand distinct from quantity, and vendor source links.
+        src.insert_product(&Product {
+            id: "p-rt".to_string(),
+            canonical_sku: "SKU-RT".to_string(),
+            name: "Round Trip Widget".to_string(),
+            quantity: 7,
+            low_stock_threshold: Some(2),
+            is_tracked: true,
+            has_variants: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+        src.insert_variant(&ProductVariant {
+            id: "v-rt".to_string(),
+            product_id: "p-rt".to_string(),
+            sku: "SKU-RT-RED".to_string(),
+            name: "Red".to_string(),
+            attributes: [("color".to_string(), "red".to_string())]
+                .into_iter()
+                .collect(),
+            quantity: 7,
+            on_hand_quantity: 4,
+            image_url: Some("https://example.invalid/red.png".to_string()),
+            sort_order: 1,
+            source_plugin_id: Some("vendor-plugin".to_string()),
+            source_vendor_item_id: Some("VENDOR-ITEM-42".to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+
+        // One live mapping and one soft-deleted mapping (tombstone).
+        src.insert_mapping("p-rt", "ebay", "EBAY-LIVE", Some("SKU-RT-RED"), "v-rt")
+            .await
+            .unwrap();
+        src.insert_mapping("p-rt", "amazon", "AMZN-DEAD", Some("SKU-RT-RED"), "v-rt")
+            .await
+            .unwrap();
+        let dead_id = src
+            .list_all_mappings()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.platform_item_id == "AMZN-DEAD")
+            .unwrap()
+            .id;
+        src.delete_mapping(dead_id).await.unwrap();
+
+        // A variant-scoped snapshot with pushed_at + version_tag set,
+        // and an XMR processed order (no public insert helpers for these
+        // exact shapes, so seed them directly).
+        let conn = src.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO platform_snapshots (product_id, platform, variant_id, last_known_quantity, last_polled_at, last_pushed_at, version_tag)
+             VALUES ('p-rt', 'ebay', 'v-rt', 7, '2026-10-21 10:00:00', '2026-10-21 10:05:00', 'tag-1')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO xmr_processed_orders (order_id, product_id, listing_id, quantity, processed_at)
+             VALUES ('XMR-ORDER-1', 'p-rt', 'EBAY-LIVE', 2, '2026-10-21 10:10:00')",
+            (),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        // Export, go through JSON (the actual file format), re-import
+        // into an empty database.
+        let exported = src.export_data().await.unwrap();
+        assert_eq!(exported.version, crate::types::EXPORT_FORMAT_VERSION);
+        let json = serde_json::to_string(&exported).unwrap();
+        let parsed: ExportData = serde_json::from_str(&json).unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst = Db::open(dst_dir.path().join("dst.db").to_str().unwrap())
+            .await
+            .unwrap();
+        dst.migrate().await.unwrap();
+        dst.import_data(&parsed).await.unwrap();
+        let re_exported = dst.export_data().await.unwrap();
+
+        // Every covered section is identical after the round-trip.
+        let section = |d: &ExportData, pick: fn(&ExportData) -> serde_json::Value| pick(d);
+        assert_eq!(
+            section(&exported, |d| serde_json::to_value(&d.products).unwrap()),
+            section(&re_exported, |d| serde_json::to_value(&d.products).unwrap()),
+            "products differ after round-trip"
+        );
+        assert_eq!(
+            section(&exported, |d| serde_json::to_value(&d.product_variants)
+                .unwrap()),
+            section(&re_exported, |d| serde_json::to_value(&d.product_variants)
+                .unwrap()),
+            "variants differ after round-trip"
+        );
+        let mut m1 = exported.platform_mappings.clone();
+        let mut m2 = re_exported.platform_mappings.clone();
+        m1.sort_by_key(|m| m.id);
+        m2.sort_by_key(|m| m.id);
+        assert_eq!(
+            serde_json::to_value(&m1).unwrap(),
+            serde_json::to_value(&m2).unwrap(),
+            "mappings differ after round-trip"
+        );
+        assert_eq!(
+            section(&exported, |d| serde_json::to_value(&d.platform_snapshots)
+                .unwrap()),
+            section(&re_exported, |d| serde_json::to_value(
+                &d.platform_snapshots
+            )
+            .unwrap()),
+            "snapshots differ after round-trip"
+        );
+        assert_eq!(
+            section(&exported, |d| serde_json::to_value(&d.xmr_processed_orders)
+                .unwrap()),
+            section(&re_exported, |d| serde_json::to_value(
+                &d.xmr_processed_orders
+            )
+            .unwrap()),
+            "xmr orders differ after round-trip"
+        );
+
+        // The specific losses the old importer caused, asserted directly:
+        let variant = &re_exported.product_variants[0];
+        assert_eq!(variant.on_hand_quantity, 4);
+        assert_eq!(variant.quantity, 7);
+        assert_eq!(variant.source_plugin_id.as_deref(), Some("vendor-plugin"));
+        assert_eq!(
+            variant.source_vendor_item_id.as_deref(),
+            Some("VENDOR-ITEM-42")
+        );
+        // The tombstone stayed a tombstone — not revived as active.
+        let dead = re_exported
+            .platform_mappings
+            .iter()
+            .find(|m| m.platform_item_id == "AMZN-DEAD")
+            .expect("soft-deleted mapping must survive the round-trip");
+        assert!(dead.deleted_at.is_some(), "tombstone lost its deleted_at");
+        assert_eq!(
+            dst.list_mappings_for_product("p-rt").await.unwrap().len(),
+            1,
+            "only the live mapping is visible to live queries"
+        );
+        assert_eq!(
+            re_exported.platform_snapshots[0].variant_id.as_deref(),
+            Some("v-rt")
+        );
+    }
+
+    #[tokio::test]
+    async fn import_accepts_every_earlier_format_version() {
+        // v1: no product_variants section at all.
+        let v1_json = r#"{
+            "version": 1,
+            "exported_at": "2026-10-01T00:00:00Z",
+            "products": [{
+                "id": "p-v1", "canonical_sku": "SKU-V1", "name": "Legacy",
+                "quantity": 3, "low_stock_threshold": null, "is_tracked": true,
+                "has_variants": false,
+                "created_at": "2026-10-01 00:00:00", "updated_at": "2026-10-01 00:00:00"
+            }],
+            "platform_mappings": [],
+            "platform_snapshots": [],
+            "xmr_processed_orders": []
+        }"#;
+        let v1: ExportData = serde_json::from_str(v1_json).unwrap();
+        assert!(v1.validate_version().is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("v1.db").to_str().unwrap())
+            .await
+            .unwrap();
+        db.migrate().await.unwrap();
+        db.import_data(&v1).await.unwrap();
+        // The product landed, and the always-variants fixup rebuilt one.
+        assert_eq!(db.list_products().await.unwrap().len(), 1);
+        assert_eq!(db.list_all_variants().await.unwrap().len(), 1);
+
+        // v2: variants present but a mapping with no deleted_at field
+        // (the field did not exist yet) reads as a live mapping.
+        let v2_json = r#"{
+            "version": 2,
+            "exported_at": "2026-10-15T00:00:00Z",
+            "products": [],
+            "product_variants": [],
+            "platform_mappings": [{
+                "id": 5, "product_id": "p-v1", "platform": "ebay",
+                "platform_item_id": "EBAY-V2", "platform_sku": null,
+                "is_active": true, "variant_id": null
+            }],
+            "platform_snapshots": [],
+            "xmr_processed_orders": []
+        }"#;
+        let v2: ExportData = serde_json::from_str(v2_json).unwrap();
+        assert!(v2.validate_version().is_ok());
+        assert!(v2.platform_mappings[0].deleted_at.is_none());
+
+        // Out-of-range versions are rejected before anything is written.
+        for bad in [0u32, crate::types::EXPORT_FORMAT_VERSION + 1] {
+            let mut data = v1.clone();
+            data.version = bad;
+            assert!(data.validate_version().is_err());
+            assert!(db.import_data(&data).await.is_err());
+        }
     }
 
     fn deletable_product(id: &str) -> Product {
