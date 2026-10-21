@@ -229,7 +229,11 @@ def main():
         env = dict(os.environ, **{IN_NETNS: "1"})
         os.execvpe("unshare", ["unshare", "-rn", sys.executable, *sys.argv], env)
 
-    base = os.path.join(args.target_dir, args.profile)
+    # Resolve to an absolute path up front: the script later runs tauri-driver with
+    # cwd set to the temp fixture dir, and a relative path would make WebKitWebDriver
+    # look for target/debug/nisaba-tauri there instead of under the repo root.
+    target_dir = os.path.abspath(args.target_dir)
+    base = os.path.join(target_dir, args.profile)
     app = os.path.join(base, "nisaba-tauri")
     fixture = os.path.join(base, "examples", "ui_fixture")
     for path in (app, fixture):
