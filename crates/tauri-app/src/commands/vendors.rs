@@ -6,8 +6,10 @@ use std::sync::Arc;
 use base64::Engine as _;
 use nisaba_core::crypto::OsKeyringPluginSecrets;
 use nisaba_core::db::Db;
-use nisaba_core::types::{VendorListingCache, VendorPluginRow};
+use nisaba_core::types::{decimal_money, VendorListingCache, VendorPluginRow};
 use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
@@ -50,7 +52,10 @@ pub struct VendorPluginInfo {
 pub struct VendorListingResult {
     pub vendor_item_id: String,
     pub title: String,
-    pub price: Option<f64>,
+    /// Exact decimal; serializes as a JSON number so the frontend contract
+    /// (`price: number | null`) is unchanged (N-6.1).
+    #[serde(with = "decimal_money::option")]
+    pub price: Option<Decimal>,
     pub currency: Option<String>,
     pub quantity: Option<i64>,
     pub sku: Option<String>,
@@ -85,7 +90,9 @@ fn listing_to_cache(
         plugin_id: plugin_id.to_string(),
         vendor_item_id: l.vendor_item_id.clone(),
         title: l.title.clone(),
-        price: l.price,
+        // Plugin prices arrive as JSON numbers (f64); convert via the
+        // shortest round-trip representation so 19.99 stays 19.99.
+        price: l.price.and_then(Decimal::from_f64),
         currency: l.currency.clone(),
         quantity: l.quantity,
         sku: l.sku.clone(),
@@ -1048,7 +1055,7 @@ pub async fn fetch_vendor_listings(
         .map(|l| VendorListingResult {
             vendor_item_id: l.vendor_item_id,
             title: l.title,
-            price: l.price,
+            price: l.price.and_then(Decimal::from_f64),
             currency: l.currency,
             quantity: l.quantity,
             sku: l.sku,
@@ -1267,7 +1274,10 @@ pub struct VendorListingForProduct {
     pub variant_id: Option<String>,
     pub vendor_item_id: String,
     pub title: String,
-    pub price: Option<f64>,
+    /// Exact decimal; serializes as a JSON number so the frontend contract
+    /// (`price: number | null`) is unchanged (N-6.1).
+    #[serde(with = "decimal_money::option")]
+    pub price: Option<Decimal>,
     pub currency: Option<String>,
     pub quantity: Option<i64>,
     pub sku: Option<String>,
@@ -1414,7 +1424,7 @@ pub async fn import_vendor_listings(
                 plugin_id: plugin_id.clone(),
                 vendor_item_id: item.vendor_item_id.clone(),
                 title: item.title.clone(),
-                price: item.price,
+                price: item.price.and_then(Decimal::from_f64),
                 currency: item.currency.clone(),
                 quantity: Some(item.quantity),
                 sku: Some(item.sku.clone()),
@@ -1487,7 +1497,7 @@ pub async fn import_vendor_listings(
             plugin_id: plugin_id.clone(),
             vendor_item_id: item.vendor_item_id.clone(),
             title: item.title.clone(),
-            price: item.price,
+            price: item.price.and_then(Decimal::from_f64),
             currency: item.currency.clone(),
             quantity: Some(item.quantity),
             sku: Some(item.sku.clone()),

@@ -113,7 +113,7 @@ fn a_single_variant_product_keeps_the_plain_product_name() {
     assert_eq!(cap.title, "Wool Watch Cap");
     assert_eq!(cap.sku.as_deref(), Some("CAP-001"));
     assert_eq!(cap.quantity, 12);
-    assert_eq!(cap.price, Some(24.00));
+    assert_eq!(cap.price, Some(rust_decimal::Decimal::new(2400, 2)));
     assert_eq!(cap.group_key.as_deref(), Some("prod_single"));
 }
 
@@ -160,7 +160,7 @@ fn a_variant_missing_from_the_inventory_response_is_reported_as_zero() {
     assert_eq!(large.quantity, 0);
     assert_eq!(
         large.price,
-        Some(52.50),
+        Some(rust_decimal::Decimal::new(5250, 2)),
         "its price still comes from the product"
     );
 }
@@ -212,7 +212,7 @@ fn a_full_listing_carries_price_description_and_every_photo() {
     assert_eq!(full.quantity, 12);
 
     let price = full.price.expect("a base price");
-    assert_eq!(price.amount, 24.00);
+    assert_eq!(price.amount, rust_decimal::Decimal::new(2400, 2));
     assert_eq!(price.currency, "USD");
 
     let description = full.description.expect("a description");

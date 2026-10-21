@@ -11,10 +11,21 @@ use nisaba_core::types::{
     CreateListingRequest, FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform,
     PlatformCapabilities, PlatformInventoryItem, PlatformListing, UpdateListingRequest,
 };
+use rust_decimal::Decimal;
 use tracing::info;
 
 use crate::auth::SquarespaceAuth;
 use crate::client::SquarespaceClient;
+
+/// The (value, currency) pair a listing create submits for its price.
+/// `Decimal::to_string` is exact, so a computed 0.30 is never sent as
+/// 0.30000000000000004 (N-6.1).
+fn price_value_and_currency(price: Option<&ListingPrice>) -> (String, String) {
+    match price {
+        Some(p) => (p.amount.to_string(), p.currency.clone()),
+        None => ("0".to_string(), "USD".to_string()),
+    }
+}
 
 pub struct SquarespaceAdapter {
     auth: SquarespaceAuth,
@@ -215,7 +226,7 @@ impl PlatformAdapter for SquarespaceAdapter {
                         .as_ref()
                         .and_then(|p| p.base_price.as_ref())
                         .and_then(|bp| {
-                            let amount = bp.value.as_ref()?.parse::<f64>().ok()?;
+                            let amount = bp.value.as_ref()?.parse::<Decimal>().ok()?;
                             let currency = bp.currency.clone().unwrap_or_else(|| "USD".to_string());
                             Some(ListingPrice { amount, currency })
                         });
@@ -270,10 +281,7 @@ impl PlatformAdapter for SquarespaceAdapter {
         };
 
         // Build pricing
-        let (price_value, price_currency) = match &request.price {
-            Some(p) => (p.amount.to_string(), p.currency.clone()),
-            None => ("0".to_string(), "USD".to_string()),
-        };
+        let (price_value, price_currency) = price_value_and_currency(request.price.as_ref());
 
         let create_req = crate::types::SquarespaceCreateProductRequest {
             product_type: "PHYSICAL".to_string(),
@@ -367,10 +375,12 @@ impl PlatformAdapter for SquarespaceAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::SquarespaceAdapter;
+    use super::{price_value_and_currency, SquarespaceAdapter};
     use nisaba_core::config::SquarespaceConfig;
     use nisaba_core::traits::PlatformAdapter;
     use nisaba_core::types::{ListingPrice, UpdateListingRequest};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     fn adapter() -> SquarespaceAdapter {
         SquarespaceAdapter::new(&SquarespaceConfig {
@@ -399,7 +409,7 @@ mod tests {
             .update_listing(
                 "var_1",
                 request(Some(ListingPrice {
-                    amount: 19.99,
+                    amount: Decimal::new(1999, 2),
                     currency: "USD".to_string(),
                 })),
             )
@@ -408,6 +418,31 @@ mod tests {
         assert!(
             err.to_string().contains("price"),
             "error should name the dropped field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_computed_price_is_serialized_exactly_not_as_f64_artifact() {
+        // N-6.1: 0.1 + 0.2 in f64 is 0.30000000000000004; the Squarespace
+        // create payload must carry "0.3".
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        let (value, currency) = price_value_and_currency(Some(&ListingPrice {
+            amount,
+            currency: "USD".to_string(),
+        }));
+        assert_eq!(value, "0.3");
+        assert_eq!(currency, "USD");
+        assert!(
+            !value.contains("0.30000000000000004"),
+            "f64 artifact leaked into the Squarespace price value: {value}"
+        );
+    }
+
+    #[test]
+    fn a_missing_price_still_defaults_to_zero_usd() {
+        assert_eq!(
+            price_value_and_currency(None),
+            ("0".to_string(), "USD".to_string())
         );
     }
 }

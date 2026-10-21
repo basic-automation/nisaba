@@ -5,6 +5,9 @@ use tracing::{debug, info, warn};
 use turso::params::Params;
 use turso::{params, Builder, Connection, Database, Error as TursoError};
 
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
+
 use crate::config::CompanyRegistryEntry;
 use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
@@ -15,12 +18,33 @@ use crate::types::{
     VendorPluginRow, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 23;
+const CURRENT_SCHEMA_VERSION: i64 = 24;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
 fn to_params(p: impl turso::params::IntoParams) -> Params {
     p.into_params().expect("param conversion should not fail")
+}
+
+/// Parse an exact-decimal money column (stored as TEXT, N-6.1).
+fn parse_decimal(col: &str, s: &str) -> Result<Decimal, SyncError> {
+    s.parse::<Decimal>()
+        .map_err(|e| SyncError::DatabaseError(format!("invalid decimal in {col}: {e}")))
+}
+
+/// Parse an optional exact-decimal money column (stored as TEXT, N-6.1).
+fn parse_decimal_opt(col: &str, s: Option<String>) -> Result<Option<Decimal>, SyncError> {
+    s.map(|v| parse_decimal(col, &v)).transpose()
+}
+
+/// Bind a money amount for storage: the exact decimal text (N-6.1).
+fn decimal_param(d: &Decimal) -> String {
+    d.to_string()
+}
+
+/// Bind an optional money amount for storage (N-6.1).
+fn decimal_param_opt(d: Option<&Decimal>) -> Option<String> {
+    d.map(|v| v.to_string())
 }
 
 /// Check if a turso error is retryable under MVCC concurrent transactions.
@@ -719,13 +743,15 @@ impl Db {
                     let mut enrichments = Vec::new();
                     while let Some(row) = cache_rows.next().await? {
                         enrichments.push((
-                            row.get::<String>(0)?,         // plugin_id
-                            row.get::<String>(1)?,         // vendor_item_id
-                            row.get::<Option<f64>>(2)?,    // price
-                            row.get::<Option<String>>(3)?, // currency
-                            row.get::<Option<String>>(4)?, // url
-                            row.get::<String>(5)?,         // extras_json
-                            row.get::<Option<String>>(6)?, // group_key
+                            row.get::<String>(0)?, // plugin_id
+                            row.get::<String>(1)?, // vendor_item_id
+                            // REAL at bootstrap time; migration 024 converts
+                            // the column to TEXT afterwards.
+                            row.get::<Option<f64>>(2)?.and_then(Decimal::from_f64), // price
+                            row.get::<Option<String>>(3)?,                          // currency
+                            row.get::<Option<String>>(4)?,                          // url
+                            row.get::<String>(5)?,                                  // extras_json
+                            row.get::<Option<String>>(6)?,                          // group_key
                         ));
                     }
 
@@ -733,7 +759,15 @@ impl Db {
                         conn.execute(
                             "UPDATE product_vendor_data SET price = ?1, currency = ?2, url = ?3, extras_json = ?4, group_key = ?5
                              WHERE plugin_id = ?6 AND vendor_item_id = ?7",
-                            params![price, currency, url, extras_json, group_key, pid, vid],
+                            params![
+                                decimal_param_opt(price.as_ref()),
+                                currency,
+                                url,
+                                extras_json,
+                                group_key,
+                                pid,
+                                vid
+                            ],
                         )
                         .await?;
                     }
@@ -1066,6 +1100,135 @@ impl Db {
                 )
                 .await?;
                 debug!("Applied migration 023: partial unique indexes on platform_mappings");
+            }
+            24 => {
+                // Decimal money end to end (N-6.1): price/amount columns were
+                // REAL, so a computed price could be stored and re-serialized
+                // as 0.30000000000000004. They are now TEXT holding the exact
+                // decimal string. SQLite's REAL affinity would coerce TEXT
+                // back to REAL on write, so the columns must be rebuilt, not
+                // just left in place. Existing REAL values convert via CAST,
+                // which renders the shortest round-trip text ("19.99").
+                //
+                // The _v2 rebuild pattern follows migrations 016/021/023
+                // (turso cannot DROP INDEX, but DROP TABLE + RENAME works).
+                //
+                // Idempotency: migrate() can run twice on one database (the
+                // stock-ledger backfill test resets user_version and
+                // re-migrates). A second run would collide: turso keeps the
+                // autoindex name across ALTER TABLE RENAME, so recreating
+                // product_vendor_data_v2 errors with
+                // `sqlite_autoindex_product_vendor_data_v2_1 already exists`.
+                // Skip the rebuild when the columns are already TEXT.
+                let mut pragma_rows = conn
+                    .query(
+                        "SELECT type FROM pragma_table_info('pricing_snapshots') WHERE name = 'amount'",
+                        (),
+                    )
+                    .await?;
+                let already_decimal = match pragma_rows.next().await? {
+                    Some(row) => row.get::<String>(0)?.eq_ignore_ascii_case("TEXT"),
+                    None => false,
+                };
+                drop(pragma_rows);
+                if already_decimal {
+                    debug!("Skipping migration 024: money columns are already TEXT");
+                } else {
+                    conn.execute_batch(
+                        "CREATE TABLE IF NOT EXISTS pricing_snapshots_v2 (
+                        id          INTEGER PRIMARY KEY,
+                        product_id  TEXT NOT NULL REFERENCES products(id),
+                        platform    TEXT NOT NULL,
+                        amount      TEXT NOT NULL,
+                        currency    TEXT NOT NULL DEFAULT 'USD',
+                        recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    );
+                    INSERT OR IGNORE INTO pricing_snapshots_v2
+                        (id, product_id, platform, amount, currency, recorded_at)
+                        SELECT id, product_id, platform, CAST(amount AS TEXT), currency, recorded_at
+                        FROM pricing_snapshots;
+                    DROP TABLE pricing_snapshots;
+                    ALTER TABLE pricing_snapshots_v2 RENAME TO pricing_snapshots;
+                    CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_product_time
+                        ON pricing_snapshots(product_id, recorded_at);",
+                    )
+                    .await?;
+
+                    conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS vendor_listings_cache_v2 (
+                        id                 INTEGER PRIMARY KEY,
+                        plugin_id          TEXT NOT NULL,
+                        vendor_item_id     TEXT NOT NULL,
+                        title              TEXT NOT NULL,
+                        price              TEXT,
+                        currency           TEXT,
+                        quantity           INTEGER,
+                        sku                TEXT,
+                        image_url          TEXT,
+                        url                TEXT,
+                        extras_json        TEXT NOT NULL DEFAULT '{}',
+                        group_key          TEXT,
+                        variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                        fetched_at         TEXT NOT NULL DEFAULT (datetime('now'))
+                    );
+                    INSERT OR IGNORE INTO vendor_listings_cache_v2
+                        (id, plugin_id, vendor_item_id, title, price, currency, quantity, sku,
+                         image_url, url, extras_json, group_key, variant_attrs_json, fetched_at)
+                        SELECT id, plugin_id, vendor_item_id, title, CAST(price AS TEXT), currency, quantity, sku,
+                         image_url, url, extras_json, group_key, variant_attrs_json, fetched_at
+                        FROM vendor_listings_cache;
+                    DROP TABLE vendor_listings_cache;
+                    ALTER TABLE vendor_listings_cache_v2 RENAME TO vendor_listings_cache;
+                    -- The UNIQUE(plugin_id, vendor_item_id) table constraint is
+                    -- recreated as a *named* unique index: an inline UNIQUE
+                    -- would mint sqlite_autoindex_vendor_listings_cache_v2_1,
+                    -- which still exists under that name from migration 016's
+                    -- rebuild (turso does not rename indexes on
+                    -- ALTER TABLE RENAME), and the CREATE TABLE would fail.
+                    -- INSERT OR REPLACE conflict detection works the same on
+                    -- a unique index.
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_vlc_plugin_item
+                        ON vendor_listings_cache(plugin_id, vendor_item_id);
+                    CREATE INDEX IF NOT EXISTS idx_vlc_plugin ON vendor_listings_cache(plugin_id);",
+                )
+                .await?;
+
+                    conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS product_vendor_data_v2 (
+                        product_id         TEXT NOT NULL,
+                        variant_id         TEXT,
+                        plugin_id          TEXT NOT NULL,
+                        vendor_item_id     TEXT NOT NULL,
+                        title              TEXT NOT NULL,
+                        price              TEXT,
+                        currency           TEXT,
+                        quantity           INTEGER,
+                        sku                TEXT,
+                        image_url          TEXT,
+                        url                TEXT,
+                        extras_json        TEXT NOT NULL DEFAULT '{}',
+                        group_key          TEXT,
+                        variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                        fetched_at         TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (product_id, plugin_id, vendor_item_id)
+                    );
+                    INSERT OR IGNORE INTO product_vendor_data_v2
+                        (product_id, variant_id, plugin_id, vendor_item_id, title, price, currency,
+                         quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json,
+                         fetched_at, updated_at)
+                        SELECT product_id, variant_id, plugin_id, vendor_item_id, title, CAST(price AS TEXT), currency,
+                         quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json,
+                         fetched_at, updated_at
+                        FROM product_vendor_data;
+                    DROP TABLE product_vendor_data;
+                    ALTER TABLE product_vendor_data_v2 RENAME TO product_vendor_data;
+                    CREATE INDEX IF NOT EXISTS idx_pvd_product ON product_vendor_data(product_id);
+                    CREATE INDEX IF NOT EXISTS idx_pvd_plugin_item ON product_vendor_data(plugin_id, vendor_item_id);",
+                )
+                .await?;
+                    debug!("Applied migration 024: decimal money columns (REAL -> TEXT)");
+                }
             }
             _ => {}
         }
@@ -2315,13 +2478,13 @@ impl Db {
         &self,
         product_id: &str,
         platform: &str,
-        amount: f64,
+        amount: Decimal,
         currency: &str,
     ) -> Result<(), SyncError> {
         self.execute_write(
             "INSERT INTO pricing_snapshots (product_id, platform, amount, currency)
              VALUES (?1, ?2, ?3, ?4)",
-            params![product_id, platform, amount, currency],
+            params![product_id, platform, decimal_param(&amount), currency],
         )
         .await?;
         Ok(())
@@ -2365,7 +2528,7 @@ impl Db {
                 product_id: row.get::<String>(1)?,
                 platform: Platform::from_str_loose(&row.get::<String>(2)?)
                     .unwrap_or(Platform::Ebay),
-                amount: row.get::<f64>(3)?,
+                amount: parse_decimal("pricing_snapshots.amount", &row.get::<String>(3)?)?,
                 currency: row.get::<String>(4)?,
                 recorded_at: row.get::<String>(5)?,
             });
@@ -2401,7 +2564,7 @@ impl Db {
                 product_id: row.get::<String>(1)?,
                 platform: Platform::from_str_loose(&row.get::<String>(2)?)
                     .unwrap_or(Platform::Ebay),
-                amount: row.get::<f64>(3)?,
+                amount: parse_decimal("pricing_snapshots.amount", &row.get::<String>(3)?)?,
                 currency: row.get::<String>(4)?,
                 recorded_at: row.get::<String>(5)?,
             });
@@ -2434,7 +2597,7 @@ impl Db {
                 product_id: row.get::<String>(1)?,
                 platform: Platform::from_str_loose(&row.get::<String>(2)?)
                     .unwrap_or(Platform::Ebay),
-                amount: row.get::<f64>(3)?,
+                amount: parse_decimal("pricing_snapshots.amount", &row.get::<String>(3)?)?,
                 currency: row.get::<String>(4)?,
                 recorded_at: row.get::<String>(5)?,
             });
@@ -4063,7 +4226,7 @@ impl Db {
                     plugin_id,
                     l.vendor_item_id.clone(),
                     l.title.clone(),
-                    l.price,
+                    decimal_param_opt(l.price.as_ref()),
                     l.currency.clone(),
                     l.quantity,
                     l.sku.clone(),
@@ -4106,7 +4269,10 @@ impl Db {
                 plugin_id: row.get::<String>(0)?,
                 vendor_item_id: row.get::<String>(1)?,
                 title: row.get::<String>(2)?,
-                price: row.get::<Option<f64>>(3)?,
+                price: parse_decimal_opt(
+                    "vendor_listings_cache.price",
+                    row.get::<Option<String>>(3)?,
+                )?,
                 currency: row.get::<Option<String>>(4)?,
                 quantity: row.get::<Option<i64>>(5)?,
                 sku: row.get::<Option<String>>(6)?,
@@ -4178,7 +4344,7 @@ impl Db {
                 plugin_id,
                 listing.vendor_item_id.clone(),
                 listing.title.clone(),
-                listing.price,
+                decimal_param_opt(listing.price.as_ref()),
                 listing.currency.clone(),
                 listing.quantity,
                 listing.sku.clone(),
@@ -4225,7 +4391,10 @@ impl Db {
                     plugin_id: row.get::<String>(1)?,
                     vendor_item_id: row.get::<String>(2)?,
                     title: row.get::<String>(3)?,
-                    price: row.get::<Option<f64>>(4)?,
+                    price: parse_decimal_opt(
+                        "product_vendor_data.price",
+                        row.get::<Option<String>>(4)?,
+                    )?,
                     currency: row.get::<Option<String>>(5)?,
                     quantity: row.get::<Option<i64>>(6)?,
                     sku: row.get::<Option<String>>(7)?,
@@ -4267,7 +4436,7 @@ impl Db {
                  WHERE plugin_id = ?12 AND vendor_item_id = ?13",
                 to_params(params![
                     l.title.clone(),
-                    l.price,
+                    decimal_param_opt(l.price.as_ref()),
                     l.currency.clone(),
                     l.quantity,
                     l.sku.clone(),
@@ -4708,6 +4877,7 @@ fn parse_variant(row: &turso::Row) -> Result<ProductVariant, SyncError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_db_open_and_migrate() {
@@ -5558,7 +5728,7 @@ mod tests {
         db.save_listing_photo("p-del", "ebay", "ITEM-1", "https://img/1.jpg", 0)
             .await
             .unwrap();
-        db.record_pricing_snapshot("p-del", "ebay", 9.99, "USD")
+        db.record_pricing_snapshot("p-del", "ebay", Decimal::new(999, 2), "USD")
             .await
             .unwrap();
         db.save_cached_listing("p-del", "ebay", "ITEM-1", "{}")
@@ -6733,5 +6903,170 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].quantity, 9);
         assert_eq!(history[1].quantity, 4);
+    }
+
+    /// N-6.1: a computed price must round-trip through the DB exactly.
+    /// 0.1 + 0.2 in f64 is 0.30000000000000004; in Decimal it is 0.3, and the
+    /// TEXT column must hold "0.3".
+    #[tokio::test]
+    async fn pricing_snapshot_round_trips_an_exact_decimal() {
+        let (_dir, db) = migrated_test_db("money-snapshot.db").await;
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        db.record_pricing_snapshot("p1", "ebay", amount, "USD")
+            .await
+            .unwrap();
+
+        let prices = db.get_latest_prices("p1").await.unwrap();
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[0].amount.to_string(), "0.3");
+        assert!(
+            !prices[0].amount.to_string().contains("0.30000000000000004"),
+            "f64 artifact survived the DB round-trip"
+        );
+
+        // The stored value is TEXT holding the exact decimal, not a REAL.
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT amount, typeof(amount) FROM pricing_snapshots", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "0.3");
+        assert_eq!(row.get::<String>(1).unwrap(), "text");
+    }
+
+    /// N-6.1: vendor cache prices round-trip exactly too.
+    #[tokio::test]
+    async fn vendor_cache_price_round_trips_an_exact_decimal() {
+        let (_dir, db) = migrated_test_db("money-vendor.db").await;
+        let listing = VendorListingCache {
+            plugin_id: "plug".to_string(),
+            vendor_item_id: "VI-1".to_string(),
+            title: "Widget".to_string(),
+            price: Some(Decimal::from_str("19.99").unwrap()),
+            currency: Some("USD".to_string()),
+            quantity: Some(3),
+            sku: None,
+            image_url: None,
+            url: None,
+            extras: HashMap::new(),
+            group_key: None,
+            variant_attributes: HashMap::new(),
+            fetched_at: "2026-10-20 00:00:00".to_string(),
+        };
+        db.save_vendor_listings_cache("plug", &[listing])
+            .await
+            .unwrap();
+
+        let rows = db.get_vendor_listings_cache("plug").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].price.map(|d| d.to_string()),
+            Some("19.99".to_string())
+        );
+
+        db.save_product_vendor_data("p1", "v1", "plug", &rows[0])
+            .await
+            .unwrap();
+        let pvd = db.get_product_vendor_data("p1").await.unwrap();
+        assert_eq!(pvd.len(), 1);
+        assert_eq!(
+            pvd[0].2.price.map(|d| d.to_string()),
+            Some("19.99".to_string())
+        );
+    }
+
+    /// N-6.1: migration 024 converts legacy REAL price columns to TEXT
+    /// holding the exact decimal string, preserving every row.
+    #[tokio::test]
+    async fn migration_024_converts_legacy_real_price_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-money.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        // Pre-24 shape of the three money tables (REAL price/amount).
+        conn.execute_batch(
+            "CREATE TABLE pricing_snapshots (
+                id INTEGER PRIMARY KEY, product_id TEXT NOT NULL, platform TEXT NOT NULL,
+                amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'USD',
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now')));
+             INSERT INTO pricing_snapshots (product_id, platform, amount, currency)
+                VALUES ('p1', 'ebay', 19.99, 'USD');
+             CREATE TABLE vendor_listings_cache (
+                id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, vendor_item_id TEXT NOT NULL,
+                title TEXT NOT NULL, price REAL, currency TEXT, quantity INTEGER, sku TEXT,
+                image_url TEXT, url TEXT, extras_json TEXT NOT NULL DEFAULT '{}',
+                group_key TEXT, variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(plugin_id, vendor_item_id));
+             INSERT INTO vendor_listings_cache (plugin_id, vendor_item_id, title, price, currency)
+                VALUES ('plug', 'VI-1', 'Widget', 0.3, 'USD');
+             CREATE TABLE product_vendor_data (
+                product_id TEXT NOT NULL, variant_id TEXT, plugin_id TEXT NOT NULL,
+                vendor_item_id TEXT NOT NULL, title TEXT NOT NULL, price REAL, currency TEXT,
+                quantity INTEGER, sku TEXT, image_url TEXT, url TEXT,
+                extras_json TEXT NOT NULL DEFAULT '{}', group_key TEXT,
+                variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (product_id, plugin_id, vendor_item_id));
+             INSERT INTO product_vendor_data (product_id, plugin_id, vendor_item_id, title, price, currency)
+                VALUES ('p1', 'plug', 'VI-1', 'Widget', 48.5, 'EUR');",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(24).await.unwrap();
+
+        let conn = db.connect().await.unwrap();
+        // Declared types are TEXT now.
+        for (table, col) in [
+            ("pricing_snapshots", "amount"),
+            ("vendor_listings_cache", "price"),
+            ("product_vendor_data", "price"),
+        ] {
+            let mut rows = conn
+                .query(
+                    &format!("SELECT type FROM pragma_table_info('{table}') WHERE name = '{col}'"),
+                    (),
+                )
+                .await
+                .unwrap();
+            let row = rows.next().await.unwrap().unwrap();
+            assert_eq!(
+                row.get::<String>(0).unwrap(),
+                "TEXT",
+                "{table}.{col} should be TEXT after migration 024"
+            );
+        }
+        // Values survived as exact decimal text.
+        let mut rows = conn
+            .query("SELECT amount, typeof(amount) FROM pricing_snapshots", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "19.99");
+        assert_eq!(row.get::<String>(1).unwrap(), "text");
+
+        let mut rows = conn
+            .query("SELECT price, typeof(price) FROM vendor_listings_cache", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "0.3");
+        assert_eq!(row.get::<String>(1).unwrap(), "text");
+
+        let mut rows = conn
+            .query(
+                "SELECT price, typeof(price), currency FROM product_vendor_data",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), "48.5");
+        assert_eq!(row.get::<String>(1).unwrap(), "text");
+        assert_eq!(row.get::<String>(2).unwrap(), "EUR");
     }
 }

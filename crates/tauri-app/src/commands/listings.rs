@@ -7,6 +7,8 @@ use nisaba_core::types::{
 };
 use nisaba_ebay::types::{EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion};
 use nisaba_ebay::EbayAdapter;
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use tauri::State;
 
 use crate::state::AppState;
@@ -392,7 +394,13 @@ pub async fn create_listing_on_platform(
     ensure_auth(tgt_adapter.as_ref()).await?;
 
     let price = match (params.price_amount, params.price_currency) {
-        (Some(amount), Some(currency)) => Some(ListingPrice { amount, currency }),
+        (Some(amount), Some(currency)) => {
+            // The frontend speaks JSON numbers (f64); convert via the
+            // shortest round-trip representation so 19.99 stays 19.99.
+            let amount = Decimal::from_f64(amount)
+                .ok_or_else(|| format!("Invalid price amount: {amount}"))?;
+            Some(ListingPrice { amount, currency })
+        }
         _ => None,
     };
 
@@ -493,7 +501,13 @@ pub async fn update_listing_on_platform(
     ensure_auth(adapter.as_ref()).await?;
 
     let price = match (params.price_amount, params.price_currency) {
-        (Some(amount), Some(currency)) => Some(ListingPrice { amount, currency }),
+        (Some(amount), Some(currency)) => {
+            // The frontend speaks JSON numbers (f64); convert via the
+            // shortest round-trip representation so 19.99 stays 19.99.
+            let amount = Decimal::from_f64(amount)
+                .ok_or_else(|| format!("Invalid price amount: {amount}"))?;
+            Some(ListingPrice { amount, currency })
+        }
         _ => None,
     };
 

@@ -16,6 +16,7 @@ use nisaba_core::types::{
     CreateListingRequest, FullListing, ListingPrice, Platform, PlatformCapabilities,
     PlatformInventoryItem, PlatformListing,
 };
+use rust_decimal::Decimal;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -307,7 +308,11 @@ impl PlatformAdapter for AmazonAdapter {
             .cloned()
             .unwrap_or_else(|| "PRODUCT".to_string());
 
-        let price_amount = request.price.as_ref().map(|p| p.amount).unwrap_or(0.0);
+        let price_amount = request
+            .price
+            .as_ref()
+            .map(|p| p.amount)
+            .unwrap_or(Decimal::ZERO);
         let price_currency = request
             .price
             .as_ref()

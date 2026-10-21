@@ -16,6 +16,7 @@ use nisaba_core::types::{
     CreateListingRequest, FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform,
     PlatformCapabilities, PlatformInventoryItem, PlatformListing, UpdateListingRequest,
 };
+use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
 use crate::types::{
@@ -276,13 +277,15 @@ impl PlatformAdapter for EbayAdapter {
         match self.client.fetch_all_offers(&token).await {
             Ok(offers) => {
                 // Build SKU → price map from offers
-                let mut sku_prices: std::collections::HashMap<String, f64> =
+                let mut sku_prices: std::collections::HashMap<String, Decimal> =
                     std::collections::HashMap::new();
                 for offer in &offers {
                     if let (Some(sku), Some(pricing)) = (&offer.sku, &offer.pricing_summary) {
                         if let Some(amount) = &pricing.price {
-                            if let Some(val) =
-                                amount.value.as_ref().and_then(|v| v.parse::<f64>().ok())
+                            if let Some(val) = amount
+                                .value
+                                .as_ref()
+                                .and_then(|v| v.parse::<Decimal>().ok())
                             {
                                 sku_prices.insert(sku.clone(), val);
                             }
@@ -434,7 +437,7 @@ impl PlatformAdapter for EbayAdapter {
                 let pricing = offer.pricing_summary.as_ref()?;
                 let amount = pricing.price.as_ref()?;
                 let value_str = amount.value.as_ref()?;
-                let value: f64 = value_str.parse().ok()?;
+                let value: Decimal = value_str.parse().ok()?;
                 let currency = amount.currency.clone().unwrap_or_else(|| "USD".to_string());
                 Some(ListingPrice {
                     amount: value,
@@ -675,7 +678,7 @@ impl PlatformAdapter for EbayAdapter {
 
         // Step 2: Create an offer for this item
         let price = request.price.unwrap_or(ListingPrice {
-            amount: 0.0,
+            amount: Decimal::ZERO,
             currency: "USD".to_string(),
         });
 
@@ -895,7 +898,7 @@ mod tests {
             .set_price(
                 "SKU-1",
                 ListingPrice {
-                    amount: 19.99,
+                    amount: Decimal::new(1999, 2),
                     currency: "USD".to_string(),
                 },
             )
@@ -927,7 +930,7 @@ mod tests {
             .set_price(
                 "SKU-1",
                 ListingPrice {
-                    amount: 9.99,
+                    amount: Decimal::new(999, 2),
                     currency: "USD".to_string(),
                 },
             )

@@ -31,7 +31,7 @@ deno_ast = { version = "0.53", features = ["transpiling"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13", features = ["cookies", "json", "multipart", "form", "rustls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 toml = "1.0"
 figment = { version = "0.10", features = ["toml", "env"] }
 turso = "0.5.0"
@@ -51,5 +51,6 @@ artiqwest = "0.4.1"
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+rust_decimal = { version = "1", features = ["serde"] }
 keyring = { version = "3", features = ["sync-secret-service", "windows-native", "apple-native"] }
 base64 = "0.22"

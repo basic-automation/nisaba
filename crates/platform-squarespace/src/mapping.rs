@@ -5,6 +5,7 @@ use nisaba_core::types::{
     FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform, PlatformInventoryItem,
     PlatformListing,
 };
+use rust_decimal::Decimal;
 
 use crate::types::{SquarespaceInventoryItem, SquarespaceProduct};
 
@@ -82,7 +83,7 @@ pub fn to_listings(
                     .as_ref()
                     .and_then(|p| p.base_price.as_ref())
                     .and_then(|bp| bp.value.as_ref())
-                    .and_then(|v| v.parse::<f64>().ok());
+                    .and_then(|v| v.parse::<Decimal>().ok());
 
                 listings.push(PlatformListing {
                     platform_item_id: variant.id.clone(),
@@ -137,7 +138,7 @@ pub fn to_full_listing(
         .as_ref()
         .and_then(|p| p.base_price.as_ref())
         .and_then(|bp| {
-            let amount = bp.value.as_ref()?.parse::<f64>().ok()?;
+            let amount = bp.value.as_ref()?.parse::<Decimal>().ok()?;
             let currency = bp.currency.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice { amount, currency })
         });

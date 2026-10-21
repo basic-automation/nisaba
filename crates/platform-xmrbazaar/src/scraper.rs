@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use scraper::{ElementRef, Html, Selector};
 use tracing::debug;
 
@@ -118,7 +119,7 @@ pub fn parse_listings(html: &str, base_url: &str) -> Vec<XmrListing> {
                 text.trim()
                     .replace(['$', ',', '€', '£'], "")
                     .trim()
-                    .parse::<f64>()
+                    .parse::<Decimal>()
                     .ok()
             });
 
@@ -459,7 +460,7 @@ fn extract_photos_from_page(document: &Html, base_url: &str) -> Vec<String> {
 }
 
 /// Extract price from form input fields.
-fn extract_price_from_form(document: &Html) -> Option<f64> {
+fn extract_price_from_form(document: &Html) -> Option<Decimal> {
     let price_selectors = [
         "input[name='price']",
         "input[name='amount']",
@@ -472,7 +473,7 @@ fn extract_price_from_form(document: &Html) -> Option<f64> {
             if let Some(el) = document.select(&sel).next() {
                 if let Some(value) = el.value().attr("value") {
                     let cleaned = value.trim().replace(['$', ',', '€', '£'], "");
-                    if let Ok(price) = cleaned.trim().parse::<f64>() {
+                    if let Ok(price) = cleaned.trim().parse::<Decimal>() {
                         return Some(price);
                     }
                 }

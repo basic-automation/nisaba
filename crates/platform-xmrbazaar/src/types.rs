@@ -1,9 +1,11 @@
+use rust_decimal::Decimal;
+
 /// A parsed listing from XMR Bazaar's HTML.
 #[derive(Debug, Clone)]
 pub struct XmrListing {
     pub id: String,
     pub title: String,
-    pub price: Option<f64>,
+    pub price: Option<Decimal>,
     pub quantity: i64,
     pub image_url: Option<String>,
     pub edit_url: String,
@@ -25,7 +27,7 @@ pub struct EditFormData {
 pub struct XmrListingDetail {
     pub description: Option<String>,
     pub photos: Vec<String>,
-    pub price: Option<f64>,
+    pub price: Option<Decimal>,
     pub currency: Option<String>,
 }
 

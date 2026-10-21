@@ -1596,10 +1596,20 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
         publish page's payout-address prefill working). REMAINDER: strict CSP (still
         `"csp": null`) and DOMPurify sanitization of the `v-html` sinks — injected script in
         the main window can still invoke every non-secret command.
-- [ ] Money is `f64` from end to end (`core/src/types.rs` ~258, ~313). The XMR and
+- [x] Money is `f64` from end to end (`core/src/types.rs` ~258, ~313). The XMR and
       Squarespace adapters serialize prices with `to_string()`, so a computed price can be
       sent as `0.30000000000000004`. Use a decimal type, or integer minor units plus a
-      currency.
+      currency. N-6.1 (2026-10-20) landed this: `ListingPrice.amount`,
+      `PricingSnapshot.amount`, `PlatformListing.price` and `VendorListingCache.price` are
+      now `rust_decimal::Decimal` (exact JSON-number serde, so the Tauri ↔ frontend
+      contract keeps `amount: number`); all four adapters parse platform price strings
+      into `Decimal` and serialize with `Decimal::to_string` (tests assert a computed
+      `0.1 + 0.2` goes out as `0.3`, never `0.30000000000000004`); the three price
+      columns (`pricing_snapshots.amount`, `vendor_listings_cache.price`,
+      `product_vendor_data.price`) are TEXT holding the exact decimal string via
+      migration 024, which converts legacy REAL values with `CAST`. Plugin
+      `VendorListing.price` stays `f64` until N-7.2 freezes the plugin shape; it is
+      converted with `Decimal::from_f64` (shortest round-trip) at the core boundary.
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults
 - [ ] Nuxt 4 migration. The lockfile pins Nuxt 3.21.1, `radix-vue` 1.9 and Tailwind 3.4.
       Nuxt 3's maintenance window is closing, and `radix-vue` has been succeeded by

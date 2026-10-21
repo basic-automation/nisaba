@@ -2,13 +2,154 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use rust_decimal::Decimal;
+
+/// Exact decimal (de)serialization for money fields (N-6.1).
+///
+/// Serializes as a JSON **number** (not a string) so the Tauri ↔ frontend
+/// contract keeps `amount: number`, but the emitted text is the `Decimal`'s
+/// exact representation — `0.30`, never `0.30000000000000004`.
+/// Deserializes from a JSON number or string, parsing the exact text. A JSON
+/// float can only carry what the float holds, so `0.1 + 0.2` computed in
+/// floating point still arrives as `0.30000000000000004` — exactness is
+/// guaranteed only when the value was decimal all the way down.
+pub mod decimal_money {
+    use super::Decimal;
+    use rust_decimal::prelude::FromPrimitive;
+    use serde::{de, Deserializer, Serialize, Serializer};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(d: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Emit the exact decimal text as a raw JSON number. Decimal's Display
+        // never uses scientific notation, so this is always a valid plain
+        // JSON number. serde_json::Number must NOT be used here: its FromStr
+        // normalizes ("48.00" -> "48.0") and even routes large values through
+        // f64, losing precision.
+        let raw = serde_json::value::RawValue::from_string(d.to_string())
+            .map_err(serde::ser::Error::custom)?;
+        raw.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(MoneyVisitor)
+    }
+
+    struct MoneyVisitor;
+
+    impl<'de> de::Visitor<'de> for MoneyVisitor {
+        type Value = Decimal;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a decimal money amount, as a JSON number or string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Decimal, E>
+        where
+            E: de::Error,
+        {
+            Decimal::from_str(v).map_err(de::Error::custom)
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Decimal, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Decimal, E>
+        where
+            E: de::Error,
+        {
+            Ok(Decimal::from(v))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Decimal, E>
+        where
+            E: de::Error,
+        {
+            Ok(Decimal::from(v))
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Decimal, E>
+        where
+            E: de::Error,
+        {
+            // Shortest round-trip representation: 0.3 stays 0.3.
+            Decimal::from_f64(v).ok_or_else(|| de::Error::custom(format!("{v} is not finite")))
+        }
+    }
+
+    /// `#[serde(with = "decimal_money::option")]` for `Option<Decimal>` money fields.
+    pub mod option {
+        use super::{Decimal, MoneyVisitor};
+        use serde::{de, Deserializer, Serializer};
+
+        pub fn serialize<S>(opt: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            match opt {
+                Some(d) => super::serialize(d, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            struct OptVisitor;
+
+            impl<'de> de::Visitor<'de> for OptVisitor {
+                type Value = Option<Decimal>;
+
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("an optional decimal money amount")
+                }
+
+                fn visit_none<E>(self) -> Result<Option<Decimal>, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(None)
+                }
+
+                fn visit_unit<E>(self) -> Result<Option<Decimal>, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(None)
+                }
+
+                fn visit_some<D>(self, deserializer: D) -> Result<Option<Decimal>, D::Error>
+                where
+                    D: Deserializer<'de>,
+                {
+                    deserializer.deserialize_any(MoneyVisitor).map(Some)
+                }
+            }
+
+            deserializer.deserialize_option(OptVisitor)
+        }
+    }
+}
+
 /// Cached vendor listing from a plugin execution (persisted in DB).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VendorListingCache {
     pub plugin_id: String,
     pub vendor_item_id: String,
     pub title: String,
-    pub price: Option<f64>,
+    /// Exact decimal amount (N-6.1). Serializes as a JSON number.
+    #[serde(with = "decimal_money::option")]
+    pub price: Option<Decimal>,
     pub currency: Option<String>,
     pub quantity: Option<i64>,
     pub sku: Option<String>,
@@ -161,7 +302,9 @@ pub struct PlatformListing {
     pub title: String,
     pub sku: Option<String>,
     pub quantity: i64,
-    pub price: Option<f64>,
+    /// Exact decimal amount (N-6.1). Serializes as a JSON number.
+    #[serde(with = "decimal_money::option")]
+    pub price: Option<Decimal>,
     pub image_url: Option<String>,
     pub group_key: Option<String>,
     #[serde(default)]
@@ -259,9 +402,14 @@ pub struct ListingPhoto {
 }
 
 /// Price information for a listing.
+///
+/// `amount` is an exact decimal (N-6.1): parsing `"0.30"` and serializing it
+/// back never produces `0.30000000000000004`. It serializes as a JSON number
+/// so the Tauri ↔ frontend contract is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListingPrice {
-    pub amount: f64,
+    #[serde(with = "decimal_money")]
+    pub amount: Decimal,
     pub currency: String, // ISO 4217
 }
 
@@ -316,7 +464,9 @@ pub struct PricingSnapshot {
     pub id: i64,
     pub product_id: String,
     pub platform: Platform,
-    pub amount: f64,
+    /// Exact decimal amount (N-6.1). Serializes as a JSON number.
+    #[serde(with = "decimal_money")]
+    pub amount: Decimal,
     pub currency: String,
     pub recorded_at: String,
 }
@@ -552,4 +702,85 @@ pub struct ExportData {
     pub platform_mappings: Vec<PlatformMapping>,
     pub platform_snapshots: Vec<PlatformSnapshot>,
     pub xmr_processed_orders: Vec<XmrProcessedOrder>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn decimal_money_never_emits_f64_artifacts() {
+        // The motivating case from N-6.1: 0.1 + 0.2 in f64 is
+        // 0.30000000000000004. In Decimal it is exactly 0.3, and the
+        // serialized form must show that.
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        assert_eq!(amount.to_string(), "0.3");
+
+        let price = ListingPrice {
+            amount,
+            currency: "USD".to_string(),
+        };
+        let json = serde_json::to_string(&price).unwrap();
+        assert!(
+            json.contains("\"amount\":0.3"),
+            "price must serialize exactly, got: {json}"
+        );
+        assert!(
+            !json.contains("0.30000000000000004"),
+            "f64 artifact leaked into JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn decimal_money_round_trips_through_json_numbers() {
+        let price = ListingPrice {
+            amount: Decimal::from_str("48.00").unwrap(),
+            currency: "EUR".to_string(),
+        };
+        let json = serde_json::to_string(&price).unwrap();
+        assert!(json.contains("\"amount\":48.00"), "got: {json}");
+
+        // Deserializes back from a JSON number...
+        let back: ListingPrice = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.amount, Decimal::from_str("48.00").unwrap());
+
+        // ...and from a JSON string (some platforms quote amounts).
+        let from_str: ListingPrice =
+            serde_json::from_str(r#"{"amount":"0.30","currency":"USD"}"#).unwrap();
+        assert_eq!(from_str.amount.to_string(), "0.30");
+    }
+
+    #[test]
+    fn decimal_money_rejects_garbage() {
+        let bad: Result<ListingPrice, _> =
+            serde_json::from_str(r#"{"amount":"not-a-price","currency":"USD"}"#);
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn optional_price_serializes_as_number_or_null() {
+        let listing = PlatformListing {
+            platform_item_id: "x".to_string(),
+            title: "t".to_string(),
+            sku: None,
+            quantity: 1,
+            price: Some(Decimal::from_str("19.99").unwrap()),
+            image_url: None,
+            group_key: None,
+            variant_attributes: HashMap::new(),
+        };
+        let json = serde_json::to_string(&listing).unwrap();
+        assert!(json.contains("\"price\":19.99"), "got: {json}");
+
+        let listing = PlatformListing {
+            price: None,
+            ..listing
+        };
+        let json = serde_json::to_string(&listing).unwrap();
+        assert!(json.contains("\"price\":null"), "got: {json}");
+
+        let back: PlatformListing = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.price, None);
+    }
 }

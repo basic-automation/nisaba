@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use nisaba_core::types::{
     FullListing, ListingPhoto, ListingPrice, Platform, PlatformInventoryItem, PlatformListing,
 };
+use rust_decimal::Decimal;
 
 use crate::types::{AmazonListingIssue, AmazonListingItem, AmazonListingOffer};
 
@@ -54,7 +55,7 @@ pub fn selected_price(
 ) -> Option<ListingPrice> {
     let offer = selected_offer(item, marketplace_ids)?;
     let money = offer.price.as_ref()?;
-    let amount: f64 = money.amount.as_ref()?.parse().ok()?;
+    let amount: Decimal = money.amount.as_ref()?.parse().ok()?;
     Some(ListingPrice {
         amount,
         currency: money
