@@ -242,12 +242,12 @@ are referenced rather than repeated.
       panicked on the missing `frontendDist` (`frontend/.output/public`, which is
       gitignored). The Rust job now runs `npm ci && npm run generate` before cargo.
 - [ ] Screenshots in the README — the UI is the product and there is currently nothing to look at
-- [ ] README accuracy. It says "Node.js 18+" (`README.md:63`), but Nuxt 3.21 and Vite 7
+- [x] README accuracy. It said "Node.js 18+" (`README.md:63`), but Nuxt 3.21 and Vite 7
       need `^20.19.0 || >=22.12.0`; add an `engines` field to `frontend/package.json` so npm
       enforces the requirement. It says analytics are "charted in the UI", but there are no
       charts: `inventory.vue` prints `history.length`. It also omits that `./config.toml` in
       the working directory overrides the data-dir config (`core/src/config.rs` ~230–235).
-- [ ] `cleanup.ps1` and `parse_har.py` were purged from history but still sit untracked in
+- [x] `cleanup.ps1` and `parse_har.py` were purged from history but still sit untracked in
       at least one checkout and are not gitignored, so a `git add -A` re-adds them. Ignore
       them, or delete the local copies.
 - [x] **The frontend typecheck has never run.** `ci.yml` runs `npx nuxt typecheck` with

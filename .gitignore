@@ -30,3 +30,7 @@ frontend/public/fonts/*.woff2
 # Routine scratch + worktrees
 /scratch/
 /.worktrees/
+
+# Purged scratch scripts: never re-add these
+cleanup.ps1
+parse_har.py
