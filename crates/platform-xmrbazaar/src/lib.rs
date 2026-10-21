@@ -366,11 +366,13 @@ impl PlatformAdapter for XmrBazaarAdapter {
 mod tests {
     use super::{description_update_value, price_update_fields};
     use nisaba_core::types::ListingPrice;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     #[test]
     fn a_price_write_keeps_the_currency_with_the_amount() {
         let fields = price_update_fields(&ListingPrice {
-            amount: 48.5,
+            amount: Decimal::from_str("48.5").unwrap(),
             currency: "eur".to_string(),
         });
         assert_eq!(
@@ -380,6 +382,27 @@ mod tests {
                 ("currency".to_string(), "EUR".to_string()),
             ],
             "dropping the currency left the listing's old currency in place"
+        );
+    }
+
+    #[test]
+    fn a_computed_price_is_serialized_exactly_not_as_f64_artifact() {
+        // N-6.1: 0.1 + 0.2 in f64 is 0.30000000000000004; the XMR form must
+        // receive "0.3".
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        let fields = price_update_fields(&ListingPrice {
+            amount,
+            currency: "USD".to_string(),
+        });
+        let price_field = fields
+            .iter()
+            .find(|(k, _)| k == "price")
+            .map(|(_, v)| v.as_str())
+            .expect("price field");
+        assert_eq!(price_field, "0.3");
+        assert!(
+            !price_field.contains("0.30000000000000004"),
+            "f64 artifact leaked into the XMR price field: {price_field}"
         );
     }
 
