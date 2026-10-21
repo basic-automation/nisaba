@@ -88,7 +88,7 @@ are referenced rather than repeated.
       with a *Restore from backup* action in the UI. Backups land next to the database and
       never leave the machine.
 - [x] The WAL-deletion and leave-company data-loss bugs fixed (Priority queue item 1) — fixed in PR #5.
-- [ ] Lossless export/import, round-trip tested (Cross-cutting). From 1.0 the export format
+- [x] Lossless export/import, round-trip tested (Cross-cutting). From 1.0 the export format
       carries a version and every later release imports every earlier 1.x export.
 
 ### Gate: security
@@ -1603,7 +1603,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       comment protects only the main file, but a WAL can hold committed transactions not
       yet checkpointed into it, so this can throw away recent writes. Back up the files and
       surface the error instead of deleting. Fixed in PR #5.
-- [ ] Export/import is lossy. Export contains no secrets (verified 2026-10-19). But:
+- [x] Export/import is lossy. Export contains no secrets (verified 2026-10-19). But:
       - import drops `on_hand_quantity`, `source_plugin_id` and `source_vendor_item_id`
         (`db.rs` ~3414), and its `INSERT OR REPLACE` wipes them on variants that already
         exist;
