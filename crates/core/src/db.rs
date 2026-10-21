@@ -12,13 +12,13 @@ use crate::config::CompanyRegistryEntry;
 use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
 use crate::types::{
-    AuthToken, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto, NewSyncEvent,
-    Platform, PlatformMapping, PlatformSnapshot, PricingSnapshot, Product, ProductVariant,
-    StockEvent, StockEventKind, SyncEvent, VendorListingCache, VendorPluginInstall,
-    VendorPluginRow, XmrProcessedOrder,
+    AuthToken, Dimensions, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto,
+    NewSyncEvent, Platform, PlatformMapping, PlatformSnapshot, PricingSnapshot, Product,
+    ProductVariant, StockEvent, StockEventKind, SyncEvent, VendorListingCache, VendorPluginInstall,
+    VendorPluginRow, Weight, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 24;
+const CURRENT_SCHEMA_VERSION: i64 = 25;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -45,6 +45,28 @@ fn decimal_param(d: &Decimal) -> String {
 /// Bind an optional money amount for storage (N-6.1).
 fn decimal_param_opt(d: Option<&Decimal>) -> Option<String> {
     d.map(|v| v.to_string())
+}
+
+/// Bind an `images_json`/`weight_json`/`dimensions_json` column (N-7.2).
+fn json_param<T: serde::Serialize>(v: &T) -> Option<String> {
+    serde_json::to_string(v).ok()
+}
+
+/// Bind an optional `weight_json`/`dimensions_json` column (N-7.2).
+fn json_param_opt<T: serde::Serialize>(v: Option<&T>) -> Option<String> {
+    v.and_then(|x| serde_json::to_string(x).ok())
+}
+
+/// Parse an `images_json`/`weight_json`/`dimensions_json` column (N-7.2).
+/// Corrupt or missing JSON degrades to the default, never an error: a bad
+/// image list must not fail a whole catalog read.
+fn parse_json_col<T>(s: Option<String>) -> T
+where
+    T: Default + for<'de> serde::Deserialize<'de>,
+{
+    s.as_deref()
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default()
 }
 
 /// Check if a turso error is retryable under MVCC concurrent transactions.
@@ -555,8 +577,8 @@ impl Db {
     ///   Steps that are idempotent `ALTER TABLE`s or data repairs are written
     ///   inline in Rust instead — `004` (company logo columns), `008`
     ///   (repairing the columns migration 007 dropped when it rebuilt
-    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019`, `021`, `022` and
-    ///   `023` are all inline. The inline step is the single authority for these
+    ///   `platform_mappings`), `010`, `012`, `014`–`016`, `018`–`019`, `021`, `022`,
+    ///   `023` and `025` are all inline. The inline step is the single authority for these
     ///   numbers: an orphan `.sql` file with an inline step's number must not
     ///   exist (three such orphans were deleted by N-3.2).
     ///
@@ -1229,6 +1251,30 @@ impl Db {
                 .await?;
                     debug!("Applied migration 024: decimal money columns (REAL -> TEXT)");
                 }
+            }
+            25 => {
+                // VendorListing freeze (N-7.2): `images: string[]` replaces the
+                // single `image_url`, and UPC/GTIN, brand, MPN, weight and
+                // dimensions become typed columns instead of `extras` strings.
+                // Purely additive — the old `image_url` column stays and is
+                // folded into `images` on read, so no row is rewritten.
+                for table in ["vendor_listings_cache", "product_vendor_data"] {
+                    for ddl in [
+                        format!(
+                            "ALTER TABLE {table} ADD COLUMN images_json TEXT NOT NULL DEFAULT '[]'"
+                        ),
+                        format!("ALTER TABLE {table} ADD COLUMN upc TEXT"),
+                        format!("ALTER TABLE {table} ADD COLUMN brand TEXT"),
+                        format!("ALTER TABLE {table} ADD COLUMN mpn TEXT"),
+                        format!("ALTER TABLE {table} ADD COLUMN weight_json TEXT"),
+                        format!("ALTER TABLE {table} ADD COLUMN dimensions_json TEXT"),
+                    ] {
+                        // Idempotent like the other inline ALTER steps: a
+                        // re-run after a crash finds the column already there.
+                        let _ = conn.execute(&ddl, ()).await;
+                    }
+                }
+                debug!("Applied migration 025: vendor listing images + typed fields");
             }
             _ => {}
         }
@@ -4220,8 +4266,10 @@ impl Db {
                 .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
             conn.execute(
                 "INSERT OR REPLACE INTO vendor_listings_cache
-                 (plugin_id, vendor_item_id, title, price, currency, quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 (plugin_id, vendor_item_id, title, price, currency, quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json, fetched_at,
+                  images_json, upc, brand, mpn, weight_json, dimensions_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     plugin_id,
                     l.vendor_item_id.clone(),
@@ -4230,12 +4278,20 @@ impl Db {
                     l.currency.clone(),
                     l.quantity,
                     l.sku.clone(),
-                    l.image_url.clone(),
+                    // Legacy column, kept NULL on new rows (N-7.2): `images_json`
+                    // is authoritative; the old value is folded on read.
+                    Option::<String>::None,
                     l.url.clone(),
                     extras_json,
                     l.group_key.clone(),
                     variant_attrs_json,
                     l.fetched_at.clone(),
+                    json_param(&l.images),
+                    l.upc.clone(),
+                    l.brand.clone(),
+                    l.mpn.clone(),
+                    json_param_opt(l.weight.as_ref()),
+                    json_param_opt(l.dimensions.as_ref()),
                 ],
             )
             .await?;
@@ -4254,7 +4310,8 @@ impl Db {
         let mut rows = conn
             .query(
                 "SELECT plugin_id, vendor_item_id, title, price, currency, quantity, sku,
-                        image_url, url, extras_json, group_key, variant_attrs_json, fetched_at
+                        image_url, url, extras_json, group_key, variant_attrs_json, fetched_at,
+                        images_json, upc, brand, mpn, weight_json, dimensions_json
                  FROM vendor_listings_cache WHERE plugin_id = ?1
                  ORDER BY title",
                 params![plugin_id],
@@ -4265,6 +4322,13 @@ impl Db {
         while let Some(row) = rows.next().await? {
             let extras_json: String = row.get::<String>(9)?;
             let variant_attrs_json: String = row.get::<String>(11)?;
+            let image_url: Option<String> = row.get::<Option<String>>(7)?;
+            // N-7.2: rows written before the freeze only have `image_url`;
+            // fold it into `images` so readers see one shape.
+            let mut images: Vec<String> = parse_json_col(row.get::<Option<String>>(13)?);
+            if images.is_empty() {
+                images = image_url.clone().into_iter().collect();
+            }
             out.push(VendorListingCache {
                 plugin_id: row.get::<String>(0)?,
                 vendor_item_id: row.get::<String>(1)?,
@@ -4276,8 +4340,14 @@ impl Db {
                 currency: row.get::<Option<String>>(4)?,
                 quantity: row.get::<Option<i64>>(5)?,
                 sku: row.get::<Option<String>>(6)?,
-                image_url: row.get::<Option<String>>(7)?,
+                images,
+                image_url,
                 url: row.get::<Option<String>>(8)?,
+                upc: row.get::<Option<String>>(14)?,
+                brand: row.get::<Option<String>>(15)?,
+                mpn: row.get::<Option<String>>(16)?,
+                weight: parse_json_col::<Option<Weight>>(row.get::<Option<String>>(17)?),
+                dimensions: parse_json_col::<Option<Dimensions>>(row.get::<Option<String>>(18)?),
                 extras: serde_json::from_str(&extras_json).unwrap_or_default(),
                 group_key: row.get::<Option<String>>(10)?,
                 variant_attributes: serde_json::from_str(&variant_attrs_json).unwrap_or_default(),
@@ -4336,8 +4406,10 @@ impl Db {
             .map_err(|e| SyncError::DatabaseError(e.to_string()))?;
         self.execute_write(
             "INSERT OR REPLACE INTO product_vendor_data
-             (product_id, variant_id, plugin_id, vendor_item_id, title, price, currency, quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json, fetched_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'))",
+             (product_id, variant_id, plugin_id, vendor_item_id, title, price, currency, quantity, sku, image_url, url, extras_json, group_key, variant_attrs_json, fetched_at, updated_at,
+              images_json, upc, brand, mpn, weight_json, dimensions_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, datetime('now'),
+                     ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 product_id,
                 variant_id,
@@ -4348,12 +4420,19 @@ impl Db {
                 listing.currency.clone(),
                 listing.quantity,
                 listing.sku.clone(),
-                listing.image_url.clone(),
+                // Legacy column, kept NULL on new rows (N-7.2).
+                Option::<String>::None,
                 listing.url.clone(),
                 extras_json,
                 listing.group_key.clone(),
                 variant_attrs_json,
                 listing.fetched_at.clone(),
+                json_param(&listing.images),
+                listing.upc.clone(),
+                listing.brand.clone(),
+                listing.mpn.clone(),
+                json_param_opt(listing.weight.as_ref()),
+                json_param_opt(listing.dimensions.as_ref()),
             ],
         )
         .await?;
@@ -4371,7 +4450,9 @@ impl Db {
                 "SELECT COALESCE(vpr.display_name, 'Vendor'),
                         pvd.plugin_id, pvd.vendor_item_id, pvd.title, pvd.price, pvd.currency,
                         pvd.quantity, pvd.sku, pvd.image_url, pvd.url, pvd.extras_json,
-                        pvd.group_key, pvd.variant_attrs_json, pvd.fetched_at, pvd.variant_id
+                        pvd.group_key, pvd.variant_attrs_json, pvd.fetched_at, pvd.variant_id,
+                        pvd.images_json, pvd.upc, pvd.brand, pvd.mpn, pvd.weight_json,
+                        pvd.dimensions_json
                  FROM product_vendor_data pvd
                  LEFT JOIN vendor_plugin_registry vpr ON pvd.plugin_id = vpr.id
                  WHERE pvd.product_id = ?1
@@ -4384,6 +4465,12 @@ impl Db {
         while let Some(row) = rows.next().await? {
             let extras_json: String = row.get::<String>(10)?;
             let variant_attrs_json: String = row.get::<String>(12)?;
+            let image_url: Option<String> = row.get::<Option<String>>(8)?;
+            // N-7.2: pre-freeze rows only have `image_url`; fold it in.
+            let mut images: Vec<String> = parse_json_col(row.get::<Option<String>>(15)?);
+            if images.is_empty() {
+                images = image_url.clone().into_iter().collect();
+            }
             out.push((
                 row.get::<String>(0)?,
                 row.get::<Option<String>>(14)?,
@@ -4398,8 +4485,16 @@ impl Db {
                     currency: row.get::<Option<String>>(5)?,
                     quantity: row.get::<Option<i64>>(6)?,
                     sku: row.get::<Option<String>>(7)?,
-                    image_url: row.get::<Option<String>>(8)?,
+                    images,
+                    image_url,
                     url: row.get::<Option<String>>(9)?,
+                    upc: row.get::<Option<String>>(16)?,
+                    brand: row.get::<Option<String>>(17)?,
+                    mpn: row.get::<Option<String>>(18)?,
+                    weight: parse_json_col::<Option<Weight>>(row.get::<Option<String>>(19)?),
+                    dimensions: parse_json_col::<Option<Dimensions>>(
+                        row.get::<Option<String>>(20)?,
+                    ),
                     extras: serde_json::from_str(&extras_json).unwrap_or_default(),
                     group_key: row.get::<Option<String>>(11)?,
                     variant_attributes: serde_json::from_str(&variant_attrs_json)
@@ -4432,7 +4527,9 @@ impl Db {
                 "UPDATE product_vendor_data SET
                     title = ?1, price = ?2, currency = ?3, quantity = ?4, sku = ?5,
                     image_url = ?6, url = ?7, extras_json = ?8, group_key = ?9,
-                    variant_attrs_json = ?10, fetched_at = ?11, updated_at = datetime('now')
+                    variant_attrs_json = ?10, fetched_at = ?11, updated_at = datetime('now'),
+                    images_json = ?14, upc = ?15, brand = ?16, mpn = ?17,
+                    weight_json = ?18, dimensions_json = ?19
                  WHERE plugin_id = ?12 AND vendor_item_id = ?13",
                 to_params(params![
                     l.title.clone(),
@@ -4440,7 +4537,8 @@ impl Db {
                     l.currency.clone(),
                     l.quantity,
                     l.sku.clone(),
-                    l.image_url.clone(),
+                    // Legacy column, kept NULL (N-7.2).
+                    Option::<String>::None,
                     l.url.clone(),
                     extras_json,
                     l.group_key.clone(),
@@ -4448,6 +4546,12 @@ impl Db {
                     l.fetched_at.clone(),
                     plugin_id,
                     l.vendor_item_id.clone(),
+                    json_param(&l.images),
+                    l.upc.clone(),
+                    l.brand.clone(),
+                    l.mpn.clone(),
+                    json_param_opt(l.weight.as_ref()),
+                    json_param_opt(l.dimensions.as_ref()),
                 ]),
             ));
         }
@@ -4577,8 +4681,14 @@ impl Db {
                     currency: None,
                     quantity: Some(v.quantity),
                     sku: Some(v.sku.clone()),
+                    images: v.image_url.clone().into_iter().collect(),
                     image_url: v.image_url.clone(),
                     url: None,
+                    upc: None,
+                    brand: None,
+                    mpn: None,
+                    weight: None,
+                    dimensions: None,
                     extras: std::collections::HashMap::new(),
                     group_key: None,
                     variant_attributes: v.attributes.clone(),
@@ -6936,6 +7046,7 @@ mod tests {
     }
 
     /// N-6.1: vendor cache prices round-trip exactly too.
+    /// N-7.2: images and the typed upc/brand/mpn/weight/dimensions round-trip.
     #[tokio::test]
     async fn vendor_cache_price_round_trips_an_exact_decimal() {
         let (_dir, db) = migrated_test_db("money-vendor.db").await;
@@ -6947,8 +7058,25 @@ mod tests {
             currency: Some("USD".to_string()),
             quantity: Some(3),
             sku: None,
+            images: vec![
+                "https://cdn/1.jpg".to_string(),
+                "https://cdn/2.jpg".to_string(),
+            ],
             image_url: None,
             url: None,
+            upc: Some("001234567890".to_string()),
+            brand: Some("Acme".to_string()),
+            mpn: Some("ACM-1".to_string()),
+            weight: Some(Weight {
+                value: 1.5,
+                unit: "lb".to_string(),
+            }),
+            dimensions: Some(Dimensions {
+                length: 12.0,
+                width: 9.0,
+                height: 4.0,
+                unit: "in".to_string(),
+            }),
             extras: HashMap::new(),
             group_key: None,
             variant_attributes: HashMap::new(),
@@ -6964,6 +7092,26 @@ mod tests {
             rows[0].price.map(|d| d.to_string()),
             Some("19.99".to_string())
         );
+        assert_eq!(rows[0].images, ["https://cdn/1.jpg", "https://cdn/2.jpg"]);
+        assert_eq!(rows[0].upc.as_deref(), Some("001234567890"));
+        assert_eq!(rows[0].brand.as_deref(), Some("Acme"));
+        assert_eq!(rows[0].mpn.as_deref(), Some("ACM-1"));
+        assert_eq!(
+            rows[0].weight,
+            Some(Weight {
+                value: 1.5,
+                unit: "lb".to_string()
+            })
+        );
+        assert_eq!(
+            rows[0].dimensions,
+            Some(Dimensions {
+                length: 12.0,
+                width: 9.0,
+                height: 4.0,
+                unit: "in".to_string()
+            })
+        );
 
         db.save_product_vendor_data("p1", "v1", "plug", &rows[0])
             .await
@@ -6973,6 +7121,104 @@ mod tests {
         assert_eq!(
             pvd[0].2.price.map(|d| d.to_string()),
             Some("19.99".to_string())
+        );
+        assert_eq!(pvd[0].2.images, ["https://cdn/1.jpg", "https://cdn/2.jpg"]);
+        assert_eq!(pvd[0].2.upc.as_deref(), Some("001234567890"));
+        assert_eq!(
+            pvd[0].2.dimensions,
+            Some(Dimensions {
+                length: 12.0,
+                width: 9.0,
+                height: 4.0,
+                unit: "in".to_string()
+            })
+        );
+    }
+
+    /// N-7.2: migration 025 adds the frozen-schema columns (`images_json`,
+    /// `upc`, `brand`, `mpn`, `weight_json`, `dimensions_json`) to both
+    /// vendor listing tables, preserving every row — including a legacy row
+    /// whose only image is the old `image_url`, which reads back folded
+    /// into `images`.
+    #[tokio::test]
+    async fn migration_025_adds_vendor_listing_typed_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-vendor.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        // Pre-25 shape of the two vendor tables.
+        conn.execute_batch(
+            "CREATE TABLE vendor_listings_cache (
+                id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, vendor_item_id TEXT NOT NULL,
+                title TEXT NOT NULL, price TEXT, currency TEXT, quantity INTEGER, sku TEXT,
+                image_url TEXT, url TEXT, extras_json TEXT NOT NULL DEFAULT '{}',
+                group_key TEXT, variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(plugin_id, vendor_item_id));
+             INSERT INTO vendor_listings_cache (plugin_id, vendor_item_id, title, quantity, image_url)
+                VALUES ('plug', 'VI-1', 'Widget', 0, 'https://cdn/legacy.jpg');
+             CREATE TABLE product_vendor_data (
+                product_id TEXT NOT NULL, variant_id TEXT, plugin_id TEXT NOT NULL,
+                vendor_item_id TEXT NOT NULL, title TEXT NOT NULL, price TEXT, currency TEXT,
+                quantity INTEGER, sku TEXT, image_url TEXT, url TEXT,
+                extras_json TEXT NOT NULL DEFAULT '{}', group_key TEXT,
+                variant_attrs_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (product_id, plugin_id, vendor_item_id));
+             INSERT INTO product_vendor_data (product_id, plugin_id, vendor_item_id, title, quantity, image_url)
+                VALUES ('p1', 'plug', 'VI-1', 'Widget', NULL, 'https://cdn/legacy.jpg');
+             -- get_product_vendor_data LEFT JOINs the registry for display names.
+             CREATE TABLE vendor_plugin_registry (
+                id TEXT PRIMARY KEY, display_name TEXT);
+             INSERT INTO vendor_plugin_registry (id, display_name)
+                VALUES ('plug', 'Test Plugin');",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(25).await.unwrap();
+
+        let conn = db.connect().await.unwrap();
+        for table in ["vendor_listings_cache", "product_vendor_data"] {
+            for col in [
+                "images_json",
+                "upc",
+                "brand",
+                "mpn",
+                "weight_json",
+                "dimensions_json",
+            ] {
+                let mut rows = conn
+                    .query(
+                        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{col}'"),
+                        (),
+                    )
+                    .await
+                    .unwrap();
+                let row = rows.next().await.unwrap().unwrap();
+                assert_eq!(
+                    row.get::<i64>(0).unwrap(),
+                    1,
+                    "{table}.{col} should exist after migration 025"
+                );
+            }
+        }
+        drop(conn);
+
+        // Legacy rows survive, and the old single image reads back as `images`.
+        let rows = db.get_vendor_listings_cache("plug").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].images, ["https://cdn/legacy.jpg"]);
+        assert_eq!(rows[0].quantity, Some(0), "0 stays 0 (out of stock)");
+
+        let pvd = db.get_product_vendor_data("p1").await.unwrap();
+        assert_eq!(pvd.len(), 1);
+        assert_eq!(pvd[0].2.images, ["https://cdn/legacy.jpg"]);
+        assert_eq!(
+            pvd[0].2.quantity, None,
+            "NULL stays NULL (unknown), not coerced to 0"
         );
     }
 
