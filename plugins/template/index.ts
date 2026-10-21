@@ -19,7 +19,7 @@
 //             allowed_hosts
 //   entry points: `metadata` (a plain object literal, read before any run)
 //                 and `fetchListings(config): Promise<VendorListing[]>`
-//   the Nisaba object: fetch, sleep, emitBatch, log — see "The host API" below
+//   the Nisaba object: fetch, sleep, emitBatch, store, log — see "The host API" below
 //   VendorListing: vendor_item_id, title, price, currency, quantity, sku,
 //                  images, url, upc, brand, mpn, weight, dimensions,
 //                  extras, group_key, variant_attributes
@@ -49,6 +49,32 @@ declare const Nisaba: {
   /** Hand listings to the app as they are built, so the UI can show progress on a long
    *  import. Batches are for display; the array `fetchListings` returns is the result. */
   emitBatch(listings: VendorListing[]): void
+  /** Per-plugin key–value storage for cursors, ETags and last-seen timestamps.
+   *
+   *  Keys are scoped to this plugin *and* this company: a plugin can never read
+   *  another plugin's keys, and the same plugin under another company gets a
+   *  separate store. Values persist between runs in the company database (they
+   *  are cleared if the plugin is uninstalled).
+   *
+   *  Both keys and values are strings — `JSON.stringify` objects first. Keys
+   *  are at most 256 bytes. The whole store is capped at 1 MiB per plugin;
+   *  `set` rejects past the cap, so keep values small (a cursor or an ETag,
+   *  not a cached catalog).
+   *
+   *  Example — resume a paged supplier API where the last run left off:
+   *
+   *    const cursor = (await Nisaba.store.get('cursor')) ?? '1'
+   *    // ... fetch pages starting at `cursor` ...
+   *    await Nisaba.store.set('cursor', nextCursor)
+   */
+  store: {
+    /** The stored string, or `null` when the key was never set. */
+    get(key: string): Promise<string | null>
+    /** Persist a string. Rejects when the write would exceed the 1 MiB cap. */
+    set(key: string, value: string): Promise<void>
+    /** Remove a key. Resolves to whether the key existed. */
+    delete(key: string): Promise<boolean>
+  }
   /** Lines in the app's log under the `vendor_plugin` target. `console.log` and friends
    *  write there too. */
   log: Record<'trace' | 'debug' | 'info' | 'warn' | 'error', (msg: unknown) => void>

@@ -681,7 +681,7 @@ write surfaces as `Err`.
 ### Plugin API v1 (freeze for 1.0)
 
 Today a plugin can do one thing: import a supplier catalog through `fetchListings`. It has
-five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata of
+six operations (`fetch`, `sleep`, `log`, `emitBatch`, `store`, `setResult`) and metadata of
 `name`, `version`, `description`, `config_fields`, `category`, `icon` and `allowed_hosts`.
 1.0 freezes whatever shape exists at that point, so fix the shape first.
 
@@ -717,9 +717,15 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
       `run_vendor_sync_single`); `get_vendor_plugin_config` returns the merged map
       for the config form. Tests serialise both `config_json` and the P2P payload
       and assert the secret is absent.
-- [ ] **Per-plugin storage**: `Nisaba.store.get/set/delete`, a small key–value store with a
+- [x] **Per-plugin storage**: `Nisaba.store.get/set/delete`, a small key–value store with a
       size cap that persists between runs. It holds cursors, ETags and last-seen
       timestamps.
+      → Done (N-7.3): `plugin_kv_store` table (migration 026) in the company DB,
+      scoped to plugin + company and cleared on uninstall; 1 MiB per-plugin cap
+      and 256-byte key limit enforced by the runtime before the write; string
+      values only. Sandbox tests prove cross-plugin isolation and cap
+      enforcement; the API is documented in `plugins/template/index.ts` and
+      `SECURITY.md`.
 - [ ] **Incremental sync.** `fetchListings({ since, cursor })` returns only what changed,
       and the host merges it into the cached catalog. Full catalog pulls every cycle are
       what hit supplier rate limits and stretch runs toward the 12 h limit.

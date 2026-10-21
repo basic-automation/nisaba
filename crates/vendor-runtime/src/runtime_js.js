@@ -56,6 +56,38 @@
       ops.op_nisaba_emit_batch(JSON.stringify(listings));
     },
 
+    // Per-plugin key-value storage for cursors, ETags and last-seen
+    // timestamps. Keys are scoped to this plugin (and this company): a plugin
+    // can never read another plugin's keys. Values are strings - stringify
+    // objects first. 1 MiB total per plugin; `set` rejects past the cap.
+    // Values persist between runs in the company database.
+    store: {
+      async get(key) {
+        if (typeof key !== "string" || key.length === 0) {
+          throw new TypeError("Nisaba.store.get: key must be a non-empty string");
+        }
+        const { found, value } = JSON.parse(await ops.op_nisaba_store_get(key));
+        return found ? value : null;
+      },
+
+      async set(key, value) {
+        if (typeof key !== "string" || key.length === 0) {
+          throw new TypeError("Nisaba.store.set: key must be a non-empty string");
+        }
+        if (typeof value !== "string") {
+          throw new TypeError("Nisaba.store.set: value must be a string - JSON.stringify objects first");
+        }
+        await ops.op_nisaba_store_set(key, value);
+      },
+
+      async delete(key) {
+        if (typeof key !== "string" || key.length === 0) {
+          throw new TypeError("Nisaba.store.delete: key must be a non-empty string");
+        }
+        return ops.op_nisaba_store_delete(key);
+      },
+    },
+
     log: {
       trace(msg) { ops.op_nisaba_log("trace", String(msg)); },
       debug(msg) { ops.op_nisaba_log("debug", String(msg)); },

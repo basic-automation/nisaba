@@ -68,8 +68,11 @@ The frozen v1 surface is:
 - **The `Nisaba` host object**: `fetch` (only to `allowed_hosts`; redirects are
   followed only to listed hosts), `sleep` (the only way to wait — there are no
   timers), `emitBatch` (progress batches; the array `fetchListings` returns is
-  the result), and `log` (`trace`/`debug`/`info`/`warn`/`error`; `console.*`
-  writes there too).
+  the result), `store` (`get`/`set`/`delete`: a per-plugin key–value store for
+  cursors, ETags and last-seen timestamps — 1 MiB total per plugin, keys at
+  most 256 bytes, string values only; scoped to plugin + company in the
+  company database and cleared on uninstall), and `log`
+  (`trace`/`debug`/`info`/`warn`/`error`; `console.*` writes there too).
 - **`VendorListing`**: `vendor_item_id`, `title`, `price` (exact decimal text,
   e.g. `"19.99"` — a JSON number is still accepted from pre-freeze plugins),
   `currency` (required whenever a price is present), `quantity` (`null` =
