@@ -70,8 +70,14 @@ The frozen v1 surface is:
   timers), `emitBatch` (progress batches; the array `fetchListings` returns is
   the result), and `log` (`trace`/`debug`/`info`/`warn`/`error`; `console.*`
   writes there too).
-- **`VendorListing`**: `vendor_item_id`, `title`, `price`, `currency`,
-  `quantity`, `sku`, `image_url`, `url`, `extras`, `group_key`,
+- **`VendorListing`**: `vendor_item_id`, `title`, `price` (exact decimal text,
+  e.g. `"19.99"` — a JSON number is still accepted from pre-freeze plugins),
+  `currency` (required whenever a price is present), `quantity` (`null` =
+  unknown stock, `0` = out of stock — never coerce one into the other), `sku`,
+  `images` (`string[]`, most representative first; the pre-freeze single
+  `image_url` is still accepted and folded into `images[0]`), `url`, `upc`,
+  `brand`, `mpn`, `weight` (`{ value, unit }`), `dimensions`
+  (`{ length, width, height, unit }`), `extras` (free-form), `group_key`,
   `variant_attributes`. Only `vendor_item_id` and `title` are required.
 - **Sandbox limits per run**: 30 minutes wall-clock, a 1 GiB V8 heap, 256 MiB
   of listing output, 64 MiB per `fetch` response body.

@@ -8,7 +8,6 @@ use nisaba_core::crypto::OsKeyringPluginSecrets;
 use nisaba_core::db::Db;
 use nisaba_core::types::{decimal_money, VendorListingCache, VendorPluginRow};
 use nisaba_vendor_runtime::{BatchCallback, PluginLimits, VendorRuntime};
-use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -57,10 +56,22 @@ pub struct VendorListingResult {
     #[serde(with = "decimal_money::option")]
     pub price: Option<Decimal>,
     pub currency: Option<String>,
+    /// `null` = unknown vendor stock, `0` = out of stock (N-7.2).
     pub quantity: Option<i64>,
     pub sku: Option<String>,
+    /// All image URLs, most representative first (N-7.2).
+    pub images: Vec<String>,
+    /// First image — the pre-freeze single-URL shape, kept so the frontend's
+    /// `image_url` keeps working unchanged.
     pub image_url: Option<String>,
     pub url: Option<String>,
+    /// UPC / GTIN / EAN (string so leading zeros survive).
+    pub upc: Option<String>,
+    pub brand: Option<String>,
+    /// Manufacturer part number.
+    pub mpn: Option<String>,
+    pub weight: Option<nisaba_core::types::Weight>,
+    pub dimensions: Option<nisaba_core::types::Dimensions>,
     pub extras: HashMap<String, String>,
     pub group_key: Option<String>,
     pub variant_attributes: HashMap<String, String>,
@@ -81,31 +92,98 @@ pub struct VendorSyncStatus {
     pub cached_count: i64,
 }
 
+/// Convert a plugin listing into a DB cache row.
+///
+/// N-7.2 enforcement: `currency` is required whenever a price is present — a
+/// listing with a price but no currency is refused (the caller skips it with
+/// a warning, so one bad listing cannot fail a whole catalog sync). The
+/// `quantity` null-vs-0 distinction passes through untouched: `None` stays
+/// unknown, it is never coerced to 0 here.
 fn listing_to_cache(
     plugin_id: &str,
     l: &nisaba_vendor_runtime::VendorListing,
     fetched_at: &str,
-) -> VendorListingCache {
-    VendorListingCache {
+) -> Result<VendorListingCache, String> {
+    if l.price.is_some() && l.currency.as_deref().is_none_or(str::is_empty) {
+        return Err(format!(
+            "listing '{}' has a price but no currency",
+            l.vendor_item_id
+        ));
+    }
+    Ok(VendorListingCache {
         plugin_id: plugin_id.to_string(),
         vendor_item_id: l.vendor_item_id.clone(),
         title: l.title.clone(),
-        // Plugin prices arrive as JSON numbers (f64); convert via the
-        // shortest round-trip representation so 19.99 stays 19.99.
-        price: l.price.and_then(Decimal::from_f64),
+        // N-7.2: the plugin price is already an exact decimal; no f64 remains
+        // on this path.
+        price: l.price,
         currency: l.currency.clone(),
         quantity: l.quantity,
         sku: l.sku.clone(),
-        image_url: l.image_url.clone(),
+        images: l.images.clone(),
+        // Legacy column, kept NULL on new rows (N-7.2).
+        image_url: None,
         url: l.url.clone(),
+        upc: l.upc.clone(),
+        brand: l.brand.clone(),
+        mpn: l.mpn.clone(),
+        weight: l.weight.clone(),
+        dimensions: l.dimensions.clone(),
         extras: l.extras.clone(),
         group_key: l.group_key.clone(),
         variant_attributes: l.variant_attributes.clone(),
         fetched_at: fetched_at.to_string(),
+    })
+}
+
+/// Convert plugin listings to cache rows, skipping the ones
+/// [`listing_to_cache`] refuses (with a warning each) instead of failing the
+/// whole sync on one malformed listing.
+fn cache_rows_or_skip(
+    plugin_id: &str,
+    listings: &[nisaba_vendor_runtime::VendorListing],
+    fetched_at: &str,
+) -> Vec<VendorListingCache> {
+    let mut out = Vec::with_capacity(listings.len());
+    for l in listings {
+        match listing_to_cache(plugin_id, l, fetched_at) {
+            Ok(c) => out.push(c),
+            Err(e) => tracing::warn!(
+                plugin = %plugin_id,
+                vendor_item_id = %l.vendor_item_id,
+                "{e}; skipping listing"
+            ),
+        }
+    }
+    out
+}
+
+/// A live plugin listing (not yet cached) as a frontend result.
+fn listing_to_result(l: nisaba_vendor_runtime::VendorListing) -> VendorListingResult {
+    VendorListingResult {
+        vendor_item_id: l.vendor_item_id,
+        title: l.title,
+        price: l.price,
+        currency: l.currency,
+        quantity: l.quantity,
+        sku: l.sku,
+        image_url: l.images.first().cloned(),
+        images: l.images,
+        url: l.url,
+        upc: l.upc,
+        brand: l.brand,
+        mpn: l.mpn,
+        weight: l.weight,
+        dimensions: l.dimensions,
+        extras: l.extras,
+        group_key: l.group_key,
+        variant_attributes: l.variant_attributes,
     }
 }
 
 fn cache_to_result(c: VendorListingCache) -> VendorListingResult {
+    let image_url = c.primary_image().map(str::to_string);
+    let images = c.images_resolved();
     VendorListingResult {
         vendor_item_id: c.vendor_item_id,
         title: c.title,
@@ -113,8 +191,14 @@ fn cache_to_result(c: VendorListingCache) -> VendorListingResult {
         currency: c.currency,
         quantity: c.quantity,
         sku: c.sku,
-        image_url: c.image_url,
+        image_url,
+        images,
         url: c.url,
+        upc: c.upc,
+        brand: c.brand,
+        mpn: c.mpn,
+        weight: c.weight,
+        dimensions: c.dimensions,
         extras: c.extras,
         group_key: c.group_key,
         variant_attributes: c.variant_attributes,
@@ -1043,34 +1127,14 @@ pub async fn fetch_vendor_listings(
 
     // Save to cache as side-effect
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let cache_rows: Vec<VendorListingCache> = result
-        .iter()
-        .map(|l| listing_to_cache(&plugin_id, l, &now))
-        .collect();
+    let cache_rows: Vec<VendorListingCache> = cache_rows_or_skip(&plugin_id, &result, &now);
     if let Err(e) = db.save_vendor_listings_cache(&plugin_id, &cache_rows).await {
         tracing::error!(plugin = %plugin_id, "Failed to save vendor listings cache: {e}");
     } else {
         tracing::info!(plugin = %plugin_id, count = cache_rows.len(), "Saved vendor listings cache");
     }
 
-    let listings = result
-        .into_iter()
-        .map(|l| VendorListingResult {
-            vendor_item_id: l.vendor_item_id,
-            title: l.title,
-            price: l.price.and_then(Decimal::from_f64),
-            currency: l.currency,
-            quantity: l.quantity,
-            sku: l.sku,
-            image_url: l.image_url,
-            url: l.url,
-            extras: l.extras,
-            group_key: l.group_key,
-            variant_attributes: l.variant_attributes,
-        })
-        .collect();
-
-    Ok(listings)
+    Ok(result.into_iter().map(listing_to_result).collect())
 }
 
 // ── Vendor Cache Commands ─────────────────────────────────────
@@ -1171,10 +1235,8 @@ pub async fn sync_vendor_listings(
         match result {
             Ok(vendor_listings) => {
                 let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                let cache_rows: Vec<VendorListingCache> = vendor_listings
-                    .iter()
-                    .map(|l| listing_to_cache(&pid, l, &now))
-                    .collect();
+                let cache_rows: Vec<VendorListingCache> =
+                    cache_rows_or_skip(&pid, &vendor_listings, &now);
                 let count = cache_rows.len();
 
                 if let Err(e) = db_spawn.save_vendor_listings_cache(&pid, &cache_rows).await {
@@ -1284,8 +1346,17 @@ pub struct VendorListingForProduct {
     pub currency: Option<String>,
     pub quantity: Option<i64>,
     pub sku: Option<String>,
+    /// All image URLs, most representative first (N-7.2).
+    pub images: Vec<String>,
+    /// First image — the pre-freeze single-URL shape, kept so the frontend's
+    /// `image_url` keeps working unchanged.
     pub image_url: Option<String>,
     pub url: Option<String>,
+    pub upc: Option<String>,
+    pub brand: Option<String>,
+    pub mpn: Option<String>,
+    pub weight: Option<nisaba_core::types::Weight>,
+    pub dimensions: Option<nisaba_core::types::Dimensions>,
     pub extras: HashMap<String, String>,
     pub group_key: Option<String>,
     pub variant_attributes: HashMap<String, String>,
@@ -1311,21 +1382,31 @@ pub async fn get_vendor_listings_for_product(
 
     Ok(results
         .into_iter()
-        .map(|(plugin_name, variant_id, c)| VendorListingForProduct {
-            plugin_name,
-            variant_id,
-            vendor_item_id: c.vendor_item_id,
-            title: c.title,
-            price: c.price,
-            currency: c.currency,
-            quantity: c.quantity,
-            sku: c.sku,
-            image_url: c.image_url,
-            url: c.url,
-            extras: c.extras,
-            group_key: c.group_key,
-            variant_attributes: c.variant_attributes,
-            fetched_at: c.fetched_at,
+        .map(|(plugin_name, variant_id, c)| {
+            let image_url = c.primary_image().map(str::to_string);
+            let images = c.images_resolved();
+            VendorListingForProduct {
+                plugin_name,
+                variant_id,
+                vendor_item_id: c.vendor_item_id,
+                title: c.title,
+                price: c.price,
+                currency: c.currency,
+                quantity: c.quantity,
+                sku: c.sku,
+                image_url,
+                images,
+                url: c.url,
+                upc: c.upc,
+                brand: c.brand,
+                mpn: c.mpn,
+                weight: c.weight,
+                dimensions: c.dimensions,
+                extras: c.extras,
+                group_key: c.group_key,
+                variant_attributes: c.variant_attributes,
+                fetched_at: c.fetched_at,
+            }
         })
         .collect())
 }
@@ -1338,13 +1419,34 @@ pub struct VendorImportItem {
     pub group_key: Option<String>,
     pub title: String,
     pub sku: String,
-    pub quantity: i64,
-    pub price: Option<f64>,
+    /// Vendor stock on hand. `None` = unknown (the vendor gave no stock
+    /// figure) — it must reach the vendor-data row as NULL, never be coerced
+    /// to 0 (N-7.2). The concrete product/variant quantities use 0 for
+    /// unknown: nothing confirmed in stock.
+    #[serde(default)]
+    pub quantity: Option<i64>,
+    /// Exact decimal (N-6.1/N-7.2). The frontend sends a JSON number, which
+    /// the decimal module accepts; `currency` is required with a price.
+    #[serde(default, with = "decimal_money::option")]
+    pub price: Option<Decimal>,
     pub currency: Option<String>,
-    pub image_url: Option<String>,
+    /// All image URLs, most representative first (N-7.2).
+    #[serde(default)]
+    pub images: Vec<String>,
     pub url: Option<String>,
     #[serde(default)]
+    pub upc: Option<String>,
+    #[serde(default)]
+    pub brand: Option<String>,
+    #[serde(default)]
+    pub mpn: Option<String>,
+    #[serde(default)]
+    pub weight: Option<nisaba_core::types::Weight>,
+    #[serde(default)]
+    pub dimensions: Option<nisaba_core::types::Dimensions>,
+    #[serde(default)]
     pub extras: HashMap<String, String>,
+    #[serde(default)]
     pub variant_attributes: HashMap<String, String>,
 }
 
@@ -1363,11 +1465,26 @@ pub async fn import_vendor_listings(
     let db = state.active_db().await?;
     tracing::info!(plugin = %plugin_id, items = items.len(), "Importing vendor listings");
 
+    // N-7.2: a price without a currency is refused at import, like at sync
+    // time — the item is skipped with a warning, not imported half-formed.
+    let mut valid_items: Vec<&VendorImportItem> = Vec::with_capacity(items.len());
+    for item in &items {
+        if item.price.is_some() && item.currency.as_deref().is_none_or(str::is_empty) {
+            tracing::warn!(
+                plugin = %plugin_id,
+                vendor_item_id = %item.vendor_item_id,
+                "import: item has a price but no currency; skipping"
+            );
+            continue;
+        }
+        valid_items.push(item);
+    }
+
     // Group items by group_key
     let mut groups: HashMap<String, Vec<&VendorImportItem>> = HashMap::new();
     let mut standalone: Vec<&VendorImportItem> = Vec::new();
 
-    for item in &items {
+    for item in valid_items {
         match &item.group_key {
             Some(key) if !key.is_empty() => {
                 groups.entry(key.clone()).or_default().push(item);
@@ -1383,7 +1500,9 @@ pub async fn import_vendor_listings(
     for (group_key, group_items) in &groups {
         let product_id = uuid::Uuid::new_v4().to_string();
         let first = group_items[0];
-        let total_qty: i64 = group_items.iter().map(|i| i.quantity).sum();
+        // N-7.2: unknown vendor stock contributes nothing confirmed; the
+        // vendor-data row below still records it as NULL.
+        let total_qty: i64 = group_items.iter().map(|i| i.quantity.unwrap_or(0)).sum();
 
         let product = nisaba_core::types::Product {
             id: product_id.clone(),
@@ -1409,9 +1528,9 @@ pub async fn import_vendor_listings(
                 sku: item.sku.clone(),
                 name: item.vendor_item_id.clone(),
                 attributes: item.variant_attributes.clone(),
-                quantity: item.quantity,
+                quantity: item.quantity.unwrap_or(0),
                 on_hand_quantity: 0,
-                image_url: item.image_url.clone(),
+                image_url: item.images.first().cloned(),
                 sort_order: i as i32,
                 source_plugin_id: Some(plugin_id.clone()),
                 source_vendor_item_id: Some(item.vendor_item_id.clone()),
@@ -1427,12 +1546,20 @@ pub async fn import_vendor_listings(
                 plugin_id: plugin_id.clone(),
                 vendor_item_id: item.vendor_item_id.clone(),
                 title: item.title.clone(),
-                price: item.price.and_then(Decimal::from_f64),
+                price: item.price,
                 currency: item.currency.clone(),
-                quantity: Some(item.quantity),
+                // N-7.2: unknown vendor stock stays NULL here — never coerced
+                // to 0. Only the concrete variant/product quantities use 0.
+                quantity: item.quantity,
                 sku: Some(item.sku.clone()),
-                image_url: item.image_url.clone(),
+                images: item.images.clone(),
+                image_url: None,
                 url: item.url.clone(),
+                upc: item.upc.clone(),
+                brand: item.brand.clone(),
+                mpn: item.mpn.clone(),
+                weight: item.weight.clone(),
+                dimensions: item.dimensions.clone(),
                 extras: item.extras.clone(),
                 group_key: item.group_key.clone(),
                 variant_attributes: item.variant_attributes.clone(),
@@ -1463,7 +1590,7 @@ pub async fn import_vendor_listings(
             id: product_id.clone(),
             canonical_sku: item.sku.clone(),
             name: item.title.clone(),
-            quantity: item.quantity,
+            quantity: item.quantity.unwrap_or(0),
             low_stock_threshold: None,
             is_tracked: true,
             has_variants: true,
@@ -1482,9 +1609,9 @@ pub async fn import_vendor_listings(
             sku: item.sku.clone(),
             name: item.vendor_item_id.clone(),
             attributes: item.variant_attributes.clone(),
-            quantity: item.quantity,
+            quantity: item.quantity.unwrap_or(0),
             on_hand_quantity: 0,
-            image_url: item.image_url.clone(),
+            image_url: item.images.first().cloned(),
             sort_order: 0,
             source_plugin_id: Some(plugin_id.clone()),
             source_vendor_item_id: Some(item.vendor_item_id.clone()),
@@ -1500,12 +1627,19 @@ pub async fn import_vendor_listings(
             plugin_id: plugin_id.clone(),
             vendor_item_id: item.vendor_item_id.clone(),
             title: item.title.clone(),
-            price: item.price.and_then(Decimal::from_f64),
+            price: item.price,
             currency: item.currency.clone(),
-            quantity: Some(item.quantity),
+            // N-7.2: unknown vendor stock stays NULL here — never coerced to 0.
+            quantity: item.quantity,
             sku: Some(item.sku.clone()),
-            image_url: item.image_url.clone(),
+            images: item.images.clone(),
+            image_url: None,
             url: item.url.clone(),
+            upc: item.upc.clone(),
+            brand: item.brand.clone(),
+            mpn: item.mpn.clone(),
+            weight: item.weight.clone(),
+            dimensions: item.dimensions.clone(),
             extras: item.extras.clone(),
             group_key: None,
             variant_attributes: item.variant_attributes.clone(),
@@ -1598,10 +1732,8 @@ pub async fn run_vendor_sync_single(db: Arc<Db>, plugin_id: String, app: Option<
     match execute_plugin_in_thread(files, config, None, limits).await {
         Ok(vendor_listings) => {
             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let cache_rows: Vec<VendorListingCache> = vendor_listings
-                .iter()
-                .map(|l| listing_to_cache(&plugin_id, l, &now))
-                .collect();
+            let cache_rows: Vec<VendorListingCache> =
+                cache_rows_or_skip(&plugin_id, &vendor_listings, &now);
             let count = cache_rows.len();
 
             if let Err(e) = db.save_vendor_listings_cache(&plugin_id, &cache_rows).await {
@@ -1808,5 +1940,97 @@ mod tests {
         };
         let err = extract_zip_with_limits(&zip_of(&entries), &limits).unwrap_err();
         assert!(err.contains("entries"), "{err}");
+    }
+
+    // ── N-7.2: listing_to_cache ──
+
+    fn cache_listing_json() -> serde_json::Value {
+        serde_json::json!({
+            "vendor_item_id": "VI-1",
+            "title": "Widget",
+            "price": "19.99",
+            "currency": "USD",
+            "quantity": null,
+            "sku": "W-1",
+            "images": ["https://cdn/1.jpg", "https://cdn/2.jpg"],
+            "url": "https://vendor/1",
+            "upc": "001234567890",
+            "brand": "Acme",
+            "mpn": "ACM-1",
+            "weight": { "value": 1.5, "unit": "lb" },
+            "dimensions": { "length": 12.0, "width": 9.0, "height": 4.0, "unit": "in" },
+            "extras": {},
+            "group_key": null,
+            "variant_attributes": {}
+        })
+    }
+
+    fn parse_listing(v: serde_json::Value) -> nisaba_vendor_runtime::VendorListing {
+        serde_json::from_value(v).expect("test listing must parse")
+    }
+
+    #[test]
+    fn listing_to_cache_keeps_the_new_schema_and_unknown_quantity() {
+        let l = parse_listing(cache_listing_json());
+        let c = listing_to_cache("plug", &l, "2026-10-21 00:00:00").unwrap();
+        assert_eq!(c.price.map(|d| d.to_string()).as_deref(), Some("19.99"));
+        assert_eq!(c.currency.as_deref(), Some("USD"));
+        assert_eq!(c.quantity, None, "unknown must stay unknown, not become 0");
+        assert_eq!(c.images, ["https://cdn/1.jpg", "https://cdn/2.jpg"]);
+        assert_eq!(c.image_url, None, "legacy column stays NULL on new rows");
+        assert_eq!(c.upc.as_deref(), Some("001234567890"));
+        assert_eq!(c.brand.as_deref(), Some("Acme"));
+        assert_eq!(c.mpn.as_deref(), Some("ACM-1"));
+        let w = c.weight.unwrap();
+        assert_eq!((w.value, w.unit.as_str()), (1.5, "lb"));
+        let d = c.dimensions.unwrap();
+        assert_eq!((d.length, d.unit.as_str()), (12.0, "in"));
+    }
+
+    #[test]
+    fn listing_to_cache_refuses_a_price_without_currency() {
+        let mut v = cache_listing_json();
+        v["currency"] = serde_json::Value::Null;
+        let l = parse_listing(v);
+        let err = listing_to_cache("plug", &l, "2026-10-21 00:00:00").unwrap_err();
+        assert!(err.contains("no currency"), "{err}");
+
+        // …and an empty currency is the same as none.
+        let mut v = cache_listing_json();
+        v["currency"] = serde_json::json!("");
+        let l = parse_listing(v);
+        assert!(listing_to_cache("plug", &l, "2026-10-21 00:00:00").is_err());
+    }
+
+    #[test]
+    fn listing_to_cache_accepts_no_price_at_all() {
+        let mut v = cache_listing_json();
+        v["price"] = serde_json::Value::Null;
+        v["currency"] = serde_json::Value::Null;
+        let l = parse_listing(v);
+        let c = listing_to_cache("plug", &l, "2026-10-21 00:00:00").unwrap();
+        assert_eq!(c.price, None);
+    }
+
+    #[test]
+    fn cache_rows_or_skip_drops_only_the_bad_listing() {
+        let good = parse_listing(cache_listing_json());
+        let mut bad_json = cache_listing_json();
+        bad_json["vendor_item_id"] = serde_json::json!("VI-2");
+        bad_json["currency"] = serde_json::Value::Null;
+        let bad = parse_listing(bad_json);
+        let rows = cache_rows_or_skip("plug", &[good, bad], "2026-10-21 00:00:00");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].vendor_item_id, "VI-1");
+    }
+
+    #[test]
+    fn cache_to_result_exposes_images_and_first_image_alias() {
+        let l = parse_listing(cache_listing_json());
+        let c = listing_to_cache("plug", &l, "2026-10-21 00:00:00").unwrap();
+        let r = cache_to_result(c);
+        assert_eq!(r.images, ["https://cdn/1.jpg", "https://cdn/2.jpg"]);
+        assert_eq!(r.image_url.as_deref(), Some("https://cdn/1.jpg"));
+        assert_eq!(r.upc.as_deref(), Some("001234567890"));
     }
 }

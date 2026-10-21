@@ -21,7 +21,8 @@
 //                 and `fetchListings(config): Promise<VendorListing[]>`
 //   the Nisaba object: fetch, sleep, emitBatch, log — see "The host API" below
 //   VendorListing: vendor_item_id, title, price, currency, quantity, sku,
-//                  image_url, url, extras, group_key, variant_attributes
+//                  images, url, upc, brand, mpn, weight, dimensions,
+//                  extras, group_key, variant_attributes
 //
 // Keep to this surface and the plugin keeps installing on every 1.x host.
 
@@ -58,14 +59,38 @@ export interface VendorListing {
   /** Stable and unique within this vendor — how Nisaba recognises the item next run. */
   vendor_item_id: string
   title: string
-  price?: number | null
-  currency?: string | null // ISO 4217, e.g. "USD"
+  /** Exact decimal amount as a string, e.g. `"12.99"` — never binary floating
+   *  point. A JSON number is still accepted (plugins written before the v1
+   *  freeze), but new plugins must send the exact decimal text. `currency` is
+   *  required whenever a price is present; the host refuses the listing
+   *  otherwise. */
+  price?: string | number | null
+  /** ISO 4217, e.g. "USD". Required when `price` is present. */
+  currency?: string | null
+  /** Vendor stock on hand. `null` (or omitted) means UNKNOWN — the vendor gave
+   *  no stock figure, and Nisaba must not treat it as 0. `0` means OUT OF
+   *  STOCK. Getting this wrong marks unknown stock as sold out (or vice
+   *  versa), so when the supplier's API has no stock field, leave it `null`. */
   quantity?: number | null // vendor stock on hand
   sku?: string | null
-  image_url?: string | null
+  /** Every known image URL, most representative first. Replaces the pre-freeze
+   *  single `image_url` — the host still accepts `image_url` from old plugins
+   *  and folds it into `images[0]`, but new plugins must send `images`. */
+  images?: string[]
   url?: string | null // the item's page on the vendor's site
-  /** Free-form strings shown on the vendor card. Nisaba recognises `upc`, `weight`,
-   *  `description`, `msrp`, `dealer_price` and `map_price`. */
+  /** UPC / GTIN / EAN. A string so leading zeros survive. */
+  upc?: string | null
+  brand?: string | null
+  /** Manufacturer part number. */
+  mpn?: string | null
+  /** Typed weight, e.g. `{ value: 1.5, unit: "lb" }`. */
+  weight?: { value: number; unit: string } | null
+  /** Typed dimensions; all three share `unit`, e.g. `{ length: 12, width: 9,
+   *  height: 4, unit: "in" }`. */
+  dimensions?: { length: number; width: number; height: number; unit: string } | null
+  /** Free-form strings shown on the vendor card. Nisaba recognises `description`,
+   *  `msrp`, `dealer_price` and `map_price`. UPC/weight/brand/MPN/dimensions are
+   *  typed fields now — do not also put them here. */
   extras?: Record<string, string>
   /** Listings sharing a `group_key` are variants of one product… */
   group_key?: string | null
@@ -154,18 +179,46 @@ function toListings(product: any): VendorListing[] {
   const variants: any[] = product.variants?.length ? product.variants : [product]
   return variants.map((v) => {
     const extras: Record<string, string> = {}
-    if (v.upc) extras.upc = String(v.upc)
     if (product.description) extras.description = String(product.description)
+
+    // All known images, most representative first.
+    const images: string[] = []
+    const primary = v.image ?? product.image
+    if (primary) images.push(String(primary))
+    for (const extra of v.images ?? product.images ?? []) {
+      const url = String(extra)
+      if (url && !images.includes(url)) images.push(url)
+    }
+
+    // quantity: null = the supplier gave no stock figure (unknown). 0 = out of
+    // stock. Never invent one from the other.
+    const quantity = typeof v.stock === 'number' ? v.stock : null
 
     return {
       vendor_item_id: String(v.sku ?? product.id),
       title: product.name,
-      price: typeof v.price === 'number' ? v.price : null,
+      // Decimal text, never binary floating point: String(12.5) is "12.5".
+      price: typeof v.price === 'number' ? String(v.price)
+        : typeof v.price === 'string' ? v.price : null,
       currency: 'USD',
-      quantity: typeof v.stock === 'number' ? v.stock : null,
+      quantity,
       sku: v.sku ?? null,
-      image_url: v.image ?? product.image ?? null,
+      images,
       url: product.url ?? null,
+      upc: v.upc != null ? String(v.upc) : null,
+      brand: product.brand ?? v.brand ?? null,
+      mpn: v.mpn ?? null,
+      weight: v.weight != null
+        ? { value: Number(v.weight), unit: String(v.weight_unit ?? 'lb') }
+        : null,
+      dimensions: v.length != null
+        ? {
+            length: Number(v.length),
+            width: Number(v.width ?? v.length),
+            height: Number(v.height ?? v.length),
+            unit: String(v.dimension_unit ?? 'in'),
+          }
+        : null,
       extras,
       group_key: product.variants?.length ? String(product.id) : null,
       variant_attributes: v.options ?? {},

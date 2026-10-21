@@ -121,7 +121,11 @@ async fn typescript_is_transpiled() {
     assert_eq!(listings.len(), 1);
     assert_eq!(listings[0].vendor_item_id, "7");
     assert_eq!(listings[0].title, "Widget");
-    assert_eq!(listings[0].price, Some(9.5));
+    assert_eq!(
+        listings[0].price.map(|d| d.to_string()).as_deref(),
+        Some("9.5"),
+        "a numeric plugin price converts with the shortest round-trip"
+    );
     assert_eq!(listings[0].currency.as_deref(), Some("USD"));
 }
 
@@ -589,4 +593,115 @@ fn log_routes_to_tracing_under_the_vendor_plugin_target() {
             "no {level} line for {msg:?} in:\n{out}"
         );
     }
+}
+
+// ── N-7.2: frozen VendorListing schema ───────────────────────────────────────
+
+#[tokio::test]
+async fn the_frozen_listing_schema_carries_images_and_typed_fields() {
+    let listings = run(r#"return [{
+            vendor_item_id: "VI-1", title: "Widget",
+            price: "19.99", currency: "USD", quantity: 4, sku: "W-1",
+            images: ["https://cdn/1.jpg", "https://cdn/2.jpg"],
+            url: "https://vendor/1",
+            upc: "001234567890", brand: "Acme", mpn: "ACM-1",
+            weight: { value: 1.5, unit: "lb" },
+            dimensions: { length: 12, width: 9, height: 4, unit: "in" },
+            extras: { description: "a widget" },
+            group_key: "G1", variant_attributes: { Color: "Red" },
+        }];"#)
+    .await
+    .unwrap();
+    let l = &listings[0];
+    assert_eq!(
+        l.price.map(|d| d.to_string()).as_deref(),
+        Some("19.99"),
+        "decimal string price parses exactly"
+    );
+    assert_eq!(l.currency.as_deref(), Some("USD"));
+    assert_eq!(l.quantity, Some(4));
+    assert_eq!(l.images, ["https://cdn/1.jpg", "https://cdn/2.jpg"]);
+    assert_eq!(l.upc.as_deref(), Some("001234567890"));
+    assert_eq!(l.brand.as_deref(), Some("Acme"));
+    assert_eq!(l.mpn.as_deref(), Some("ACM-1"));
+    let w = l.weight.as_ref().unwrap();
+    assert_eq!((w.value, w.unit.as_str()), (1.5, "lb"));
+    let d = l.dimensions.as_ref().unwrap();
+    assert_eq!((d.length, d.width, d.height), (12.0, 9.0, 4.0));
+    assert_eq!(d.unit, "in");
+    assert_eq!(l.extras["description"], "a widget");
+}
+
+#[tokio::test]
+async fn quantity_null_means_unknown_and_zero_means_out_of_stock() {
+    let listings = run(r#"return [
+            { vendor_item_id: "A", title: "a", quantity: null },
+            { vendor_item_id: "B", title: "b" },
+            { vendor_item_id: "C", title: "c", quantity: 0 },
+        ];"#)
+    .await
+    .unwrap();
+    assert_eq!(listings[0].quantity, None, "explicit null stays unknown");
+    assert_eq!(listings[1].quantity, None, "missing stays unknown");
+    assert_eq!(
+        listings[2].quantity,
+        Some(0),
+        "0 is out of stock, not unknown"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_single_image_url_folds_into_images() {
+    // Pre-freeze plugins send `image_url`; the host folds it into `images`.
+    let listings = run(r#"return [{ vendor_item_id: "VI-1", title: "Widget",
+                      image_url: "https://cdn/legacy.jpg" }];"#)
+    .await
+    .unwrap();
+    assert_eq!(listings[0].images, ["https://cdn/legacy.jpg"]);
+}
+
+#[tokio::test]
+async fn a_legacy_image_url_is_not_duplicated_when_already_listed() {
+    let listings = run(r#"return [{ vendor_item_id: "VI-1", title: "Widget",
+                      images: ["https://cdn/legacy.jpg", "https://cdn/2.jpg"],
+                      image_url: "https://cdn/legacy.jpg" }];"#)
+    .await
+    .unwrap();
+    assert_eq!(
+        listings[0].images,
+        ["https://cdn/legacy.jpg", "https://cdn/2.jpg"]
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_numeric_price_still_parses_with_shortest_round_trip() {
+    // Pre-freeze plugins send `price` as a JSON number; it converts with the
+    // shortest round-trip so 19.99 stays 19.99.
+    let listings = run(r#"return [{ vendor_item_id: "VI-1", title: "Widget",
+                      price: 19.99, currency: "USD" }];"#)
+    .await
+    .unwrap();
+    assert_eq!(
+        listings[0].price.map(|d| d.to_string()).as_deref(),
+        Some("19.99")
+    );
+}
+
+#[tokio::test]
+async fn listings_serialize_without_the_legacy_image_url() {
+    // The frozen schema writes `images`; `image_url` is read-only compat.
+    let listings = run(r#"return [{ vendor_item_id: "VI-1", title: "Widget",
+                      images: ["https://cdn/1.jpg"],
+                      image_url: "https://cdn/legacy.jpg" }];"#)
+    .await
+    .unwrap();
+    let json = serde_json::to_value(&listings[0]).unwrap();
+    assert_eq!(
+        json["images"],
+        serde_json::json!(["https://cdn/legacy.jpg", "https://cdn/1.jpg"])
+    );
+    assert!(
+        json.get("image_url").is_none(),
+        "image_url must not serialize: {json}"
+    );
 }

@@ -141,6 +141,27 @@ pub mod decimal_money {
     }
 }
 
+/// Typed product weight (N-7.2): a numeric amount in a named unit, e.g.
+/// `{ "value": 1.5, "unit": "lb" }`. Replaces the free-form `weight` string
+/// that used to hide in a vendor listing's `extras`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Weight {
+    pub value: f64,
+    /// Unit of `value`, e.g. `"lb"`, `"oz"`, `"kg"`, `"g"`.
+    pub unit: String,
+}
+
+/// Typed physical dimensions (N-7.2): all three linear measures share `unit`,
+/// e.g. `{ "length": 12, "width": 9, "height": 4, "unit": "in" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dimensions {
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Linear unit of the three measures, e.g. `"in"`, `"cm"`.
+    pub unit: String,
+}
+
 /// Cached vendor listing from a plugin execution (persisted in DB).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VendorListingCache {
@@ -151,14 +172,55 @@ pub struct VendorListingCache {
     #[serde(with = "decimal_money::option")]
     pub price: Option<Decimal>,
     pub currency: Option<String>,
+    /// Vendor stock on hand. `None` = unknown (the vendor gave no stock
+    /// figure); `Some(0)` = out of stock. The distinction is preserved from
+    /// the plugin all the way here — unknown must never be coerced to 0.
     pub quantity: Option<i64>,
     pub sku: Option<String>,
+    /// All known image URLs, most representative first (N-7.2).
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// Legacy pre-N-7.2 single-image column. Read-only: rows written before
+    /// the freeze are folded into `images` on read; new rows leave it NULL.
     pub image_url: Option<String>,
     pub url: Option<String>,
+    /// UPC / GTIN / EAN. A string so leading zeros survive.
+    #[serde(default)]
+    pub upc: Option<String>,
+    #[serde(default)]
+    pub brand: Option<String>,
+    /// Manufacturer part number.
+    #[serde(default)]
+    pub mpn: Option<String>,
+    #[serde(default)]
+    pub weight: Option<Weight>,
+    #[serde(default)]
+    pub dimensions: Option<Dimensions>,
     pub extras: HashMap<String, String>,
     pub group_key: Option<String>,
     pub variant_attributes: HashMap<String, String>,
     pub fetched_at: String,
+}
+
+impl VendorListingCache {
+    /// Fold a legacy single `image_url` into `images` when the typed column
+    /// has nothing: rows written before N-7.2 only have the old column.
+    pub fn images_resolved(&self) -> Vec<String> {
+        if self.images.is_empty() {
+            self.image_url.clone().into_iter().collect()
+        } else {
+            self.images.clone()
+        }
+    }
+
+    /// First image, for single-image consumers (variant thumbnails, the
+    /// frontend's `image_url` field).
+    pub fn primary_image(&self) -> Option<&str> {
+        self.images
+            .first()
+            .map(String::as_str)
+            .or(self.image_url.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

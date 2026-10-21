@@ -688,14 +688,27 @@ five operations (`fetch`, `sleep`, `log`, `emitBatch`, `setResult`) and metadata
 - [x] An `api_version` in metadata. The host refuses a major version it does not know and
       says so at install. The surface frozen at `api_version: 1` is written down in
       `plugins/template` and `SECURITY.md`.
-- [ ] Fix `VendorListing` before freezing it:
-      - `image_url` (a single URL) becomes `images: string[]`;
-      - `price: f64` becomes a decimal string or integer minor units, with `currency`
-        required whenever a price is present (the Cross-cutting money item);
-      - the meaning of `quantity: null` (unknown) versus `0` (out of stock) is written down;
-      - UPC/GTIN, brand, MPN, weight and dimensions become typed fields instead of strings
-        in `extras`, because platform create-listing needs them;
+- [x] Fix `VendorListing` before freezing it:
+      - `image_url` (a single URL) becomes `images: string[]`, with a compat
+        fold: a legacy `image_url` from an old plugin becomes `images[0]`;
+      - `price` is an exact decimal (decimal string from plugins; a JSON number
+        is still accepted via the shortest round-trip), with `currency`
+        required whenever a price is present — enforced at the core boundary
+        (the listing is skipped with a warning) and at import;
+      - the meaning of `quantity: null` (unknown) versus `0` (out of stock) is
+        written down in the template contract and preserved through sync,
+        cache, and import — unknown is never coerced to 0;
+      - UPC/GTIN, brand, MPN, weight (`{ value, unit }`) and dimensions
+        (`{ length, width, height, unit }`) become typed fields instead of
+        strings in `extras`, because platform create-listing needs them;
       - `extras` keeps its free-form role.
+      → Done (N-7.2): `VendorListing` (vendor-runtime) and `VendorListingCache`
+      (core, migration 025 adds `images_json`/`upc`/`brand`/`mpn`/`weight_json`/
+      `dimensions_json` to both vendor tables; legacy `image_url` rows fold on
+      read) carry the frozen shape; the template and Rothco plugins emit it;
+      vendor-runtime tests cover the schema and the `image_url`/numeric-price
+      compat path; the frozen surface is written down in `plugins/template`
+      and `SECURITY.md`.
 - [x] **Secrets from the keyring.** A `secret: true` config value is stored in the OS
       keyring, injected into the run, and never written to `config_json` or the P2P
       payload. This closes the plaintext item above.
@@ -1608,8 +1621,10 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       columns (`pricing_snapshots.amount`, `vendor_listings_cache.price`,
       `product_vendor_data.price`) are TEXT holding the exact decimal string via
       migration 024, which converts legacy REAL values with `CAST`. Plugin
-      `VendorListing.price` stays `f64` until N-7.2 freezes the plugin shape; it is
-      converted with `Decimal::from_f64` (shortest round-trip) at the core boundary.
+      `VendorListing.price` is now an exact decimal at the plugin boundary
+      (N-7.2 froze the shape): plugins send the decimal text, a JSON number
+      from a pre-freeze plugin is still accepted via `Decimal::from_f64`
+      (shortest round-trip), and no `f64` remains on the path.
 - [ ] Structured logging levels that are useful in the shipped app, not just `tracing` defaults
 - [ ] Nuxt 4 migration. The lockfile pins Nuxt 3.21.1, `radix-vue` 1.9 and Tailwind 3.4.
       Nuxt 3's maintenance window is closing, and `radix-vue` has been succeeded by
