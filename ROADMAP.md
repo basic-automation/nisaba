@@ -1397,7 +1397,7 @@ any peer can record a sale.
 - [ ] Grow the UI smoke test beyond the marketplace — the product, listings and vendor
       pages, and the empty states above. (Whether it can run in CI is settled: c99c566
       added the job.)
-- [ ] **Fix the CI UI smoke job, which fails on PR #2** (run 36223531255).
+- [x] **Fix the CI UI smoke job, which fails on PR #2** (run 36223531255).
       `scripts/ui-smoke.py` builds the app path from a relative `--target-dir target`
       without `abspath`. Its existence check passes from the repo root, but tauri-driver is
       then started with `cwd` set to the temp fixture dir, so WebKitWebDriver cannot find
