@@ -18,7 +18,8 @@
 //             (key, label, required, secret, placeholder), category, icon,
 //             allowed_hosts
 //   entry points: `metadata` (a plain object literal, read before any run)
-//                 and `fetchListings(config): Promise<VendorListing[]>`
+//                 and `fetchListings(config, { since, cursor }): Promise<VendorListing[] | ListingChanges>`
+//                 (a full catalog, or only what changed — see "Going incremental" below)
 //   the Nisaba object: fetch, sleep, emitBatch, store, log — see "The host API" below
 //   VendorListing: vendor_item_id, title, price, currency, quantity, sku,
 //                  images, url, upc, brand, mpn, weight, dimensions,
@@ -80,6 +81,31 @@ declare const Nisaba: {
   log: Record<'trace' | 'debug' | 'info' | 'warn' | 'error', (msg: unknown) => void>
 }
 
+/** What the host passes as the second argument to `fetchListings`.
+ *
+ *  `since` is the UTC timestamp of the last successful sync (`null` on the
+ *  first run — return the whole catalog then). `cursor` is the opaque cursor
+ *  your plugin returned on the previous run (`null` when it returned none).
+ *  A plugin may ignore both and keep returning the full catalog; the host
+ *  then keeps full-pull semantics. */
+export interface FetchListingsOptions {
+  since: string | null
+  cursor: string | null
+}
+
+/** The incremental alternative to returning the whole catalog. The host
+ *  merges it into the cached catalog: `changes` are upserted by
+ *  `vendor_item_id`, ids in `deleted` are removed, and everything else is
+ *  left untouched. Return a new `cursor` so the next run can pick up where
+ *  this one stopped. */
+export interface ListingChanges {
+  /** Only the listings that are new or changed since `since`/`cursor`. */
+  changes: VendorListing[]
+  /** `vendor_item_id`s that no longer exist at the supplier. */
+  deleted?: string[]
+  /** Opaque cursor for the next run — a page token, an ETag, a timestamp. */
+  cursor?: string | null
+}
 /** One purchasable item. Only `vendor_item_id` and `title` are required. */
 export interface VendorListing {
   /** Stable and unique within this vendor — how Nisaba recognises the item next run. */
@@ -161,14 +187,46 @@ const API_BASE = 'https://api.example.com/v1'
 const BATCH_SIZE = 200
 const MAX_RETRIES = 5
 
-/** Called on each vendor sync. Return the whole catalog.
+/** Called on each vendor sync.
+ *
+ *  The second argument carries the host's incremental state: `options.since`
+ *  is the UTC timestamp of the last successful sync (`null` on the first
+ *  run), and `options.cursor` the opaque cursor this plugin returned last
+ *  time. Two return shapes are accepted:
+ *
+ *  - a `VendorListing[]` — the whole catalog (full pull). Plugins that
+ *    ignore `options` keep working exactly like this.
+ *  - a `ListingChanges` — only what changed since `since`/`cursor`, plus
+ *    `deleted` ids and the cursor for the next run. The host merges it into
+ *    the cached catalog, so a supplier with a delta endpoint (or a `since`
+ *    query parameter) no longer pays for a full pull every cycle.
+ *
+ *  This template does a full pull: the Example Supplier API has no delta
+ *  endpoint. A supplier that does would look like this:
+ *
+ *    export async function fetchListings(config, options): Promise<VendorListing[] | ListingChanges> {
+ *      const qs = options.since ? `?since=${encodeURIComponent(options.since)}` : ''
+ *      const data = await getJson(`${API_BASE}/products/delta${qs}`, apiKey)
+ *      return {
+ *        changes: data.items.flatMap(toListings),
+ *        deleted: data.deleted_ids ?? [],
+ *        cursor: data.next_cursor ?? null,
+ *      }
+ *    }
  *
  *  Throw an Error when the import cannot succeed (bad credentials, the API is down):
  *  its message is shown to the user and the previous catalog is kept. For a problem
  *  with a single item, log it and carry on instead. */
-export async function fetchListings(config: Record<string, string>): Promise<VendorListing[]> {
+export async function fetchListings(
+  config: Record<string, string>,
+  options?: FetchListingsOptions,
+): Promise<VendorListing[] | ListingChanges> {
   const apiKey = config.api_key?.trim()
   if (!apiKey) throw new Error('Set an API key on the plugin before syncing.')
+
+  // `options.since`/`options.cursor` arrive on every run; this template ignores
+  // them and pulls the whole catalog (full-pull semantics) — see the
+  // incremental example in the doc comment above.
 
   const listings: VendorListing[] = []
   let pending: VendorListing[] = []

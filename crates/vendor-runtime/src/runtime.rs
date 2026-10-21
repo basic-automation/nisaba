@@ -17,7 +17,7 @@ use crate::ops::{
     BatchCallback, BlockPrivateHosts, FetchPolicy, MaxResponseBytes, OutputBudget, PluginResult,
     PluginStore, PluginStoreContext,
 };
-use crate::types::{PluginMetadata, VendorListing};
+use crate::types::{FetchListingsArgs, FetchListingsResult, PluginMetadata, VendorListing};
 
 /// Custom module loader that transpiles TypeScript on the fly.
 ///
@@ -296,6 +296,7 @@ impl VendorRuntime {
             batch_callback,
             &limits,
             None,
+            &FetchListingsArgs::default(),
         )
         .await;
         let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
@@ -326,6 +327,39 @@ impl VendorRuntime {
                 plugin_id: plugin_id.to_string(),
                 store,
             }),
+            &FetchListingsArgs::default(),
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
+        result
+    }
+
+    /// Incremental-sync entry point (N-7.4): execute a multi-file plugin's
+    /// `fetchListings(config, { since, cursor })` with a per-plugin key–value
+    /// store behind `Nisaba.store`, parsing either a full catalog or an
+    /// incremental delta. The caller merges a delta into the cached catalog;
+    /// a full catalog keeps the pre-N-7.4 replace semantics.
+    pub async fn execute_plugin_from_files_with_store_incremental(
+        files: &HashMap<String, String>,
+        plugin_id: &str,
+        store: Arc<dyn PluginStore>,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: PluginLimits,
+        args: &FetchListingsArgs,
+    ) -> Result<FetchListingsResult> {
+        let (plugin_dir, index_path) = Self::write_plugin_files(files).await?;
+        let result = Self::execute_in_incremental(
+            &plugin_dir,
+            &index_path,
+            config,
+            batch_callback,
+            &limits,
+            Some(PluginStoreContext {
+                plugin_id: plugin_id.to_string(),
+                store,
+            }),
+            args,
         )
         .await;
         let _ = tokio::fs::remove_dir_all(&plugin_dir).await;
@@ -381,7 +415,65 @@ impl VendorRuntime {
         batch_callback: Option<BatchCallback>,
         limits: &PluginLimits,
         store: Option<PluginStoreContext>,
+        fetch_args: &FetchListingsArgs,
     ) -> Result<Vec<VendorListing>> {
+        let json = Self::run_fetch_listings(
+            root,
+            index_path,
+            config,
+            batch_callback,
+            limits,
+            store,
+            fetch_args,
+        )
+        .await?;
+
+        let listings: Vec<VendorListing> = serde_json::from_str(&json)
+            .map_err(|e| anyhow!("Failed to parse plugin result: {e}"))?;
+
+        Ok(listings)
+    }
+
+    async fn execute_in_incremental(
+        root: &Path,
+        index_path: &Path,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: &PluginLimits,
+        store: Option<PluginStoreContext>,
+        fetch_args: &FetchListingsArgs,
+    ) -> Result<FetchListingsResult> {
+        let json = Self::run_fetch_listings(
+            root,
+            index_path,
+            config,
+            batch_callback,
+            limits,
+            store,
+            fetch_args,
+        )
+        .await?;
+
+        let result: FetchListingsResult = serde_json::from_str(&json)
+            .map_err(|e| anyhow!("Failed to parse plugin result: {e}"))?;
+
+        Ok(result)
+    }
+
+    /// Run a plugin's `fetchListings(config, { since, cursor })` in a fresh
+    /// isolate and return its result as raw JSON. The second argument is always
+    /// passed — `{ since: null, cursor: null }` when the host has no incremental
+    /// state — so plugins can rely on the property existing; plugins written
+    /// before N-7.4 simply ignore the extra argument.
+    async fn run_fetch_listings(
+        root: &Path,
+        index_path: &Path,
+        config: HashMap<String, String>,
+        batch_callback: Option<BatchCallback>,
+        limits: &PluginLimits,
+        store: Option<PluginStoreContext>,
+        fetch_args: &FetchListingsArgs,
+    ) -> Result<String> {
         // The fetch allowlist comes from the plugin's metadata, read in an isolate of its
         // own and applied from Rust before any of this run's plugin code executes — so
         // module top-level code cannot get in first and widen it.
@@ -396,15 +488,17 @@ impl VendorRuntime {
             .map_err(|_| anyhow!("Invalid plugin path"))?;
 
         let config_json = serde_json::to_string(&config)?;
+        let args_json = serde_json::to_string(fetch_args)?;
 
         let wrapper_code = format!(
             r#"
             import {{ fetchListings }} from "{}";
             const config = {};
-            const result = await fetchListings(config);
+            const args = {};
+            const result = await fetchListings(config, args);
             __nisabaSetResult(JSON.stringify(result));
             "#,
-            plugin_url, config_json
+            plugin_url, config_json, args_json
         );
 
         let wrapper_path = root.join(format!("_run_{}.js", nonce()));
@@ -430,10 +524,7 @@ impl VendorRuntime {
 
         debug!("Plugin returned {} bytes of JSON", result.0.len());
 
-        let listings: Vec<VendorListing> = serde_json::from_str(&result.0)
-            .map_err(|e| anyhow!("Failed to parse plugin result: {e}"))?;
-
-        Ok(listings)
+        Ok(result.0.clone())
     }
 
     /// Write `wrapper_code` to `wrapper_path` inside `root`, then load and evaluate it to

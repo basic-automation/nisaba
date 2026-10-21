@@ -726,9 +726,20 @@ six operations (`fetch`, `sleep`, `log`, `emitBatch`, `store`, `setResult`) and 
       values only. Sandbox tests prove cross-plugin isolation and cap
       enforcement; the API is documented in `plugins/template/index.ts` and
       `SECURITY.md`.
-- [ ] **Incremental sync.** `fetchListings({ since, cursor })` returns only what changed,
+- [x] **Incremental sync.** `fetchListings({ since, cursor })` returns only what changed,
       and the host merges it into the cached catalog. Full catalog pulls every cycle are
       what hit supplier rate limits and stretch runs toward the 12 h limit.
+      → Done (N-7.4): the runtime always passes `{ since, cursor }` as the second
+      `fetchListings` argument (`{ since: null, cursor: null }` on the first run);
+      a plugin may return a `{ changes, deleted, cursor }` delta instead of the
+      array, which the host merges transactionally (`merge_vendor_listings_cache`:
+      changes upserted by `vendor_item_id`, deleted ids removed, untouched rows
+      keep `fetched_at`). The host's `since`/cursor live in the new
+      `vendor_sync_state` table (migration 027), cleared on uninstall; plugins
+      that ignore the arguments keep full-pull replace semantics. Runtime tests
+      cover an incremental second run changing one listing (plus cursor
+      echo-back), and DB tests cover the merge and the sync-state round-trip.
+      Documented in `plugins/template/index.ts` and `SECURITY.md`.
 - [ ] **Host-managed OAuth for supplier APIs.** Metadata declares `oauth` (authorize URL,
       token URL, scopes). The host runs the flow in its own window and keeps the tokens in
       the keyring; the plugin receives only a current access token, never the refresh
