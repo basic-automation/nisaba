@@ -25,7 +25,9 @@ Built with Rust + Tauri 2 and a Nuxt 3 frontend.
   Wholesale plugin.
 - **Multi-company + P2P sync** — optional peer-to-peer sync between installs over Tor
   onion services, with AES-GCM encrypted payloads and secrets held in the OS keyring.
-- **Analytics** — per-product history and time-windowed analytics, charted in the UI.
+- **Analytics** — per-product history and time-windowed analytics. History is shown
+  as entry counts in the UI today (`inventory.vue` renders `history.length`);
+  charting the entries is still on the roadmap ([Phase 1](ROADMAP.md)).
 
 ## Sync cycle
 
@@ -80,7 +82,8 @@ in [`crates/tauri-app/src/commands`](crates/tauri-app/src/commands) (`products`,
 - Rust — the toolchain is pinned to **stable** by [`rust-toolchain.toml`](rust-toolchain.toml),
   matching CI, so rustup selects it for you. Plus the
   [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS.
-- Node.js 18+ and npm
+- Node.js `^20.19.0 || >=22.12.0` and npm — required by Nuxt 3.21 / Vite 7 and
+  enforced by the `engines` field in [`frontend/package.json`](frontend/package.json)
 - `cargo-tauri` CLI: `cargo install tauri-cli --version "^2"`
 
 ### Development
@@ -147,6 +150,11 @@ Config lives outside the repo, at the platform data directory:
 
 - Windows: `%APPDATA%\nisaba\config.toml`
 - Unix: `~/.config/nisaba/config.toml`
+
+A `config.toml` in the process's **working directory takes precedence** over both of
+the above — useful for development and tests. See `resolve_and_load` in
+[`crates/core/src/config.rs`](crates/core/src/config.rs): an explicit CLI path wins
+first, then `./config.toml` in the working directory, then the data-directory file.
 
 A default file is written on first run if none exists. Copy
 [`config.example.toml`](config.example.toml) as a starting point — it covers the sync
