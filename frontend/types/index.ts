@@ -214,10 +214,19 @@ export interface VendorListing {
   title: string
   price: number | null
   currency: string | null
+  /** null = unknown vendor stock, 0 = out of stock (N-7.2). */
   quantity: number | null
   sku: string | null
+  /** All image URLs, most representative first (N-7.2). */
+  images: string[]
+  /** First image — kept for the pre-freeze single-URL shape. */
   image_url: string | null
   url: string | null
+  upc: string | null
+  brand: string | null
+  mpn: string | null
+  weight: { value: number; unit: string } | null
+  dimensions: { length: number; width: number; height: number; unit: string } | null
   extras?: Record<string, string>
   group_key?: string | null
   variant_attributes?: Record<string, string>
@@ -232,8 +241,14 @@ export interface VendorListingForProduct {
   currency: string | null
   quantity: number | null
   sku: string | null
+  images: string[]
   image_url: string | null
   url: string | null
+  upc: string | null
+  brand: string | null
+  mpn: string | null
+  weight: { value: number; unit: string } | null
+  dimensions: { length: number; width: number; height: number; unit: string } | null
   extras: Record<string, string>
   group_key: string | null
   variant_attributes: Record<string, string>
@@ -245,11 +260,17 @@ export interface VendorImportItem {
   group_key: string | null
   title: string
   sku: string
-  quantity: number
+  /** null = unknown vendor stock — must reach the backend as null (N-7.2). */
+  quantity: number | null
   price: number | null
   currency: string | null
-  image_url: string | null
+  images: string[]
   url: string | null
+  upc: string | null
+  brand: string | null
+  mpn: string | null
+  weight: { value: number; unit: string } | null
+  dimensions: { length: number; width: number; height: number; unit: string } | null
   extras: Record<string, string>
   variant_attributes: Record<string, string>
 }
