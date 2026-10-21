@@ -117,7 +117,7 @@ fn a_full_listing_takes_the_first_offer_that_actually_has_a_price() {
     // pricingSummary. Taking offers[0] blindly would report no price at all.
     let full = to_full_listing(&item("PANTS-RIPSTOP-M"), &offers());
     let price = full.price.expect("the published offer's price");
-    assert_eq!(price.amount, 48.00);
+    assert_eq!(price.amount, rust_decimal::Decimal::new(4800, 2));
     assert_eq!(price.currency, "USD");
 }
 
@@ -242,7 +242,7 @@ fn a_trading_item_falls_back_to_its_item_id_for_a_title() {
 fn the_trading_price_is_read_from_the_currency_attribute_and_element_text() {
     let full = trading_to_full_listing(&trading_item("110512345678"));
     let price = full.price.expect("a current price");
-    assert_eq!(price.amount, 48.00);
+    assert_eq!(price.amount, rust_decimal::Decimal::new(4800, 2));
     assert_eq!(price.currency, "USD");
 }
 
