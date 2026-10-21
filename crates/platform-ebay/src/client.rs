@@ -1,6 +1,7 @@
 use nisaba_core::error::SyncError;
 use nisaba_core::types::Platform;
 use reqwest::Client;
+use rust_decimal::Decimal;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -370,7 +371,7 @@ pub(crate) fn check_bulk_update_response(
 pub(crate) fn build_bulk_price_body(
     sku: &str,
     offer_id: &str,
-    price: f64,
+    price: Decimal,
     currency: &str,
 ) -> serde_json::Value {
     json!({
@@ -984,7 +985,7 @@ impl EbayClient {
         access_token: &str,
         sku: &str,
         offer_id: &str,
-        price: f64,
+        price: Decimal,
         currency: &str,
     ) -> Result<(), SyncError> {
         let url = format!(
@@ -1033,7 +1034,7 @@ impl EbayClient {
 
         debug!(
             sku = sku,
-            price = price,
+            price = %price,
             "Updated eBay price via bulk endpoint"
         );
         Ok(())
@@ -1755,11 +1756,29 @@ mod tests {
 
     #[test]
     fn price_body_targets_offer_and_never_writes_quantity() {
-        let body = build_bulk_price_body("SKU-1", "offer-123", 12.5, "USD");
+        let body = build_bulk_price_body("SKU-1", "offer-123", Decimal::new(125, 1), "USD");
         let text = body.to_string();
         assert!(text.contains("\"offerId\":\"offer-123\""), "{text}");
         assert!(!text.contains("quantity"), "{text}");
         assert!(!text.contains("shipToLocationAvailability"), "{text}");
+    }
+
+    #[test]
+    fn price_body_serializes_a_computed_price_exactly() {
+        // N-6.1: 0.1 + 0.2 in f64 is 0.30000000000000004; the eBay bulk
+        // body must carry "0.30".
+        use std::str::FromStr;
+        let amount = Decimal::from_str("0.1").unwrap() + Decimal::from_str("0.2").unwrap();
+        let body = build_bulk_price_body("SKU-1", "offer-123", amount, "USD");
+        let text = body.to_string();
+        assert!(
+            text.contains(r#""value":"0.30""#),
+            "price must serialize exactly, body: {text}"
+        );
+        assert!(
+            !text.contains("0.30000000000000004"),
+            "f64 artifact leaked into the eBay price body: {text}"
+        );
     }
 
     /// set_quantity path: a per-SKU rejection (HTTP 207) must be Err.
@@ -1793,7 +1812,7 @@ mod tests {
         let (base, _captured) = spawn_fake_server(207, REJECTED_BULK_BODY.to_string()).await;
         let client = EbayClient::with_api_base(base);
         let err = client
-            .bulk_update_price_quantity("token", "SKU-1", "offer-123", 19.99, "USD")
+            .bulk_update_price_quantity("token", "SKU-1", "offer-123", Decimal::new(1999, 2), "USD")
             .await
             .expect_err("a rejected price write must surface as Err");
         assert!(
@@ -1881,7 +1900,7 @@ mod tests {
         let (base, captured) = spawn_fake_server(200, OK_BULK_BODY.to_string()).await;
         let client = EbayClient::with_api_base(base);
         client
-            .bulk_update_price_quantity("token", "SKU-1", "offer-123", 19.99, "USD")
+            .bulk_update_price_quantity("token", "SKU-1", "offer-123", Decimal::new(1999, 2), "USD")
             .await
             .expect("a 200 per-SKU price result must be Ok");
         let requests = captured.lock().unwrap();
