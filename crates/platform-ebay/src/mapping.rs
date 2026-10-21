@@ -4,6 +4,7 @@ use nisaba_core::types::{
     FullListing, ListingDescription, ListingPhoto, ListingPrice, Platform, PlatformInventoryItem,
     PlatformListing,
 };
+use rust_decimal::Decimal;
 
 use crate::types::{EbayInventoryItem, EbayOffer, TradingItem};
 
@@ -109,7 +110,7 @@ pub fn to_full_listing(item: &EbayInventoryItem, offers: &[EbayOffer]) -> FullLi
             let pricing = offer.pricing_summary.as_ref()?;
             let amount = pricing.price.as_ref()?;
             let value_str = amount.value.as_ref()?;
-            let value: f64 = value_str.parse().ok()?;
+            let value: Decimal = value_str.parse().ok()?;
             let currency = amount.currency.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice {
                 amount: value,
@@ -228,7 +229,7 @@ pub fn trading_to_full_listing(item: &TradingItem) -> FullListing {
         .as_ref()
         .and_then(|ss| ss.current_price.as_ref())
         .and_then(|cp| {
-            let val: f64 = cp.value.as_ref()?.parse().ok()?;
+            let val: Decimal = cp.value.as_ref()?.parse().ok()?;
             let currency = cp.currency_id.clone().unwrap_or_else(|| "USD".to_string());
             Some(ListingPrice {
                 amount: val,
@@ -274,7 +275,7 @@ pub fn trading_to_listing(item: &TradingItem) -> PlatformListing {
         .as_ref()
         .and_then(|ss| ss.current_price.as_ref())
         .and_then(|cp| {
-            let val: f64 = cp.value.as_ref()?.parse().ok()?;
+            let val: Decimal = cp.value.as_ref()?.parse().ok()?;
             Some(val)
         });
 
