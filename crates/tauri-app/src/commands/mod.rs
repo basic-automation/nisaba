@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod auth;
+pub mod backup;
 pub mod company;
 pub mod config;
 pub mod export_import;

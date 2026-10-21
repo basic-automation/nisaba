@@ -359,6 +359,9 @@ export interface AppConfig {
   }
   database: {
     path: string
+    backup_enabled: boolean
+    backup_keep_last: number
+    backup_interval_hours: number
   }
   ebay: {
     enabled: boolean
@@ -393,6 +396,15 @@ export interface AppConfig {
     default_low_stock_threshold: number
   }
   company: CompanyConfig
+}
+
+// N-8.1: database backups
+export interface BackupInfo {
+  name: string
+  path: string
+  created_at: string
+  size_bytes: number
+  reason: string
 }
 
 // Notification system
