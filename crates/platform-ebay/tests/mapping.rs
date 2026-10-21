@@ -217,14 +217,16 @@ fn trading_quantity_is_listed_minus_sold() {
 }
 
 #[test]
-fn a_trading_item_reporting_more_sold_than_listed_goes_negative() {
-    // Documenting current behaviour: the subtraction has no floor. eBay can
-    // report this during a revision or for a multi-variant listing. Nothing
-    // downstream writes it back (the sync engine floors the canonical quantity
-    // at zero), but it does surface in the mapping UI as a negative stock
-    // figure, and it makes this listing the minimum in any comparison.
+fn a_trading_item_reporting_more_sold_than_listed_is_floored_at_zero() {
+    // eBay can report more sold than listed during a revision or for a
+    // multi-variant listing. The available quantity floors at zero: a
+    // negative figure surfaced in the mapping UI and made this listing the
+    // minimum in any comparison.
     let odd = trading_to_listing(&trading_item("110511111111"));
-    assert_eq!(odd.quantity, -3, "2 listed, 5 sold");
+    assert_eq!(odd.quantity, 0, "2 listed, 5 sold floors at 0");
+
+    let full = trading_to_full_listing(&trading_item("110511111111"));
+    assert_eq!(full.quantity, 0, "the full listing floors the same way");
 }
 
 #[test]

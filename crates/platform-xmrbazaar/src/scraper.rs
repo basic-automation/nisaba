@@ -142,8 +142,10 @@ pub fn parse_listings(html: &str, base_url: &str) -> Vec<XmrListing> {
             .map(|el| el.text().collect::<String>().trim().to_lowercase())
             .unwrap_or_default();
 
-        // Active listings get quantity 1 (in stock), inactive get 0
-        let quantity = if status.contains("active") { 1 } else { 0 };
+        // Active listings get quantity 1 (in stock), inactive get 0.
+        // Exact match: `contains("active")` also matches "inactive", which
+        // read a deactivated listing as in stock.
+        let quantity = if status == "active" { 1 } else { 0 };
 
         let photos = image_url.iter().cloned().collect();
 

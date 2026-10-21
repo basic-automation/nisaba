@@ -21,6 +21,22 @@ fn url_encode(s: &str) -> String {
 const SANDBOX_API_BASE: &str = "https://api.sandbox.ebay.com";
 const PRODUCTION_API_BASE: &str = "https://api.ebay.com";
 
+/// The URL of the next page of a paged Inventory/Offer response, from the
+/// response's `next` href.
+///
+/// eBay paginates with a full `next` URL, not just an offset: callers must
+/// follow it rather than synthesise their own offsets (the href also encodes
+/// the page size and any continuation state). Returns `None` — pagination
+/// is over, or the offset fallback applies — when the href is absent,
+/// empty, or points back at the URL just fetched (which would loop).
+pub fn next_page_url(next: Option<&str>, current_url: &str) -> Option<String> {
+    let next = next?;
+    if next.is_empty() || next == current_url {
+        return None;
+    }
+    Some(next.to_string())
+}
+
 /// Recursively remove object entries whose value is JSON `null`, so a
 /// re-serialised GET response does not send explicit nulls back in a PUT
 /// body (eBay treats a present-but-null field as clearing it).
@@ -410,12 +426,15 @@ impl EbayClient {
         let mut all_items = Vec::new();
         let mut offset = 0;
         let limit = 100;
+        let mut next_url: Option<String> = None;
 
         loop {
-            let url = format!(
-                "{}/sell/inventory/v1/inventory_item?limit={}&offset={}",
-                self.api_base, limit, offset
-            );
+            let url = next_url.take().unwrap_or_else(|| {
+                format!(
+                    "{}/sell/inventory/v1/inventory_item?limit={}&offset={}",
+                    self.api_base, limit, offset
+                )
+            });
 
             let resp = self
                 .http
@@ -450,6 +469,7 @@ impl EbayClient {
                     message: format!("Failed to parse inventory response: {e}"),
                 })?;
 
+            let next = response.next.clone();
             let items = response.inventory_items.unwrap_or_default();
             let count = items.len();
             all_items.extend(items);
@@ -457,6 +477,13 @@ impl EbayClient {
             let total = response.total.unwrap_or(0) as usize;
             offset += count;
 
+            // Follow the response's `next` href when it offers one; the
+            // offset arithmetic is only the fallback for responses
+            // without one.
+            if let Some(next) = next_page_url(next.as_deref(), &url) {
+                next_url = Some(next);
+                continue;
+            }
             if offset >= total || count == 0 {
                 break;
             }
@@ -594,15 +621,18 @@ impl EbayClient {
         let mut all_offers = Vec::new();
         let mut offset = 0;
         let limit = 100;
+        let mut next_url: Option<String> = None;
 
         loop {
-            let url = format!(
-                "{}/sell/inventory/v1/offer?sku={}&limit={}&offset={}",
-                self.api_base,
-                url_encode(sku),
-                limit,
-                offset
-            );
+            let url = next_url.take().unwrap_or_else(|| {
+                format!(
+                    "{}/sell/inventory/v1/offer?sku={}&limit={}&offset={}",
+                    self.api_base,
+                    url_encode(sku),
+                    limit,
+                    offset
+                )
+            });
 
             let resp = self
                 .http
@@ -637,6 +667,7 @@ impl EbayClient {
                     message: format!("Failed to parse offers response: {e}"),
                 })?;
 
+            let next = response.next.clone();
             let offers = response.offers.unwrap_or_default();
             let count = offers.len();
             all_offers.extend(offers);
@@ -644,6 +675,10 @@ impl EbayClient {
             let total = response.total.unwrap_or(0) as usize;
             offset += count;
 
+            if let Some(next) = next_page_url(next.as_deref(), &url) {
+                next_url = Some(next);
+                continue;
+            }
             if offset >= total || count == 0 {
                 break;
             }
@@ -658,12 +693,15 @@ impl EbayClient {
         let mut all_offers = Vec::new();
         let mut offset = 0;
         let limit = 100;
+        let mut next_url: Option<String> = None;
 
         loop {
-            let url = format!(
-                "{}/sell/inventory/v1/offer?limit={}&offset={}",
-                self.api_base, limit, offset
-            );
+            let url = next_url.take().unwrap_or_else(|| {
+                format!(
+                    "{}/sell/inventory/v1/offer?limit={}&offset={}",
+                    self.api_base, limit, offset
+                )
+            });
 
             let resp = self
                 .http
@@ -698,6 +736,7 @@ impl EbayClient {
                     message: format!("Failed to parse offers response: {e}"),
                 })?;
 
+            let next = response.next.clone();
             let offers = response.offers.unwrap_or_default();
             let count = offers.len();
             all_offers.extend(offers);
@@ -705,6 +744,10 @@ impl EbayClient {
             let total = response.total.unwrap_or(0) as usize;
             offset += count;
 
+            if let Some(next) = next_page_url(next.as_deref(), &url) {
+                next_url = Some(next);
+                continue;
+            }
             if offset >= total || count == 0 {
                 break;
             }
@@ -1756,6 +1799,80 @@ mod tests {
         assert!(
             err.to_string().contains("SKU-1"),
             "error should name the SKU, got: {err}"
+        );
+    }
+
+    #[test]
+    fn next_page_url_follows_a_fresh_href_only() {
+        let current = "https://api.ebay.com/sell/inventory/v1/offer?limit=100&offset=0";
+        assert_eq!(
+            next_page_url(
+                Some("https://api.ebay.com/sell/inventory/v1/offer?limit=100&offset=100"),
+                current
+            )
+            .as_deref(),
+            Some("https://api.ebay.com/sell/inventory/v1/offer?limit=100&offset=100")
+        );
+        // Absent, empty, or self-referential hrefs end pagination instead
+        // of looping or synthesising another page.
+        assert_eq!(next_page_url(None, current), None);
+        assert_eq!(next_page_url(Some(""), current), None);
+        assert_eq!(next_page_url(Some(current), current), None);
+    }
+
+    /// Pagination follows the response's `next` href: the second request
+    /// must go to the href the first response handed back (offset=100),
+    /// not to an offset the client computed itself (which would be 1 after
+    /// a one-item page).
+    #[tokio::test]
+    async fn inventory_pagination_follows_the_next_href() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let next_href = format!("{base}/sell/inventory/v1/inventory_item?limit=100&offset=100");
+        let body =
+            format!(r#"{{"inventoryItems":[{{"sku":"SKU-1"}}],"total":2,"next":"{next_href}"}}"#);
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured_inner = captured_clone.clone();
+                let body_inner = body.clone();
+                tokio::spawn(async move {
+                    let req = read_request(&mut socket).await;
+                    captured_inner.lock().unwrap().push(req);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body_inner.len(),
+                        body_inner
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        let client = EbayClient::with_api_base(base);
+        let items = client
+            .fetch_inventory_items("token")
+            .await
+            .expect("both pages fetch");
+        assert_eq!(items.len(), 2, "one item per page, two pages");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].contains("offset=0"),
+            "first request: {}",
+            requests[0]
+        );
+        assert!(
+            requests[1].contains("offset=100"),
+            "second request must follow the next href, got: {}",
+            requests[1]
         );
     }
 

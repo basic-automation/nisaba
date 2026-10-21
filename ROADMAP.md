@@ -416,10 +416,12 @@ anything on the platform (see "Writes that report success without writing" below
 - [ ] eBay's two read paths key listings differently — the Inventory API by SKU, the Trading
       API by ItemID — so a mapping created from one will not match the other. Decide which
       is canonical, or store both.
-- [ ] `trading_to_listing` computes `Quantity - QuantitySold` with no floor, so eBay
+- [x] `trading_to_listing` computes `Quantity - QuantitySold` with no floor, so eBay
       reporting more sold than listed yields a negative quantity in the mapping UI and makes
       that listing the minimum in any comparison. The sync engine floors canonical stock at
-      zero, so nothing writes it back today.
+      zero, so nothing writes it back today. [N-5.6: floored at 0 in both
+      `trading_to_listing` and `trading_to_full_listing` (`mapping.rs`), pinned by the
+      updated mapping fixture test (2 listed, 5 sold -> 0).]
 - [ ] Rate-limit handling per platform. eBay, Amazon and Squarespace all throttle, and the
       adapters have no backoff distinct from `max_retries`. Squarespace also rescans the
       whole catalog for every per-item read, which multiplies its request count.
@@ -540,21 +542,35 @@ write surfaces as `Err`.
 - [ ] XMR orders always count as one unit (`scraper.rs` ~778, pinned by `sales_page.rs:71`).
       Confirm whether XMR Bazaar allows multi-unit orders in unlimited-stock mode; if it
       does, read the quantity.
-- [ ] XMR listing status: `status.contains("active")` also matches `"inactive"`
+- [x] XMR listing status: `status.contains("active")` also matches `"inactive"`
       (`scraper.rs:146`), so an inactive listing reads as in stock. `parse_listings` has no
-      test.
-- [ ] XMR error snippets slice `&body[..body.len().min(N)]` (`client.rs` ~183, ~407, ~672,
+      test. [N-5.6: exact `status == "active"` match; `parse_listings` now has tests
+      (`tests/listings.rs`) covering active/inactive/other statuses.]
+- [x] XMR error snippets slice `&body[..body.len().min(N)]` (`client.rs` ~183, ~407, ~672,
       ~776), which panics when byte N splits a UTF-8 character in the remote HTML. Truncate
-      on a char boundary.
-- [ ] XMR `set_price` drops the currency (`lib.rs` ~290), and `set_description` posts raw
+      on a char boundary. [N-5.6: all four sites go through `client::body_snippet`, which
+      backs off to a char boundary; pinned by unit tests with multibyte bodies.]
+- [x] XMR `set_price` drops the currency (`lib.rs` ~290), and `set_description` posts raw
       HTML (~300) while `create_listing` strips tags (`client.rs` ~476). Pick one behaviour.
-- [ ] eBay pagination ignores the `next` href (`types.rs` ~50, ~101). If `getOffers`
+      [N-5.6: `set_price` submits price + currency in one form POST
+      (`client::update_listing_fields`); `set_description` strips tags via
+      `strip_html_tags`, matching `create_listing`. Both pinned by unit tests.]
+- [x] eBay pagination ignores the `next` href (`types.rs` ~50, ~101). If `getOffers`
       requires `sku`, as the docs suggest, `fetch_all_offers` (`client.rs` ~314) always
       fails. That failure is only warned, so Inventory-API listings would have no prices.
-- [ ] Squarespace pagination loops forever if `hasNextPage` is true with a null cursor
+      [N-5.6: `fetch_inventory_items`, `fetch_offers` and `fetch_all_offers` follow the
+      response's `next` href via `client::next_page_url` (absent/empty/self-referential
+      hrefs end pagination; offset arithmetic remains the fallback), pinned by a
+      fake-server test asserting the second request goes to the href's offset.]
+- [x] Squarespace pagination loops forever if `hasNextPage` is true with a null cursor
       (`client.rs` ~81, ~135), and only `fetch_inventory` maps a 401 to `AuthError` (~57).
-- [ ] Squarespace `update_listing` silently drops `request.price` (`lib.rs` ~324–336).
+      [N-5.6: both loops advance only via `client::next_cursor`, which terminates on a
+      null/empty/repeated cursor even when `hasNextPage` is true; `fetch_products` now
+      also maps 401 to `AuthError`. Pinned by unit tests.]
+- [x] Squarespace `update_listing` silently drops `request.price` (`lib.rs` ~324–336).
       Return an error, as the capability matrix already says it cannot set a price.
+      [N-5.6: returns `Err` before any other field is written when `request.price` is
+      present; pinned by a unit test.]
 - [ ] Hard-coded regions: eBay always uses `EBAY_US` (`lib.rs` ~653) and `EbayConfig` has
       no marketplace field; Amazon's consent URL is North America only (`auth.rs:9`)
       despite the configured `region`.

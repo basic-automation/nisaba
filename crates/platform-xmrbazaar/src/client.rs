@@ -11,6 +11,22 @@ use crate::types::{StockModeField, XmrListing, XmrListingDetail, XmrSaleRecord};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0";
 
+/// Truncate `body` to at most `max_bytes` for inclusion in an error message,
+/// backing off to the nearest UTF-8 char boundary. Slicing at a raw byte
+/// offset (`&body[..body.len().min(N)]`) panics when byte N splits a
+/// multi-byte character in the remote HTML — turning an API error into a
+/// crash — so every error snippet goes through here.
+pub fn body_snippet(body: &str, max_bytes: usize) -> &str {
+    if body.len() <= max_bytes {
+        return body;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
+}
+
 pub struct XmrBazaarClient {
     /// Main HTTP client with redirect following.
     http: Client,
@@ -267,7 +283,7 @@ impl XmrBazaarClient {
                 platform: Platform::XmrBazaar,
                 message: format!(
                     "{context} for listing {listing_id} failed ({status}): {}",
-                    safe_snippet(&body, 200)
+                    body_snippet(&body, 200)
                 ),
             });
         }
@@ -838,7 +854,7 @@ impl XmrBazaarClient {
         let error_detail = if !validation_errors.is_empty() {
             format!("Validation errors: {}", validation_errors.join("; "))
         } else {
-            format!("Response: {}", safe_snippet(&body, 500))
+            format!("Response: {}", body_snippet(&body, 500))
         };
 
         Err(SyncError::ApiError {
@@ -856,6 +872,19 @@ impl XmrBazaarClient {
         listing_id: &str,
         field_name: &str,
         field_value: &str,
+    ) -> Result<(), SyncError> {
+        self.update_listing_fields(endpoints, listing_id, &[(field_name, field_value)])
+            .await
+    }
+
+    /// Update several fields of a listing in a single GET/POST cycle, so a
+    /// multi-part value (e.g. a price *and* its currency) can never be
+    /// half-written by two separate form submissions.
+    pub async fn update_listing_fields(
+        &self,
+        endpoints: &Endpoints,
+        listing_id: &str,
+        updates: &[(&str, &str)],
     ) -> Result<(), SyncError> {
         let (_, edit_url) = endpoints.edit_listing(listing_id);
 
@@ -903,31 +932,42 @@ impl XmrBazaarClient {
             form_data.csrf_token.clone(),
         ));
 
-        let mut field_set = false;
+        let mut fields_set: Vec<&str> = Vec::new();
         for (name, value) in &form_data.fields {
-            if name == field_name {
-                form_params.push((name.clone(), field_value.to_string()));
-                field_set = true;
+            if let Some((_, update_value)) = updates.iter().find(|(n, _)| n == name) {
+                form_params.push((name.clone(), update_value.to_string()));
+                fields_set.push(name.as_str());
             } else {
                 form_params.push((name.clone(), value.clone()));
             }
         }
 
-        if !field_set {
-            // Field was not present in the form; add it explicitly
-            form_params.push((field_name.to_string(), field_value.to_string()));
+        for (field_name, field_value) in updates {
+            if !fields_set.contains(field_name) {
+                // Field was not present in the form; add it explicitly
+                form_params.push((field_name.to_string(), field_value.to_string()));
+            }
         }
 
+        let expected: Vec<(String, String)> = updates
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        let field_names: Vec<&str> = updates.iter().map(|(n, _)| *n).collect();
         self.submit_edit_and_verify(
             endpoints,
             listing_id,
             &edit_url,
             form_params,
-            vec![(field_name.to_string(), field_value.to_string())],
-            &format!("field '{field_name}' update"),
+            expected,
+            &format!("field(s) '{}' update", field_names.join(", ")),
         )
         .await?;
-        debug!(listing_id, field_name, "XMR Bazaar field updated");
+        debug!(
+            listing_id,
+            fields = ?field_names,
+            "XMR Bazaar fields updated"
+        );
         Ok(())
     }
 
@@ -987,15 +1027,6 @@ fn is_login_url(url: &str) -> bool {
 fn looks_like_login_page(body: &str) -> bool {
     let lower = body.to_lowercase();
     lower.contains("type=\"password\"") && lower.contains("/login")
-}
-
-/// A prefix of `body` of at most `max` bytes, cut on a char boundary.
-fn safe_snippet(body: &str, max: usize) -> String {
-    let mut end = body.len().min(max);
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    body[..end].to_string()
 }
 
 /// Deterministically identify a just-created listing from a pre/post diff:
@@ -1632,5 +1663,41 @@ mod tests {
             .create_listing(&endpoints, &create_request(), "4FakeAddress")
             .await
             .expect_err("two unrelated new listings must be ambiguous -> Err");
+    }
+
+    #[test]
+    fn snippet_shorter_than_the_limit_is_returned_whole() {
+        assert_eq!(body_snippet("short body", 200), "short body");
+    }
+
+    #[test]
+    fn snippet_truncates_ascii_at_the_limit() {
+        let body = "a".repeat(300);
+        assert_eq!(body_snippet(&body, 200).len(), 200);
+    }
+
+    #[test]
+    fn snippet_never_splits_a_multibyte_character() {
+        // 199 ASCII bytes followed by a 2-byte 'é' straddling byte 200: the
+        // old `&body[..200]` slice panicked here.
+        let mut body = "a".repeat(199);
+        body.push('é');
+        body.push_str(&"b".repeat(100));
+        let snippet = body_snippet(&body, 200);
+        assert_eq!(snippet.len(), 199, "backs off to the char boundary");
+        assert!(snippet.ends_with('a'));
+    }
+
+    #[test]
+    fn snippet_of_a_multibyte_error_body_is_valid_utf8() {
+        // A remote error page full of multi-byte characters: every limit
+        // must yield a valid &str prefix, never a panic.
+        let body = "€".repeat(200); // 600 bytes, 3 bytes per char
+        for limit in [1, 2, 3, 200, 500] {
+            let snippet = body_snippet(&body, limit);
+            assert!(snippet.len() <= limit);
+            assert_eq!(snippet.len() % 3, 0, "whole characters only");
+        }
+        assert_eq!(body_snippet(&body, 500).chars().count(), 166);
     }
 }

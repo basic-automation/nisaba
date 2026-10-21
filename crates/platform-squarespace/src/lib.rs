@@ -322,6 +322,19 @@ impl PlatformAdapter for SquarespaceAdapter {
         platform_item_id: &str,
         request: UpdateListingRequest,
     ) -> Result<(), SyncError> {
+        // Squarespace prices cannot be set through this adapter (see
+        // `capabilities`: `can_set_price: false`). The update request has no
+        // price field, so a requested price used to be dropped silently and
+        // the caller told the write succeeded. Refuse it instead, before any
+        // other field is written, so the update is not half-applied either.
+        if request.price.is_some() {
+            return Err(SyncError::ApiError {
+                platform: Platform::Squarespace,
+                message: "Squarespace does not support setting a listing price; \
+                          the requested price was not applied"
+                    .into(),
+            });
+        }
         self.auth.validate()?;
         let product_id = self.find_product_id_for_variant(platform_item_id).await?;
 
@@ -349,5 +362,52 @@ impl PlatformAdapter for SquarespaceAdapter {
             can_create_listing: true,
             has_stock_mode_inventory: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SquarespaceAdapter;
+    use nisaba_core::config::SquarespaceConfig;
+    use nisaba_core::traits::PlatformAdapter;
+    use nisaba_core::types::{ListingPrice, UpdateListingRequest};
+
+    fn adapter() -> SquarespaceAdapter {
+        SquarespaceAdapter::new(&SquarespaceConfig {
+            enabled: true,
+            api_key: "test-key".to_string(),
+            store_page_id: String::new(),
+        })
+    }
+
+    fn request(price: Option<ListingPrice>) -> UpdateListingRequest {
+        UpdateListingRequest {
+            title: Some("Renamed".to_string()),
+            description_html: None,
+            price,
+            tags: None,
+            extras: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn update_listing_with_a_price_is_an_error_not_a_silent_drop() {
+        // The price check runs before any network call, so this exercises
+        // the refusal offline: a price the adapter cannot apply must surface
+        // as Err rather than a successful update that never repriced.
+        let err = adapter()
+            .update_listing(
+                "var_1",
+                request(Some(ListingPrice {
+                    amount: 19.99,
+                    currency: "USD".to_string(),
+                })),
+            )
+            .await
+            .expect_err("a Squarespace price update cannot succeed");
+        assert!(
+            err.to_string().contains("price"),
+            "error should name the dropped field, got: {err}"
+        );
     }
 }

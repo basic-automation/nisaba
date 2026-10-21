@@ -190,7 +190,10 @@ pub fn to_full_listing(item: &EbayInventoryItem, offers: &[EbayOffer]) -> FullLi
 pub fn trading_to_full_listing(item: &TradingItem) -> FullListing {
     let total_qty = item.quantity.unwrap_or(0);
     let sold_qty = item.quantity_sold.unwrap_or(0);
-    let available = total_qty - sold_qty;
+    // Floor at zero: eBay can report more sold than listed (revisions,
+    // multi-variant listings), and a negative quantity surfaces in the
+    // mapping UI and wins every minimum comparison it takes part in.
+    let available = (total_qty - sold_qty).max(0);
 
     let title = item.title.clone().unwrap_or_else(|| item.item_id.clone());
 
@@ -253,7 +256,10 @@ pub fn trading_to_full_listing(item: &TradingItem) -> FullListing {
 pub fn trading_to_listing(item: &TradingItem) -> PlatformListing {
     let total_qty = item.quantity.unwrap_or(0);
     let sold_qty = item.quantity_sold.unwrap_or(0);
-    let available = total_qty - sold_qty;
+    // Floor at zero: eBay can report more sold than listed (revisions,
+    // multi-variant listings), and a negative quantity surfaces in the
+    // mapping UI and wins every minimum comparison it takes part in.
+    let available = (total_qty - sold_qty).max(0);
 
     let title = item.title.clone().unwrap_or_else(|| item.item_id.clone());
 

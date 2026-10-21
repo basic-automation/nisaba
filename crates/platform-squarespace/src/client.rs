@@ -7,6 +7,27 @@ use crate::types::*;
 
 const API_BASE: &str = "https://api.squarespace.com";
 
+/// Decide the cursor for the next page, or `None` to stop paginating.
+///
+/// Squarespace can report `hasNextPage: true` with a null (or empty, or
+/// repeated) `nextPageCursor`; following that literally re-requests the
+/// first page forever. A next page exists only when the API hands back a
+/// fresh, non-empty cursor.
+pub fn next_cursor(
+    pagination: Option<&SquarespacePagination>,
+    current: &Option<String>,
+) -> Option<String> {
+    let pagination = pagination?;
+    if !pagination.has_next_page {
+        return None;
+    }
+    let cursor = pagination.next_page_cursor.as_ref()?;
+    if cursor.is_empty() || current.as_deref() == Some(cursor.as_str()) {
+        return None;
+    }
+    Some(cursor.clone())
+}
+
 pub struct SquarespaceClient {
     http: Client,
 }
@@ -76,11 +97,9 @@ impl SquarespaceClient {
 
             all_items.extend(response.inventory);
 
-            match response.pagination {
-                Some(p) if p.has_next_page => {
-                    cursor = p.next_page_cursor;
-                }
-                _ => break,
+            match next_cursor(response.pagination.as_ref(), &cursor) {
+                Some(c) => cursor = Some(c),
+                None => break,
             }
         }
 
@@ -114,6 +133,12 @@ impl SquarespaceClient {
                 })?;
 
             let status = resp.status();
+            if status.as_u16() == 401 {
+                return Err(SyncError::AuthError {
+                    platform: Platform::Squarespace,
+                    message: "Invalid API key".into(),
+                });
+            }
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(SyncError::ApiError {
@@ -130,11 +155,9 @@ impl SquarespaceClient {
 
             all_products.extend(response.products);
 
-            match response.pagination {
-                Some(p) if p.has_next_page => {
-                    cursor = p.next_page_cursor;
-                }
-                _ => break,
+            match next_cursor(response.pagination.as_ref(), &cursor) {
+                Some(c) => cursor = Some(c),
+                None => break,
             }
         }
 
@@ -302,5 +325,60 @@ impl SquarespaceClient {
 
         debug!(variant_id, quantity, "Squarespace quantity updated");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_cursor;
+    use crate::types::SquarespacePagination;
+
+    fn pagination(has_next_page: bool, cursor: Option<&str>) -> SquarespacePagination {
+        SquarespacePagination {
+            has_next_page,
+            next_page_cursor: cursor.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_fresh_cursor_is_followed() {
+        let page = pagination(true, Some("cursor-2"));
+        assert_eq!(next_cursor(Some(&page), &None).as_deref(), Some("cursor-2"));
+        assert_eq!(
+            next_cursor(Some(&page), &Some("cursor-1".to_string())).as_deref(),
+            Some("cursor-2")
+        );
+    }
+
+    #[test]
+    fn a_null_cursor_terminates_pagination_even_when_a_next_page_is_claimed() {
+        // Regression: `hasNextPage: true` with a null cursor used to loop
+        // forever re-requesting the first page.
+        let page = pagination(true, None);
+        assert_eq!(next_cursor(Some(&page), &None), None);
+        assert_eq!(
+            next_cursor(Some(&page), &Some("cursor-1".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_or_repeated_cursor_terminates_pagination() {
+        let empty = pagination(true, Some(""));
+        assert_eq!(next_cursor(Some(&empty), &None), None);
+
+        let repeated = pagination(true, Some("cursor-1"));
+        assert_eq!(
+            next_cursor(Some(&repeated), &Some("cursor-1".to_string())),
+            None,
+            "re-requesting the same cursor would loop forever"
+        );
+    }
+
+    #[test]
+    fn no_next_page_or_no_pagination_block_terminates() {
+        let last = pagination(false, Some("cursor-2"));
+        assert_eq!(next_cursor(Some(&last), &None), None);
+        assert_eq!(next_cursor(None, &None), None);
     }
 }
