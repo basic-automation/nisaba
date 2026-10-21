@@ -131,7 +131,8 @@ async fn the_template_imports_a_paged_catalog() {
             return (
                 200,
                 "",
-                r#"{"items": [{"id": 2, "name": "Poncho", "price": 30, "stock": 9}],
+                r#"{"items": [{"id": 2, "name": "Poncho", "price": 30, "stock": 9},
+                              {"id": 3, "name": "Tarp", "price": "7.25"}],
                     "next_page": null}"#
                     .to_string(),
             );
@@ -155,25 +156,50 @@ async fn the_template_imports_a_paged_catalog() {
     let ids: Vec<&str> = listings.iter().map(|l| l.vendor_item_id.as_str()).collect();
     assert_eq!(
         ids,
-        ["C-OD", "C-BK", "2"],
+        ["C-OD", "C-BK", "2", "3"],
         "the malformed product is skipped, not fatal"
     );
 
     let olive = &listings[0];
     assert_eq!(olive.title, "Canteen");
-    assert_eq!((olive.price, olive.quantity), (Some(12.5), Some(4)));
+    assert_eq!(
+        olive.price.map(|d| d.to_string()).as_deref(),
+        Some("12.5"),
+        "plugin prices arrive as exact decimals"
+    );
+    assert_eq!(olive.quantity, Some(4));
     assert_eq!(olive.group_key.as_deref(), Some("1"));
     assert_eq!(olive.variant_attributes["Color"], "Olive");
-    assert_eq!(olive.extras["upc"], "0001");
+    assert_eq!(
+        olive.upc.as_deref(),
+        Some("0001"),
+        "upc is a typed field now"
+    );
     assert_eq!(olive.extras["description"], "1 qt");
-    assert_eq!(olive.image_url.as_deref(), Some("https://cdn/1.jpg"));
+    assert_eq!(
+        olive.images,
+        ["https://cdn/1.jpg"],
+        "image_url became images[]"
+    );
+
+    let black = &listings[1];
+    assert_eq!(black.quantity, Some(0), "0 means out of stock");
 
     let poncho = &listings[2];
     assert_eq!(
         poncho.group_key, None,
         "a product without variants is its own listing"
     );
-    assert_eq!((poncho.price, poncho.quantity), (Some(30.0), Some(9)));
+    assert_eq!(poncho.price.map(|d| d.to_string()).as_deref(), Some("30"));
+    assert_eq!(poncho.quantity, Some(9));
+
+    let tarp = &listings[3];
+    assert_eq!(
+        tarp.price.map(|d| d.to_string()).as_deref(),
+        Some("7.25"),
+        "a decimal string price parses exactly"
+    );
+    assert_eq!(tarp.quantity, None, "no stock figure means unknown, not 0");
 
     let seen = seen.lock().unwrap();
     let lines: Vec<&str> = seen
