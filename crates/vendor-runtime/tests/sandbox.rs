@@ -255,7 +255,7 @@ async fn the_plugin_api_surface_is_pinned() {
     .unwrap();
     assert_eq!(
         title,
-        "emitBatch,fetch,log,sleep|debug,error,info,trace,warn"
+        "emitBatch,fetch,log,sleep,store|debug,error,info,trace,warn"
     );
 
     let ext = nisaba_vendor_runtime::nisaba_vendor_ext::init();
@@ -269,6 +269,9 @@ async fn the_plugin_api_surface_is_pinned() {
             "op_nisaba_log",
             "op_nisaba_set_result",
             "op_nisaba_sleep",
+            "op_nisaba_store_delete",
+            "op_nisaba_store_get",
+            "op_nisaba_store_set",
         ]
     );
 }
