@@ -115,6 +115,15 @@ impl PlatformAdapter for XmrBazaarAdapter {
         self.auth.check_session(&self.client, &self.endpoints).await
     }
 
+    async fn test_connection(&self) -> Result<String, SyncError> {
+        // XMR Bazaar is session-cookie based: the only real credential check
+        // is a login attempt. `login` verifies the session by fetching a
+        // protected page afterwards, so success means the username/password
+        // (and base URL) work.
+        self.auth.login(&self.client, &self.endpoints).await?;
+        Ok("Connected to XMR Bazaar — login succeeded".to_string())
+    }
+
     async fn refresh_auth(&self) -> Result<(), SyncError> {
         self.auth.login(&self.client, &self.endpoints).await
     }
@@ -364,10 +373,151 @@ impl PlatformAdapter for XmrBazaarAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::{description_update_value, price_update_fields};
+    use super::{description_update_value, price_update_fields, XmrBazaarAdapter};
+    use nisaba_core::config::XmrBazaarConfig;
+    use nisaba_core::traits::PlatformAdapter;
     use nisaba_core::types::ListingPrice;
     use rust_decimal::Decimal;
+    use std::collections::HashMap;
     use std::str::FromStr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal login page the form parser accepts: a form with a password
+    /// field, a text username field, and a long hidden validation token.
+    const LOGIN_PAGE: &str = r#"<html><body><form action="/login/" method="post"><input type="hidden" name="validation" value="abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKL"><input type="text" name="username" value=""><input type="password" name="password" value=""><input type="submit" value="Login"></form></body></html>"#;
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, String) {
+        let mut buf = vec![0u8; 8192];
+        let mut req = Vec::new();
+        let mut content_length = 0usize;
+        // Read headers first.
+        loop {
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&req[..pos]).to_string();
+                for line in headers.lines().skip(1) {
+                    if let Some(v) = line.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.strip_prefix("Content-Length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let body_read = req.len() - (pos + 4);
+                let mut remaining = content_length.saturating_sub(body_read);
+                while remaining > 0 {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    remaining = remaining.saturating_sub(n);
+                }
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(&req).to_string();
+        let mut parts = head.split_whitespace();
+        (
+            parts.next().unwrap_or("").to_string(),
+            parts.next().unwrap_or("").to_string(),
+        )
+    }
+
+    /// Fake XMR Bazaar site. `login_post_status` controls what POST /login/
+    /// returns: 302 for a successful login, anything else for a failure.
+    async fn spawn_fake(login_post_status: u16) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let (method, path) = read_request(&mut socket).await;
+                    let (status, headers, body): (u16, Vec<(&str, &str)>, &str) =
+                        match (method.as_str(), path.as_str()) {
+                            ("GET", "/login/") => (200, vec![], LOGIN_PAGE),
+                            ("POST", "/login/") => {
+                                if login_post_status == 302 {
+                                    (
+                                        302,
+                                        vec![
+                                            ("location", "/"),
+                                            ("set-cookie", "PHPSESSID=fake-session; Path=/"),
+                                        ],
+                                        "",
+                                    )
+                                } else {
+                                    (login_post_status, vec![], "<html>login failed</html>")
+                                }
+                            }
+                            ("GET", "/my-listings/") => {
+                                (200, vec![], "<html><body>my listings</body></html>")
+                            }
+                            _ => (404, vec![], ""),
+                        };
+                    let reason = match status {
+                        200 => "OK",
+                        302 => "Found",
+                        _ => "Status",
+                    };
+                    let mut resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\nconnection: close\r\n",
+                        body.len()
+                    );
+                    for (k, v) in headers {
+                        resp.push_str(&format!("{k}: {v}\r\n"));
+                    }
+                    resp.push_str("\r\n");
+                    resp.push_str(body);
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn adapter_for_server(base: String) -> XmrBazaarAdapter {
+        XmrBazaarAdapter::new(&XmrBazaarConfig {
+            enabled: true,
+            username: "seller".to_string(),
+            password: "s3cret".to_string(),
+            base_url: base,
+            monero_address: String::new(),
+            endpoints: HashMap::new(),
+        })
+    }
+
+    /// N-11.1: test_connection performs a real login against the fake site.
+    #[tokio::test]
+    async fn test_connection_login_succeeds() {
+        let base = spawn_fake(302).await;
+        let adapter = adapter_for_server(base);
+        let summary = adapter
+            .test_connection()
+            .await
+            .expect("a 302 login must succeed");
+        assert!(summary.contains("XMR Bazaar"), "got: {summary}");
+        assert!(summary.to_lowercase().contains("login"), "got: {summary}");
+    }
+
+    /// N-11.1: a rejected login surfaces as an auth error.
+    #[tokio::test]
+    async fn test_connection_login_failure_is_an_auth_error() {
+        let base = spawn_fake(200).await;
+        let adapter = adapter_for_server(base);
+        let err = adapter
+            .test_connection()
+            .await
+            .expect_err("a failed login must be Err");
+        assert!(err.to_string().contains("Login failed"), "got: {err}");
+    }
 
     #[test]
     fn a_price_write_keeps_the_currency_with_the_amount() {
