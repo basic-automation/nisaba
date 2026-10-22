@@ -407,8 +407,20 @@ async function handleSaveLocal() {
   }
 }
 
-async function handleSaveCompany() {
-  if (!editCompanyConfig.value) return
+// N-11.1: re-enter the first-run setup wizard from settings. Runs in the
+// settings window, so the wizard can pre-fill and test saved credentials.
+// The onBeforeRouteLeave guard above still prompts on unsaved changes.
+function openSetupWizard() {
+  navigateTo({
+    path: '/setup',
+    query: {
+      companyId: activeCompanyId.value ?? '',
+      companyName: activeCompany.value?.name ?? '',
+    },
+  })
+}
+
+async function handleSaveCompany() {  if (!editCompanyConfig.value) return
   saving.value = true
   try {
     await saveCompanyConfig(editCompanyConfig.value)
@@ -611,6 +623,21 @@ async function handleToggleDropship(include: boolean) {
 
     <!-- COMPANY TAB -->
     <div v-else-if="activeTab === 'company' && editCompanyConfig" class="space-y-14 max-w-2xl">
+      <!-- N-11.1: re-enter the first-run setup wizard -->
+      <section>
+        <h3 class="text-xs font-medium tracking-widest uppercase text-muted/60 mb-5">Platform setup</h3>
+        <p class="text-xs text-muted/50 mb-4 max-w-xl">
+          Re-run the first-run setup wizard to add platforms or step through each platform's
+          credentials again, with per-platform connection testing.
+        </p>
+        <button
+          @click="openSetupWizard"
+          class="text-xs font-medium px-4 py-2 rounded border border-border/40 text-foreground/80 hover:border-accent/50 hover:text-foreground transition-colors"
+        >
+          Open setup wizard
+        </button>
+      </section>
+
       <!-- eBay -->
       <section>
         <div class="flex items-center justify-between mb-5">
