@@ -10,6 +10,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # N-10.2: the version strings in Cargo.toml, crates/tauri-app/tauri.conf.json
+  # and frontend/package.json must be bumped together; fail CI when they disagree.
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version consistency
+        run: python3 scripts/check-version-consistency.py
+
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
