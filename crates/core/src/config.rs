@@ -23,6 +23,7 @@ pub struct CompanyRegistryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub general: GeneralConfig,
+    #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
     pub ebay: EbayConfig,
@@ -131,6 +132,17 @@ pub struct DatabaseConfig {
     /// (pre-migration backups still run while `backup_enabled` is true).
     #[serde(default = "default_backup_interval_hours")]
     pub backup_interval_hours: u64,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            path: default_db_path(),
+            backup_enabled: default_backup_enabled(),
+            backup_keep_last: default_backup_keep_last(),
+            backup_interval_hours: default_backup_interval_hours(),
+        }
+    }
 }
 
 fn default_backup_enabled() -> bool {
