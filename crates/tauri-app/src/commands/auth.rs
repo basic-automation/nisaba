@@ -248,6 +248,30 @@ pub async fn check_platform_auth(
     }
 }
 
+/// N-11.1: probe a platform with a minimal read-only request and return a
+/// human-readable summary. Used by the setup wizard's per-platform "Test
+/// connection" button. The adapters are built from the saved company config,
+/// so the wizard stage-saves the platform's fields before invoking this.
+#[tauri::command]
+pub async fn test_platform_connection(
+    state: State<'_, AppState>,
+    platform: String,
+) -> Result<String, String> {
+    let plat = Platform::from_str_loose(&platform)
+        .ok_or_else(|| format!("Unknown platform: {platform}"))?;
+
+    let adapters = state.active_adapters().await?;
+    let adapters = adapters.read().await;
+    let adapter = adapters.get(&plat).ok_or_else(|| {
+        format!(
+            "{} is not enabled — save the platform's credentials first, then test the connection",
+            plat.as_str()
+        )
+    })?;
+
+    adapter.test_connection().await.map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 pub struct PlatformHealth {
     pub platform: String,

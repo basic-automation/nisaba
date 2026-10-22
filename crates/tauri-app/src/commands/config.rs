@@ -78,6 +78,23 @@ pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Res
     Ok(())
 }
 
+/// Non-secret accessor for the setup-wizard completion flag (N-11.1).
+///
+/// The main window decides whether to auto-open the first-run wizard, but it
+/// must not be able to invoke `get_company_platform_config` (which returns
+/// platform secrets), so the single boolean gets its own narrow accessor —
+/// the same pattern as `get_update_check_enabled`.
+#[tauri::command]
+pub async fn get_setup_wizard_completed(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(load_company_config_value(&state)
+        .await
+        .and_then(|v| {
+            v.get("setup_wizard_completed")
+                .and_then(|flag| flag.as_bool())
+        })
+        .unwrap_or(false))
+}
+
 #[tauri::command]
 pub async fn get_company_platform_config(
     state: State<'_, AppState>,
@@ -115,7 +132,10 @@ pub async fn get_company_platform_config(
         },
         "alerts": {
             "default_low_stock_threshold": 5
-        }
+        },
+        // N-11.1: set when the first-run wizard is completed or skipped, so
+        // the main window stops auto-opening it for this company.
+        "setup_wizard_completed": false
     });
 
     // Try to load encrypted company config and merge in defaults for any
