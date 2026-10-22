@@ -121,8 +121,10 @@ are referenced rather than repeated.
       moved off deprecated Node 20 actions (Phases 0, 6, 7).
 - [ ] A version-consistency check across `Cargo.toml`, `tauri.conf.json` and
       `frontend/package.json` (Phase 6).
-- [ ] Decide `crates/service` and `crates/tui`: shipped as products with 1.0, or deleted
-      (Phase 6).
+- [x] Decide `crates/service` and `crates/tui`: shipped as products with 1.0, or deleted
+      (Phase 6). **Decided 2026-10-22 (N-10.3): deleted** — both removed from the repo;
+      a headless daemon can return post-1.0, designed against the current per-company
+      encrypted config model.
 
 ### Gate: product
 
@@ -1321,14 +1323,16 @@ any peer can record a sale.
 - [ ] macOS code signing and notarization — without an Apple Developer identity the `.dmg`
       is unsigned and Gatekeeper blocks it on first open for most users. Decide whether to
       sign, or document the right-click-Open workaround in the README.
-- [ ] Decide whether `crates/service` (headless sync daemon) and `crates/tui` ship as real
-      products; they are tracked in git but excluded from `[workspace] members`, so they are
-      not built, not tested and not covered by CI. Either restore them to the workspace and
-      fix whatever broke, or delete them. Restoring them is close to a rewrite. Neither has
-      changed since `1f3cdc7`. Both read platform credentials from `config.toml` and use the
-      app database, where the app now uses per-company encrypted config, and neither
-      supports Amazon, plugins or P2P. Phase 4's "dry run in the headless daemon" depends
-      on this decision.
+- [x] Decide whether `crates/service` (headless sync daemon) and `crates/tui` ship as real
+      products; they were tracked in git but excluded from `[workspace] members`, so they
+      were not built, not tested and not covered by CI. **Decided 2026-10-22 (N-10.3):
+      deleted** — restoring them was close to a rewrite (neither had changed since
+      `1f3cdc7`; both read platform credentials from `config.toml` and use the app
+      database where the app now uses per-company encrypted config; neither supports
+      Amazon, plugins or P2P). A headless daemon can return post-1.0 designed against
+      the current config model. `crates/service` and `crates/tui` were removed from the
+      repo, including all stale references. (This also retires Phase 4's "dry run in the
+      headless daemon" as a 1.0 item; dry-run remains engine-supported for the UI.)
 - [x] Version consistency — `Cargo.toml`, `tauri.conf.json` and any updater manifest must be
       bumped together; add a check that fails CI when they disagree (N-10.2, 2026-10-21:
       `scripts/check-version-consistency.py` runs as its own `version-consistency` CI job,
