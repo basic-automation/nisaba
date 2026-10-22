@@ -105,7 +105,7 @@ are referenced rather than repeated.
 
 ### Gate: release engineering
 
-- [ ] Updater end to end (Phase 6): signing key, `createUpdaterArtifacts`, `latest.json`
+- [x] Updater end to end (Phase 6): signing key, `createUpdaterArtifacts`, `latest.json`
       assembled by the workflow, and an endpoint that only a published release can change.
 - [ ] **Update-path test.** Install the previous release, put data in it, update to the
       release candidate through the in-app updater, and assert the data and settings
@@ -1258,13 +1258,13 @@ any peer can record a sale.
 
 ## Phase 6 — Release and distribution
 
-- [ ] Signing key for the Tauri updater — `tauri.conf.json` ships an empty `pubkey`, so
+- [x] Signing key for the Tauri updater — `tauri.conf.json` ships an empty `pubkey`, so
       auto-update cannot work at all until this exists. Concretely: `tauri signer generate`
       produces the pair, the *contents* of the public key (not a path) go in `pubkey`, and
       the release workflow needs `TAURI_SIGNING_PRIVATE_KEY` (plus
       `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if set) exported as real environment variables.
       https://v2.tauri.app/plugin/updater/
-- [ ] Pin `createUpdaterArtifacts` to the v2 format rather than `"v1Compatible"` when the
+- [x] Pin `createUpdaterArtifacts` to the v2 format rather than `"v1Compatible"` when the
       release workflow lands — Tauri documents the setting as removed in v3.
       https://v2.tauri.app/plugin/updater/
 - [ ] Track the Tauri 3 alphas before they land on a stable line: `v3.0.0-alpha.2`
@@ -1272,16 +1272,16 @@ any peer can record a sale.
       `Plugin::extend_api` → `Plugin::run_invoke_handler`) and removes
       `Invoke::state`/`state_ref`. Nisaba stays on Tauri 2 until 3 is stable; this is the
       migration checklist's first entry. https://github.com/tauri-apps/tauri/releases
-- [ ] `.updater/latest.json` published from a real release workflow. The Tauri CLI does not
+- [x] `.updater/latest.json` published from a real release workflow. The Tauri CLI does not
       write `latest.json`, so the workflow must assemble it from the `.sig` files.
       Alternatively, point the endpoint at a release asset instead of a file on `master`.
       Today the endpoint (`tauri.conf.json` ~47–49) is a raw file on `master`, so any commit
       to that file is an update push.
-- [ ] Correction to the item above about pinning `createUpdaterArtifacts`: the key is not in
+- [x] Correction to the item above about pinning `createUpdaterArtifacts`: the key is not in
       `tauri.conf.json` at all, so nothing produces `.sig` or `.app.tar.gz` files, and the
       globs in `release.yml` for them can never match. Add the key (v2 format) together
       with the signing key.
-- [ ] The updater checks a GitHub raw URL at launch and every 6 hours (`useUpdater.ts`
+- [x] The updater checks a GitHub raw URL at launch and every 6 hours (`useUpdater.ts`
       ~61–65), outside Tor and with no opt-out. Add a setting, and record the choice in the
       Sync v2 privacy decision.
 - [ ] CI runners: every run carries Node 20 deprecation annotations for the actions, and

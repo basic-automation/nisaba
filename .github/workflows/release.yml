@@ -97,8 +97,15 @@ jobs:
 
       # Run from the Tauri crate so the CLI finds tauri.conf.json, whose
       # beforeBuildCommand path (../../frontend) is relative to it.
+      # The signing key comes only from repo secrets (N-10.1); with
+      # createUpdaterArtifacts on, the bundler emits the .sig files the
+      # publish job assembles latest.json from. Without the secrets the
+      # build is unsigned and the publish job refuses to publish.
       - name: Build bundles
         working-directory: crates/tauri-app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build ${{ matrix.build-args }}
 
       - name: List what was produced
@@ -168,6 +175,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check every platform is attached, then publish
         shell: bash
         env:
@@ -187,4 +196,13 @@ jobs:
             echo "Leaving $tag as a draft." >&2
             exit 1
           fi
+          # Assemble the updater manifest from the .sig files on the draft
+          # and attach it before publishing: the updater endpoint points at
+          # releases/latest/download/latest.json, so the manifest must be a
+          # release asset, never a file on master (N-10.1). The script
+          # fails if no signed artifacts exist, leaving the release a draft.
+          work="$(mktemp -d)"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$work"
+          python3 scripts/build-latest-json.py "$work" "$tag" "$GITHUB_REPOSITORY"
+          gh release upload "$tag" "$work/latest.json" --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -35,6 +35,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub alerts: AlertsConfig,
     #[serde(default)]
+    pub updates: UpdatesConfig,
+    #[serde(default)]
     pub company: CompanyConfig,
 }
 
@@ -246,6 +248,30 @@ fn default_low_stock_threshold() -> i64 {
     5
 }
 
+/// Update-check preferences (N-10.1).
+///
+/// The in-app updater polls the release endpoint at launch and on a timer.
+/// That check leaves the machine, so the user can opt out; when disabled no
+/// update check is ever issued (a manual "check now" from the update banner
+/// still works — it is an explicit user action, not a background poll).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatesConfig {
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            check_for_updates: default_check_for_updates(),
+        }
+    }
+}
+
+fn default_check_for_updates() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompanyConfig {
     #[serde(default)]
@@ -399,6 +425,7 @@ impl AppConfig {
             xmrbazaar: XmrBazaarConfig::default(),
             amazon: AmazonConfig::default(),
             alerts: AlertsConfig::default(),
+            updates: UpdatesConfig::default(),
             company: CompanyConfig::default(),
         }
     }
@@ -548,6 +575,28 @@ mod tests {
         assert!(config.xmrbazaar.enabled);
         assert!(!config.amazon.enabled);
         assert_eq!(config.alerts.default_low_stock_threshold, 5);
+    }
+
+    #[test]
+    fn test_updates_opt_out_defaults_to_on_and_roundtrips() {
+        // Update checks are on unless the user explicitly opts out.
+        let config = AppConfig::default_config();
+        assert!(config.updates.check_for_updates);
+
+        // A config written before the [updates] section existed still loads,
+        // with checks on.
+        let legacy = "[general]\nsync_schedule = \"0 */5 * * * *\"\n";
+        let parsed: AppConfig = toml::from_str(legacy).unwrap();
+        assert!(parsed.updates.check_for_updates);
+
+        // Opting out survives a save/load roundtrip.
+        let mut opted_out = AppConfig::default_config();
+        opted_out.updates.check_for_updates = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        opted_out.save(&path).unwrap();
+        let reloaded = AppConfig::load(&path).unwrap();
+        assert!(!reloaded.updates.check_for_updates);
     }
 
     #[test]

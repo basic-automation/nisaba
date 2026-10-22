@@ -415,6 +415,9 @@ export interface AppConfig {
   alerts: {
     default_low_stock_threshold: number
   }
+  updates: {
+    check_for_updates: boolean
+  }
   company: CompanyConfig
 }
 
