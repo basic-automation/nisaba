@@ -126,7 +126,7 @@ are referenced rather than repeated.
 
 ### Gate: product
 
-- [ ] **First-run setup wizard.** It walks through each platform's credentials, with links
+- [x] **First-run setup wizard.** It walks through each platform's credentials, with links
       to the developer portals, the exact redirect URI (eBay RuName) to register, and a
       *Test connection* button per platform. Because customers bring their own keys, this
       is the difference between a tool its author can use and one a seller can. Amazon's
