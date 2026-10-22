@@ -105,6 +105,21 @@ impl PlatformAdapter for SquarespaceAdapter {
         self.auth.validate().is_ok()
     }
 
+    async fn test_connection(&self) -> Result<String, SyncError> {
+        // A single inventory page proves the API key is accepted by
+        // Squarespace (a bad key comes back 401) without pulling the whole
+        // catalog.
+        self.auth.validate()?;
+        let page = self
+            .client
+            .fetch_inventory_page(self.auth.api_key(), None)
+            .await?;
+        Ok(format!(
+            "Connected to Squarespace — API key accepted, {} inventory item(s) on the first page",
+            page.inventory.len()
+        ))
+    }
+
     async fn refresh_auth(&self) -> Result<(), SyncError> {
         // Squarespace uses static API keys — no refresh needed.
         self.auth.validate()
@@ -376,11 +391,14 @@ impl PlatformAdapter for SquarespaceAdapter {
 #[cfg(test)]
 mod tests {
     use super::{price_value_and_currency, SquarespaceAdapter};
+    use crate::client::SquarespaceClient;
     use nisaba_core::config::SquarespaceConfig;
     use nisaba_core::traits::PlatformAdapter;
     use nisaba_core::types::{ListingPrice, UpdateListingRequest};
     use rust_decimal::Decimal;
     use std::str::FromStr;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
 
     fn adapter() -> SquarespaceAdapter {
         SquarespaceAdapter::new(&SquarespaceConfig {
@@ -388,6 +406,95 @@ mod tests {
             api_key: "test-key".to_string(),
             store_page_id: String::new(),
         })
+    }
+
+    /// Minimal fake HTTP server routing on the request path. Returns the base
+    /// URL to point the client at.
+    async fn spawn_fake(status: u16, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let mut req = Vec::new();
+                    // Read until the end of the headers.
+                    loop {
+                        let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf)
+                            .await
+                            .unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let reason = if status == 200 { "OK" } else { "Status" };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn adapter_for_server(base: String, api_key: &str) -> SquarespaceAdapter {
+        let mut adapter = SquarespaceAdapter::new(&SquarespaceConfig {
+            enabled: true,
+            api_key: api_key.to_string(),
+            store_page_id: String::new(),
+        });
+        adapter.client = SquarespaceClient::with_api_base(base);
+        adapter
+    }
+
+    const ONE_ITEM: &str =
+        r#"{"inventory":[{"variantId":"v1","isUnlimited":false,"quantity":3}],"pagination":null}"#;
+
+    /// N-11.1: test_connection proves the key is accepted and reports the
+    /// first page size.
+    #[tokio::test]
+    async fn test_connection_accepts_valid_key() {
+        let base = spawn_fake(200, ONE_ITEM).await;
+        let adapter = adapter_for_server(base, "good-key");
+        let summary = adapter
+            .test_connection()
+            .await
+            .expect("a 200 probe must succeed");
+        assert!(summary.contains("Squarespace"), "got: {summary}");
+        assert!(summary.contains('1'), "got: {summary}");
+    }
+
+    /// N-11.1: a 401 surfaces as an invalid-key error.
+    #[tokio::test]
+    async fn test_connection_rejects_invalid_key() {
+        let base = spawn_fake(401, r#"{"error":"unauthorized"}"#).await;
+        let adapter = adapter_for_server(base, "bad-key");
+        let err = adapter
+            .test_connection()
+            .await
+            .expect_err("a 401 probe must be Err");
+        assert!(err.to_string().contains("Invalid API key"), "got: {err}");
+    }
+
+    /// N-11.1: a missing key fails before any network call.
+    #[tokio::test]
+    async fn test_connection_requires_an_api_key() {
+        let adapter = adapter_for_server("http://127.0.0.1:1".to_string(), "");
+        let err = adapter
+            .test_connection()
+            .await
+            .expect_err("an empty key must be Err");
+        assert!(err.to_string().contains("not configured"), "got: {err}");
     }
 
     fn request(price: Option<ListingPrice>) -> UpdateListingRequest {
