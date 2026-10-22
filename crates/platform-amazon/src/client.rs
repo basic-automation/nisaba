@@ -198,6 +198,54 @@ impl AmazonClient {
         &self.http
     }
 
+    /// Fetch marketplace participations (Sellers API v1).
+    ///
+    /// This is the canonical SP-API connectivity check: it requires no
+    /// special role, so it works before any role approvals. N-11.1 uses it
+    /// as the setup wizard's "Test connection" probe.
+    pub async fn fetch_marketplace_participations(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<MarketplaceParticipation>, SyncError> {
+        let url = format!("{}/sellers/v1/marketplaceParticipations", self.api_base);
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("x-amz-access-token", access_token)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Amazon,
+                message: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(SyncError::AuthError {
+                platform: Platform::Amazon,
+                message: format!(
+                    "Access denied ({status}) — the LWA token is invalid or the app is not authorized"
+                ),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ApiError {
+                platform: Platform::Amazon,
+                message: format!("Marketplace participations fetch failed ({status}): {body}"),
+            });
+        }
+
+        let response: MarketplaceParticipationsResponse =
+            resp.json().await.map_err(|e| SyncError::ApiError {
+                platform: Platform::Amazon,
+                message: format!("Failed to parse marketplace participations response: {e}"),
+            })?;
+
+        Ok(response.payload)
+    }
+
     /// Build the marketplace_ids query parameter string.
     fn marketplace_query(marketplace_ids: &[String]) -> String {
         marketplace_ids

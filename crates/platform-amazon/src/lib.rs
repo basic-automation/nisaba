@@ -233,6 +233,29 @@ impl PlatformAdapter for AmazonAdapter {
         self.access_token.read().await.is_some() || self.refresh_token_val.read().await.is_some()
     }
 
+    async fn test_connection(&self) -> Result<String, SyncError> {
+        // `getMarketplaceParticipations` needs no SP-API role, so this probe
+        // works before any role approvals. `get_access_token` exchanges the
+        // refresh token first, so this also validates the LWA credentials.
+        let token = self.get_access_token().await?;
+        let participations = self.client.fetch_marketplace_participations(&token).await?;
+        let names: Vec<&str> = participations
+            .iter()
+            .map(|p| p.marketplace.name.as_str())
+            .filter(|n| !n.is_empty())
+            .collect();
+        let detail = if names.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", names.join(", "))
+        };
+        Ok(format!(
+            "Connected to Amazon SP-API — {} marketplace(s){}",
+            participations.len(),
+            detail
+        ))
+    }
+
     async fn refresh_auth(&self) -> Result<(), SyncError> {
         self.do_refresh().await?;
         info!("Amazon access token refreshed");
@@ -379,5 +402,110 @@ impl PlatformAdapter for AmazonAdapter {
             can_create_listing: true,
             has_stock_mode_inventory: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nisaba_core::config::AmazonConfig;
+    use nisaba_core::db::Db;
+    use nisaba_core::traits::PlatformAdapter;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn test_config() -> AmazonConfig {
+        AmazonConfig {
+            enabled: true,
+            client_id: "amzn-client-id".to_string(),
+            client_secret: "amzn-client-secret".to_string(),
+            refresh_token: String::new(),
+            seller_id: "SELLER123".to_string(),
+            region: "NA".to_string(),
+            marketplace_ids: vec!["ATVPDKIKX0DER".to_string()],
+        }
+    }
+
+    /// Fake SP-API server routing on the request path.
+    async fn spawn_fake(status: u16, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let mut req = Vec::new();
+                    loop {
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&req).to_string();
+                    let path_ok = head.contains("/sellers/v1/marketplaceParticipations");
+                    let (code, payload) = if path_ok { (status, body) } else { (404, "{}") };
+                    let reason = if code == 200 { "OK" } else { "Status" };
+                    let resp = format!(
+                        "HTTP/1.1 {code} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn adapter_with_token(base: String) -> (AmazonAdapter, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        let db = Arc::new(Db::open(db_path.to_str().unwrap()).await.expect("open db"));
+        db.migrate().await.expect("migrate db");
+        let mut adapter = AmazonAdapter::new(&test_config(), db)
+            .await
+            .expect("adapter");
+        adapter.client = AmazonClient::with_api_base(base);
+        // A live access token with a future expiry skips the refresh path
+        // (which would call the real LWA endpoint).
+        *adapter.access_token.write().await = Some("test-token".to_string());
+        *adapter.expires_at.write().await = Some(Utc::now() + chrono::Duration::hours(1));
+        (adapter, dir)
+    }
+
+    const PARTICIPATIONS: &str = r#"{"payload":[{"marketplace":{"id":"ATVPDKIKX0DER","name":"Amazon.com"}},{"marketplace":{"id":"A2EUQ1WTGCTBG2","name":"Amazon.ca"}}]}"#;
+
+    /// N-11.1: test_connection reports the marketplace participations.
+    #[tokio::test]
+    async fn test_connection_reports_marketplaces() {
+        let base = spawn_fake(200, PARTICIPATIONS).await;
+        let (adapter, _dir) = adapter_with_token(base).await;
+        let summary = adapter
+            .test_connection()
+            .await
+            .expect("a 200 probe must succeed");
+        assert!(summary.contains("Amazon"), "got: {summary}");
+        assert!(summary.contains('2'), "got: {summary}");
+        assert!(summary.contains("Amazon.com"), "got: {summary}");
+    }
+
+    /// N-11.1: a 403 surfaces as an auth error naming the token problem.
+    #[tokio::test]
+    async fn test_connection_surfaces_access_denied() {
+        let base = spawn_fake(403, r#"{"errors":[{"code":"Unauthorized"}]}"#).await;
+        let (adapter, _dir) = adapter_with_token(base).await;
+        let err = adapter
+            .test_connection()
+            .await
+            .expect_err("a 403 probe must be Err");
+        assert!(err.to_string().contains("Access denied"), "got: {err}");
     }
 }
