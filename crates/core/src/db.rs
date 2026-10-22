@@ -8162,9 +8162,21 @@ mod tests {
         .await
         .unwrap();
         for (quantity, recorded_at) in [
-            (9, "datetime('now', '-40 days')"),
-            (8, "datetime('now', '-40 days', '+1 hour')"),
-            (7, "datetime('now', '-40 days', '+2 hours')"),
+            // Anchored at noon UTC so the three rows always land on the same calendar
+            // day regardless of the wall-clock time the test runs at (a 23:xx UTC
+            // "now" used to push the +1/+2 hour rows onto the next UTC day).
+            (
+                9,
+                "datetime('now', '-40 days', 'start of day', '+12 hours')",
+            ),
+            (
+                8,
+                "datetime('now', '-40 days', 'start of day', '+13 hours')",
+            ),
+            (
+                7,
+                "datetime('now', '-40 days', 'start of day', '+14 hours')",
+            ),
             (4, "datetime('now')"),
         ] {
             conn.execute(
