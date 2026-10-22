@@ -1329,8 +1329,11 @@ any peer can record a sale.
       app database, where the app now uses per-company encrypted config, and neither
       supports Amazon, plugins or P2P. Phase 4's "dry run in the headless daemon" depends
       on this decision.
-- [ ] Version consistency — `Cargo.toml`, `tauri.conf.json` and any updater manifest must be
-      bumped together; add a check that fails CI when they disagree
+- [x] Version consistency — `Cargo.toml`, `tauri.conf.json` and any updater manifest must be
+      bumped together; add a check that fails CI when they disagree (N-10.2, 2026-10-21:
+      `scripts/check-version-consistency.py` runs as its own `version-consistency` CI job,
+      comparing `Cargo.toml [workspace.package]`, `crates/tauri-app/tauri.conf.json` and
+      `frontend/package.json`; the missing `version` field was added to `frontend/package.json`)
 
 ## Phase 7 — Frontend and UX
 
