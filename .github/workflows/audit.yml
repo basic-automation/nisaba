@@ -1,0 +1,56 @@
+# Dependency security audits, on a schedule.
+#
+# Two dependency breakages once sat in the tree unnoticed because CI never got
+# past the format check — so this workflow exists separately from the main CI
+# and runs `cargo audit` and `npm audit` on a schedule (and on demand). Any
+# advisory fails the job: new findings must be fixed or explicitly
+# allow-listed (`.cargo/audit.toml` for cargo, `.nsprc` for npm) with a reason.
+name: Dependency audits
+
+on:
+  schedule:
+    # 09:00 UTC every Monday.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Fails if the lockfile names any crate with a known advisory that is
+      # not allow-listed in .cargo/audit.toml (with a reason for each ignore).
+      - name: Run cargo audit
+        run: cargo audit
+
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # Fails on any advisory at or above the configured level. `.nsprc` in
+      # frontend/ records explicit exceptions with reasons when one is needed.
+      - name: Run npm audit
+        run: npm audit
