@@ -23,6 +23,9 @@ pub struct CompanyRegistryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub general: GeneralConfig,
+    // Legacy configs (written before N-8.1) may not have a [database] section
+    // at all; they load with the same field defaults as a partially-written
+    // section (N-10.4: CI was red on master because of this).
     #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
@@ -134,6 +137,8 @@ pub struct DatabaseConfig {
     pub backup_interval_hours: u64,
 }
 
+/// Mirrors the per-field serde defaults so a missing `[database]` section
+/// deserializes to the same values as a partially-written one.
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {

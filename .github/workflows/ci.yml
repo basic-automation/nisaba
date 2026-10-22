@@ -27,12 +27,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # The macOS leg matters: every release ships a universal macOS bundle,
+        # so the full check/test/clippy suite runs on macOS too.
+        # ubuntu-24.04 is pinned rather than -latest: -latest moves to Ubuntu 26
+        # from 2026-10-19, and the apt list below (WebKitGTK et al.) is known
+        # to resolve on 24.04.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -58,9 +63,9 @@ jobs:
       # "the `frontendDist` configuration is set to ... but this path doesn't
       # exist" unless the Nuxt output is generated first. The generated output
       # is gitignored, so it has to be built here.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -89,7 +94,7 @@ jobs:
     name: UI smoke (WebDriver)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
         run: |
@@ -111,9 +116,9 @@ jobs:
         with:
           key: ui-smoke
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -134,7 +139,7 @@ jobs:
 
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ui-smoke-screenshots
           path: ui-smoke/
@@ -142,16 +147,17 @@ jobs:
 
   frontend:
     name: Frontend
-    runs-on: ubuntu-latest
+    # Pinned rather than -latest: -latest moves to Ubuntu 26 from 2026-10-19.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
