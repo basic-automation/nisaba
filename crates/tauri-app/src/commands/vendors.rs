@@ -360,7 +360,12 @@ fn extract_zip_with_limits(
     // Detect common root prefix (e.g. "plugin-v1.0/")
     // Collect all entry names first to avoid borrow issues
     let entry_names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
+        .filter_map(|i| {
+            archive
+                .by_index(i)
+                .ok()
+                .and_then(|e| e.name().ok().map(|n| n.to_string()))
+        })
         .collect();
 
     // Strip a single root folder shared by every entry. Derived from the names rather
@@ -385,18 +390,23 @@ fn extract_zip_with_limits(
         // separators on a Windows peer the plugin may be synced to. The plugin runtime
         // refuses these too; refusing here gives the user the reason at import.
         // (`ZipFile::enclosed_name` is not enough: it quietly turns `/abs` into `abs`.)
-        let safe = !entry.name().contains('\\')
-            && Path::new(entry.name())
+        // zip 9: name() returns Result<Cow<str>, _> — a non-UTF8 entry name is an
+        // error, so resolve it once and bail before any path handling.
+        let raw_name = entry
+            .name()
+            .map(|n| n.to_string())
+            .map_err(|e| format!("Zip error reading entry name: {e}"))?;
+        let safe = !raw_name.contains('\\')
+            && Path::new(&raw_name)
                 .components()
                 .all(|c| matches!(c, std::path::Component::Normal(_)));
         if !safe {
             return Err(format!(
                 "Plugin zip entry {:?} has an unsafe path",
-                entry.name()
+                raw_name
             ));
         }
 
-        let raw_name = entry.name().to_string();
         let name = if !prefix.is_empty() && raw_name.starts_with(&prefix) {
             raw_name[prefix.len()..].to_string()
         } else {

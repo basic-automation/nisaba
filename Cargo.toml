@@ -25,7 +25,7 @@ nisaba-amazon = { path = "crates/platform-amazon" }
 nisaba-p2p = { path = "crates/p2p" }
 nisaba-vendor-runtime = { path = "crates/vendor-runtime" }
 
-deno_core = "0.389"
+deno_core = "0.413"
 deno_ast = { version = "0.53", features = ["transpiling"] }
 
 tokio = { version = "1", features = ["full"] }
@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
-quick-xml = { version = "0.39", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 axum = "0.8"
 onyums = "0.3.1"
 artiqwest = "0.4.1"

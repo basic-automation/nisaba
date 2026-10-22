@@ -31,7 +31,7 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true }
-zip = "8"
+zip = "9"
 base64 = "0.22"
 sha2 = "0.10"
 urlencoding = "2"
