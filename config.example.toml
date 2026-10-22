@@ -48,3 +48,6 @@ default_low_stock_threshold = 5    # Alert when quantity <= this (overridable pe
 [company]
 enabled = false                    # Enable P2P company sync via Tor
 sync_interval_secs = 120           # P2P sync interval (seconds)
+
+[updates]
+check_for_updates = true           # Background update checks at launch and every 6 hours (the check leaves the machine; manual checks always work)

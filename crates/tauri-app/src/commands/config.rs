@@ -31,6 +31,17 @@ pub async fn get_xmrbazaar_monero_address(state: State<'_, AppState>) -> Result<
     Ok(state.config.read().await.xmrbazaar.monero_address.clone())
 }
 
+/// Non-secret accessor for the updater opt-out (N-10.1).
+///
+/// The main window runs the update banner and its 6-hour check timer, but it
+/// must not be able to invoke `get_config` (which returns platform secrets),
+/// so the opt-out flag gets its own narrow accessor — the same pattern as
+/// `get_xmrbazaar_monero_address`. A single boolean cannot leak anything.
+#[tauri::command]
+pub async fn get_update_check_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.config.read().await.updates.check_for_updates)
+}
+
 #[tauri::command]
 pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
     // Reject a sync schedule the engine does not support (including a zero

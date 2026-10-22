@@ -1,5 +1,6 @@
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
+import { invoke } from '@tauri-apps/api/core'
 
 export function useUpdater() {
   const updateAvailable = ref(false)
@@ -58,7 +59,18 @@ export function useUpdater() {
     updateAvailable.value = false
   }
 
-  function startAutoCheck() {
+  async function startAutoCheck() {
+    // Background checks honour the updater opt-out (N-10.1): the check
+    // leaves the machine, so a user who disabled it in Settings gets no
+    // launch check and no timer. A manual checkForUpdate() call is an
+    // explicit user action and is not gated here.
+    let enabled = true
+    try {
+      enabled = await invoke<boolean>('get_update_check_enabled')
+    } catch {
+      // If the preference cannot be read, fall back to the default (on).
+    }
+    if (!enabled) return
     // Check on mount
     checkForUpdate()
     // Check every 6 hours

@@ -48,16 +48,17 @@
       "icons/128x128@2x.png",
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "shell": {
       "open": true
     },
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDRDQ4MDFCQkVGNzc4QjUKUldTMWVQZStHNERVM01WM3ZWV2RQK1BZeTE0Umkvd2ZZZk5Wb0NYUXpBeVZvMDN4eDYrOWR2YVoK",
       "endpoints": [
-        "https://raw.githubusercontent.com/basic-automation/nisaba/master/.updater/latest.json"
+        "https://github.com/basic-automation/nisaba/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
