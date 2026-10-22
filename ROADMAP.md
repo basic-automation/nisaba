@@ -117,7 +117,7 @@ are referenced rather than repeated.
       will not click through.
 - [ ] macOS Developer ID signing and notarization, or a documented decision to ship
       unsigned with the right-click-Open workaround (Phase 6).
-- [ ] CI green with no `continue-on-error`: typecheck, UI smoke, a macOS leg, and runners
+- [x] CI green with no `continue-on-error`: typecheck, UI smoke, a macOS leg, and runners
       moved off deprecated Node 20 actions (Phases 0, 6, 7).
 - [ ] A version-consistency check across `Cargo.toml`, `tauri.conf.json` and
       `frontend/package.json` (Phase 6).
@@ -1284,11 +1284,11 @@ any peer can record a sale.
 - [x] The updater checks a GitHub raw URL at launch and every 6 hours (`useUpdater.ts`
       ~61–65), outside Tor and with no opt-out. Add a setting, and record the choice in the
       Sync v2 privacy decision.
-- [ ] CI runners: every run carries Node 20 deprecation annotations for the actions, and
+- [x] CI runners: every run carries Node 20 deprecation annotations for the actions, and
       `ubuntu-latest` moves to Ubuntu 26 from 2026-10-19. Bump the action versions, and
       check that the apt list (`libappindicator3-dev`, the WebKitGTK packages) still
       resolves on the new image, or pin `ubuntu-24.04`.
-- [ ] CI has no macOS leg, although every release ships a universal macOS bundle, and
+- [x] CI has no macOS leg, although every release ships a universal macOS bundle, and
       `release.yml` runs no tests before publishing. Add `macos-latest` to `ci.yml`, or a
       test job that `publish` depends on.
 - [x] A `release.yml` that builds **Linux, Windows and macOS** bundles and attaches them to
