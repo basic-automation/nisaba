@@ -100,7 +100,7 @@ are referenced rather than repeated.
 - [ ] Tauri capabilities narrowed so the main window can invoke only the commands it uses,
       and secret-returning commands are reachable only from the settings views that
       display them.
-- [ ] `cargo audit` and `npm audit` clean in CI, on a schedule (Cross-cutting).
+- [x] `cargo audit` and `npm audit` clean in CI, on a schedule (Cross-cutting).
 - [ ] GitHub private vulnerability reporting enabled (Phase 0).
 
 ### Gate: release engineering
@@ -1672,7 +1672,7 @@ next adapter, ahead of Shopify. It has four advantages over the rest of the list
       https://github.com/denoland/deno_core `turso` is the exception: 0.5.0 is still
       the newest release, and everything published since is `0.8.0-pre.*`, so staying on 0.5
       is correct until a stable 0.8 exists. https://github.com/tursodatabase/turso/releases
-- [ ] A scheduled `cargo update` / `cargo audit` CI job. This run found two dependency
+- [x] A scheduled `cargo update` / `cargo audit` CI job. This run found two dependency
       breakages by accident — a transitive C library that stopped compiling on current
       compilers, and a direct dependency that required nightly — and both had been sitting
       in the tree unnoticed because CI never got past the format check.

@@ -1,0 +1,52 @@
+# cargo-audit allow-list for the scheduled Dependency audits workflow.
+#
+# Every entry here names an advisory that `cargo audit` still reports after the
+# N-9.4 freshness pass (`cargo update`, deno_core 0.389 -> 0.413, zip 8 -> 9,
+# quick-xml 0.39 -> 0.41) and that has no fix available to us. Each carries the
+# reason it is safe to ignore; remove the entry (not just the reason) as soon
+# as an upstream fix exists and re-run `cargo audit` to confirm.
+[advisories]
+ignore = [
+    # RUSTSEC-2025-0052: async-std is discontinued upstream. It arrives via
+    # tor-rtcompat (the arti onion stack behind `artiqwest`); arti pins it and
+    # there is no newer async-std to move to. Informational only.
+    "RUSTSEC-2025-0052",
+    # RUSTSEC-2025-0141: bincode 2.0.1 is unmaintained upstream. It arrives via
+    # typed-index-collections (a turso transitive dep) and is used for internal
+    # serialization there; no vulnerability, just no maintainer. Re-check when
+    # turso moves off it.
+    "RUSTSEC-2025-0141",
+    # RUSTSEC-2024-0429: soundness hole in glib's VariantStrIter iterator impls.
+    # glib 0.18.5 arrives via tauri's GTK stack on Linux; upgrading past 0.18
+    # means gtk-rs 0.18 -> 0.20, which the tauri 2.x stack does not support.
+    # Nisaba never calls glib directly, let alone VariantStrIter.
+    "RUSTSEC-2024-0429",
+    # RUSTSEC-2024-0436: paste is unmaintained upstream. It is a proc-macro used
+    # at compile time by the arti tor crates; it is not linked into the binary
+    # and has no runtime attack surface.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2024-0370: proc-macro-error is unmaintained upstream. It arrives
+    # via glib-macros/gtk3-macros (tauri's GTK stack) and is compile-time only.
+    "RUSTSEC-2024-0370",
+    # RUSTSEC-2023-0071: Marvin timing side-channel in rsa decryption. rsa
+    # arrives via arti's tor stack (tor-cert-x509, ssh-key-fork-arti); the
+    # attack needs a local padding oracle with precise timing against our own
+    # process, which no app network path exposes (artiqwest is a Tor client).
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0249: smartstring is unmaintained upstream. It arrives via
+    # swc_ecma_parser (deno_ast, the plugin TypeScript transpiler); the only
+    # input it sees is plugin source, which already runs inside the sandbox.
+    "RUSTSEC-2026-0249",
+    # RUSTSEC-2026-0367: zip 4.6.1 preserves SUID/SGID bits on extraction. That
+    # copy is pinned by tauri-plugin-updater (2.14.0), which signature-verifies
+    # update bundles before extracting them; the app itself extracts plugin zips
+    # only through its own path-validated reader on the zip 9 copy.
+    "RUSTSEC-2026-0367",
+    # RUSTSEC-2026-0368: zip 4.6.1 `extract()` follows attacker-controlled
+    # symlinks out of the destination. Same position as -0367: only
+    # tauri-plugin-updater's pinned copy, only on signature-verified bundles.
+    "RUSTSEC-2026-0368",
+    # RUSTSEC-2026-0369: zip 4.6.1 `extract()` applies Unix permissions through
+    # symlinks without confining the target. Same position as -0367.
+    "RUSTSEC-2026-0369",
+]

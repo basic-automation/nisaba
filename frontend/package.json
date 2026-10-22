@@ -28,7 +28,6 @@
     "chart.js": "^4.4.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
-    "diff": "^7.0.0",
     "dompurify": "^3.4.17",
     "lucide-vue-next": "^0.400.0",
     "radix-vue": "^1.9.0",
@@ -47,5 +46,8 @@
     "typescript": "^5.5.0",
     "vitest": "^5.0.5",
     "vue-tsc": "^2.2.12"
+  },
+  "overrides": {
+    "postcss-selector-parser": "^7.1.7"
   }
 }
