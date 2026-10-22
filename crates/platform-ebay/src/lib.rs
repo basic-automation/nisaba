@@ -344,6 +344,19 @@ impl PlatformAdapter for EbayAdapter {
         self.access_token.read().await.is_some()
     }
 
+    async fn test_connection(&self) -> Result<String, SyncError> {
+        // A single inventory page is the cheapest authenticated read the
+        // Inventory API offers; the total tells the user the connection
+        // really reaches their seller account. `get_access_token` refreshes
+        // an expired token first, so this also validates the refresh token.
+        let token = self.get_access_token().await?;
+        let page = self.client.fetch_inventory_page(&token, 1, 0).await?;
+        let total = page.total.unwrap_or_default();
+        Ok(format!(
+            "Connected to eBay — credentials accepted, {total} inventory item(s) visible"
+        ))
+    }
+
     async fn refresh_auth(&self) -> Result<(), SyncError> {
         self.do_refresh().await?;
         info!("eBay access token refreshed");
@@ -940,6 +953,46 @@ mod tests {
         assert!(
             requests.iter().all(|r| !r.starts_with("POST")),
             "no write should be sent without an offerId: {requests:?}"
+        );
+    }
+
+    /// N-11.1: test_connection probes a single inventory page and reports
+    /// the server-side total.
+    #[tokio::test]
+    async fn test_connection_reports_inventory_total() {
+        let (base, _captured) = spawn_routing_server(|req| {
+            if req.contains("/sell/inventory/v1/inventory_item") {
+                (200, r#"{"inventoryItems":[],"total":7}"#.to_string())
+            } else {
+                (404, "{}".to_string())
+            }
+        })
+        .await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let summary = adapter
+            .test_connection()
+            .await
+            .expect("a 200 probe must succeed");
+        assert!(
+            summary.contains('7'),
+            "summary should report the total, got: {summary}"
+        );
+        assert!(summary.contains("eBay"), "got: {summary}");
+    }
+
+    /// N-11.1: a revoked token surfaces as an auth error, not a panic.
+    #[tokio::test]
+    async fn test_connection_surfaces_revoked_token() {
+        let (base, _captured) =
+            spawn_routing_server(|_req| (401, r#"{"error":"invalid_token"}"#.to_string())).await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let err = adapter
+            .test_connection()
+            .await
+            .expect_err("a 401 probe must be Err");
+        assert!(
+            err.to_string().to_lowercase().contains("token") || err.to_string().contains("expired"),
+            "error should name the token problem, got: {err}"
         );
     }
 }
