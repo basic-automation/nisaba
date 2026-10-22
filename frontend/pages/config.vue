@@ -592,6 +592,21 @@ async function handleToggleDropship(include: boolean) {
           </div>
         </div>
       </section>
+
+      <!-- Updates (N-10.1) -->
+      <section>
+        <h3 class="text-xs font-medium tracking-widest uppercase text-muted/60 mb-5">Updates</h3>
+        <div class="grid grid-cols-3 gap-x-8 gap-y-5">
+          <div>
+            <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Check for updates</label>
+            <select v-model="editConfig.updates.check_for_updates" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors appearance-none">
+              <option :value="true" class="bg-background">Enabled</option>
+              <option :value="false" class="bg-background">Disabled</option>
+            </select>
+            <p class="mt-1.5 text-[11px] text-muted/40">When enabled, Nisaba checks for a new release at launch and every 6 hours. Applies on save; takes effect at the next launch.</p>
+          </div>
+        </div>
+      </section>
     </div>
 
     <!-- COMPANY TAB -->
