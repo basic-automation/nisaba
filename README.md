@@ -61,7 +61,6 @@ crates/
   p2p/                  Tor onion service, peer client/server, company sync
   vendor-runtime/       Deno-based sandbox that executes vendor plugins
   tauri-app/            Tauri backend — ~96 commands exposed to the frontend
-  service/  tui/        Not currently workspace members
 frontend/               Nuxt 3 SPA (Tailwind + shadcn-vue)
 plugins/
   rothco-wholesale/     First-party vendor plugin (GraphQL v2 API)
@@ -283,8 +282,6 @@ P2P, and the release pipeline. Known gaps worth calling out up front:
 - Test coverage is uneven. The sync engine, the database migrations, XMR Bazaar's HTML
   scraping, all four adapters' mapping layers and the vendor plugin runtime and sandbox
   have tests; every adapter's live network path and the P2P layer do not.
-- `crates/service` (headless sync daemon) and `crates/tui` are tracked in git but excluded
-  from the Cargo workspace, so they are not built or tested.
 
 ## Security
 
