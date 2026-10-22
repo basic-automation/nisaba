@@ -302,6 +302,7 @@ fn main() {
             commands::config::get_company_platform_config,
             commands::config::update_company_platform_config,
             commands::config::get_platform_capabilities,
+            commands::config::get_setup_wizard_completed,
             // Analytics
             commands::analytics::get_product_analytics,
             commands::analytics::get_all_analytics,
@@ -313,6 +314,7 @@ fn main() {
             commands::auth::complete_amazon_auth,
             commands::auth::check_platform_auth,
             commands::auth::get_platform_health,
+            commands::auth::test_platform_connection,
             // Photos
             commands::photos::get_product_photos,
             commands::photos::sync_photo,

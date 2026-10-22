@@ -28,6 +28,18 @@ pub trait PlatformAdapter: Send + Sync {
     /// Check whether current auth credentials are valid.
     async fn is_authenticated(&self) -> bool;
 
+    /// Probe the platform with a minimal read-only request and return a
+    /// human-readable summary of the connection (e.g. "Connected — 12
+    /// inventory items found"). N-11.1: the setup wizard's per-platform
+    /// "Test connection" button calls this. The default reports unsupported;
+    /// every shipped platform overrides it.
+    async fn test_connection(&self) -> Result<String, SyncError> {
+        Err(SyncError::Other(format!(
+            "{} does not support connection testing",
+            self.platform()
+        )))
+    }
+
     /// Attempt to refresh authentication (token refresh, re-login, etc.).
     async fn refresh_auth(&self) -> Result<(), SyncError>;
 

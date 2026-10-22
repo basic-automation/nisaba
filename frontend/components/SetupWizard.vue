@@ -95,6 +95,67 @@ const showInstructions = ref<Record<Platform, boolean>>({
   amazon: false,
 })
 
+// N-11.1: per-platform Test connection state
+type TestConnState = 'idle' | 'testing' | 'ok' | 'error'
+const testConnection = ref<Record<Platform, { state: TestConnState; message: string }>>({
+  ebay: { state: 'idle', message: '' },
+  squarespace: { state: 'idle', message: '' },
+  xmrbazaar: { state: 'idle', message: '' },
+  amazon: { state: 'idle', message: '' },
+})
+
+// N-11.1: the exact eBay RuName (redirect URL) to register, per environment.
+// Desktop apps use eBay's auth-accepted page as the redirect target; the
+// in-app auth window captures the navigation, so the registered value only
+// needs to match the Redirect URI field below character-for-character.
+const EBAY_RUNAME_PROD =
+  'https://signin.ebay.com/ws/eBayISAPI.dll?ThirdPartyAuthSucessFailure&isAuthSuccessful=true'
+const EBAY_RUNAME_SANDBOX =
+  'https://signin.sandbox.ebay.com/ws/eBayISAPI.dll?ThirdPartyAuthSucessFailure&isAuthSuccessful=true'
+const ebayRecommendedRuName = computed(() =>
+  platformConfig.value.ebay.environment === 'production' ? EBAY_RUNAME_PROD : EBAY_RUNAME_SANDBOX
+)
+const copiedRuName = ref(false)
+
+function prefillEbayRuName() {
+  if (!platformConfig.value.ebay.redirect_uri.trim()) {
+    platformConfig.value.ebay.redirect_uri = ebayRecommendedRuName.value
+  }
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copiedRuName.value = true
+    setTimeout(() => { copiedRuName.value = false }, 2000)
+  } catch {
+    // Clipboard unavailable — the value is still visible for manual copy.
+  }
+}
+
+// N-11.1: stage the platform's current fields (adapters are built from the
+// saved company config, so the backend must see what the user typed), then
+// probe the platform with a read-only request and report the result.
+async function handleTestConnection(platform: Platform) {
+  const t = testConnection.value[platform]
+  t.state = 'testing'
+  t.message = ''
+  try {
+    const existing = (await fetchCompanyConfig()) ?? {}
+    const merged = {
+      ...existing,
+      [platform]: { ...platformConfig.value[platform], enabled: true },
+    }
+    await saveCompanyConfig(merged)
+    const summary = await invoke<string>('test_platform_connection', { platform })
+    t.state = 'ok'
+    t.message = summary
+  } catch (e: any) {
+    t.state = 'error'
+    t.message = String(e)
+  }
+}
+
 // Computed helpers
 const selectedPlatformsList = computed(() =>
   allPlatforms.filter(p => selectedPlatforms.value.has(p))
@@ -178,9 +239,11 @@ function prevPlatform() {
 async function handleFinish() {
   saving.value = true
   try {
-    // Merge with existing company config if any
+    // Merge with existing company config if any. N-11.1: completing (or
+    // skipping — the Skip button lands here too) is persisted so the main
+    // window stops auto-opening the wizard for this company.
     const existing = await fetchCompanyConfig()
-    const merged = { ...existing, ...platformConfig.value }
+    const merged = { ...existing, ...platformConfig.value, setup_wizard_completed: true }
     await saveCompanyConfig(merged)
   } catch (e) {
     console.error('Failed to save config:', e)
@@ -275,6 +338,25 @@ async function handleAmazonManualComplete() {
 const unlisteners: (() => void)[] = []
 
 onMounted(async () => {
+  // N-11.1: when reconfiguring an existing company (settings re-entry), start
+  // from the saved values so Test connection works against real credentials.
+  // Runs in the settings window, the only context allowed to read secrets.
+  if (isExisting) {
+    try {
+      const saved = await fetchCompanyConfig()
+      if (saved) {
+        for (const p of allPlatforms) {
+          if (saved[p] && typeof saved[p] === 'object') {
+            platformConfig.value[p] = { ...platformConfig.value[p], ...saved[p] }
+          }
+        }
+      }
+    } catch {
+      // Secret commands are denied outside the settings window; the wizard
+      // still works with blank fields there.
+    }
+  }
+
   unlisteners.push(await listen<boolean>('ebay-auth-complete', () => {
     ebayAuthLoading.value = false
     ebayAuthenticated.value = true
@@ -436,11 +518,19 @@ onUnmounted(() => {
             {{ showInstructions.ebay ? 'Hide instructions' : 'Show setup instructions' }}
           </button>
           <div v-if="showInstructions.ebay" class="mt-3 space-y-2 text-xs text-muted/50 leading-relaxed">
-            <p>1. Go to <a href="https://developer.ebay.com" target="_blank" class="text-accent/70 hover:text-accent">developer.ebay.com</a> and sign in with your eBay account.</p>
-            <p>2. Navigate to <strong class="text-muted/70">My Account &gt; Application Access Keys</strong>.</p>
-            <p>3. Create a new application (or use an existing one) to get your <strong class="text-muted/70">Client ID</strong> and <strong class="text-muted/70">Client Secret</strong> for the Production environment.</p>
-            <p>4. Under <strong class="text-muted/70">User Tokens</strong>, configure a RuName (Redirect URI) for OAuth. Copy it into the Redirect URI field below.</p>
-            <p>5. After filling in credentials below, use the "Authorize with eBay" button to complete the OAuth flow.</p>
+            <p>1. Go to <a href="https://developer.ebay.com" target="_blank" class="text-accent/70 hover:text-accent">developer.ebay.com</a>, sign in, and open <strong class="text-muted/70">Application Access Keys</strong>.</p>
+            <p>2. Pick the keyset matching the <strong class="text-muted/70">Environment</strong> below (Production for real selling) and copy the <strong class="text-muted/70">App ID (Client ID)</strong> and <strong class="text-muted/70">Cert ID (Client Secret)</strong> into the fields below.</p>
+            <p>3. Under <strong class="text-muted/70">OAuth &gt; eBay Redirect URL (RuName)</strong>, register exactly this value — then paste the same value into the Redirect URI field below. It must match character-for-character:</p>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 min-w-0 text-[11px] font-mono text-muted/70 bg-white/[0.03] border border-border/20 rounded px-2 py-1.5 break-all">{{ ebayRecommendedRuName }}</code>
+              <button
+                class="text-[11px] text-accent hover:text-accent/80 transition-colors shrink-0"
+                @click="copyText(ebayRecommendedRuName)"
+              >
+                {{ copiedRuName ? 'Copied' : 'Copy' }}
+              </button>
+            </div>
+            <p>4. Use <strong class="text-muted/70">Authorize with eBay</strong> below to complete OAuth, then <strong class="text-muted/70">Test connection</strong> to verify everything works.</p>
             <img
               :src="'/guide/ebay-developer-console.png'"
               alt=""
@@ -469,6 +559,12 @@ onUnmounted(() => {
           <div>
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Redirect URI (RuName)</label>
             <input v-model="platformConfig.ebay.redirect_uri" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
+            <button
+              class="text-[11px] text-accent/70 hover:text-accent transition-colors mt-1"
+              @click="prefillEbayRuName"
+            >
+              Fill with the recommended RuName
+            </button>
           </div>
           <div>
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Environment</label>
@@ -548,10 +644,10 @@ onUnmounted(() => {
             {{ showInstructions.squarespace ? 'Hide instructions' : 'Show setup instructions' }}
           </button>
           <div v-if="showInstructions.squarespace" class="mt-3 space-y-2 text-xs text-muted/50 leading-relaxed">
-            <p>1. In your Squarespace site, go to <strong class="text-muted/70">Settings &gt; Developer &gt; API Keys</strong>.</p>
+            <p>1. In your Squarespace site, go to <strong class="text-muted/70">Settings &gt; Advanced &gt; Developer &gt; API Keys</strong>. (API keys are created inside your site — not in the <a href="https://developers.squarespace.com" target="_blank" class="text-accent/70 hover:text-accent">developer portal</a>, which hosts the API docs.)</p>
             <p>2. Click <strong class="text-muted/70">Generate Key</strong> and give it a descriptive name (e.g. "Nisaba Sync").</p>
             <p>3. Ensure the key has <strong class="text-muted/70">Commerce Read</strong> and <strong class="text-muted/70">Commerce Write</strong> scopes.</p>
-            <p>4. Copy the API key and paste it below. The User Agent can be any identifier for your app.</p>
+            <p>4. Copy the API key and paste it below, then use <strong class="text-muted/70">Test connection</strong> to verify it. The User Agent can be any identifier for your app.</p>
             <img
               :src="'/guide/squarespace-api-keys.png'"
               alt=""
@@ -588,6 +684,7 @@ onUnmounted(() => {
             <p>1. Use your account credentials from <a href="https://xmrbazaar.com" target="_blank" class="text-accent/70 hover:text-accent">xmrbazaar.com</a>.</p>
             <p>2. Enter the same username and password you use to log in to XMR Bazaar.</p>
             <p>3. The Base URL defaults to <code class="text-muted/60">https://xmrbazaar.com</code>. Only change this if you use a custom instance.</p>
+            <p>4. Use <strong class="text-muted/70">Test connection</strong> below to verify the login works.</p>
             <img
               :src="'/guide/xmrbazaar-login.png'"
               alt=""
@@ -625,11 +722,12 @@ onUnmounted(() => {
             {{ showInstructions.amazon ? 'Hide instructions' : 'Show setup instructions' }}
           </button>
           <div v-if="showInstructions.amazon" class="mt-3 space-y-2 text-xs text-muted/50 leading-relaxed">
-            <p>1. Go to <strong class="text-muted/70">Seller Central &gt; Apps &gt; Develop Apps</strong> and register a new app.</p>
-            <p>2. Under your app's <strong class="text-muted/70">LWA credentials</strong>, copy the <strong class="text-muted/70">Client ID</strong> and <strong class="text-muted/70">Client Secret</strong>.</p>
-            <p>3. Your <strong class="text-muted/70">Seller ID</strong> is on the <strong class="text-muted/70">Account Info</strong> page in Seller Central.</p>
-            <p>4. Select your region (NA, EU, or FE) and the marketplace IDs you sell in.</p>
-            <p>5. After filling in credentials, use "Authorize with Amazon" to complete the OAuth flow.</p>
+            <p><strong class="text-muted/70">Self-authorized private app:</strong> Nisaba connects to Amazon as a private Selling Partner API (SP-API) app that you authorize for your own seller account — it is never listed publicly. You register once as a developer, create the app, and authorize it yourself below.</p>
+            <p>1. Register as a developer via the <a href="https://developer-docs.amazon.com/sp-api/" target="_blank" class="text-accent/70 hover:text-accent">SP-API developer docs</a>, then in <a href="https://sellercentral.amazon.com" target="_blank" class="text-accent/70 hover:text-accent">Seller Central &gt; Apps &amp; Services &gt; Develop Apps</a> create a new app.</p>
+            <p>2. Under the app's <strong class="text-muted/70">LWA credentials</strong>, copy the <strong class="text-muted/70">Client ID</strong> and <strong class="text-muted/70">Client Secret</strong> into the fields below. Your <strong class="text-muted/70">Seller ID</strong> is on the Seller Central <strong class="text-muted/70">Account Info</strong> page.</p>
+            <p>3. When Amazon asks which SP-API <strong class="text-muted/70">roles</strong> the app needs, select <strong class="text-muted/70">Product Listing</strong> — the only role Nisaba uses (it reads and updates your own listings and inventory through the Listings Items API). The Test connection check below needs no role at all.</p>
+            <p>4. <strong class="text-muted/70">Approval caveat:</strong> Amazon must approve your developer registration before the app works, and any restricted role (anything touching buyer personal data) needs separate Amazon approval — that decision is Amazon's and can take several days. Product Listing is a direct, unrestricted role for your own private app: it is available as soon as your developer registration completes. Nisaba never requests or touches buyer PII.</p>
+            <p>5. Select your region (NA, EU, or FE) and the marketplace IDs you sell in. Leave <strong class="text-muted/70">Refresh token</strong> blank — after you use <strong class="text-muted/70">Authorize with Amazon</strong> below, Nisaba stores the tokens itself. Finish with <strong class="text-muted/70">Test connection</strong>.</p>
           </div>
         </div>
 
@@ -723,6 +821,27 @@ onUnmounted(() => {
           </div>
         </div>
       </template>
+
+      <!-- N-11.1: Test connection (per platform) -->
+      <div class="border-t border-border/20 pt-5">
+        <div class="flex items-center gap-3">
+          <button
+            class="px-4 py-1.5 text-xs rounded border border-accent/60 text-accent hover:bg-accent/10 transition-colors disabled:opacity-30"
+            :disabled="testConnection[currentPlatform].state === 'testing'"
+            @click="handleTestConnection(currentPlatform)"
+          >
+            {{ testConnection[currentPlatform].state === 'testing' ? 'Testing…' : 'Test connection' }}
+          </button>
+          <span
+            v-if="testConnection[currentPlatform].message"
+            class="text-xs"
+            :class="testConnection[currentPlatform].state === 'ok' ? 'text-green-400/80' : 'text-red-400/80'"
+          >{{ testConnection[currentPlatform].message }}</span>
+        </div>
+        <p class="text-[11px] text-muted/30 mt-2">
+          Saves the fields above, then makes a single read-only request to {{ currentPlatform }} to verify the credentials.
+        </p>
+      </div>
 
       <!-- Navigation -->
       <div class="flex gap-3 pt-3">

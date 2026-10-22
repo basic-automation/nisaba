@@ -30,6 +30,7 @@ pub fn next_cursor(
 
 pub struct SquarespaceClient {
     http: Client,
+    api_base: String,
 }
 
 impl Default for SquarespaceClient {
@@ -46,7 +47,67 @@ impl SquarespaceClient {
             .user_agent("Mozilla/5.0 (compatible; Nisaba/0.1.0)")
             .build()
             .expect("Failed to build HTTP client");
-        Self { http }
+        Self {
+            http,
+            api_base: API_BASE.to_string(),
+        }
+    }
+
+    /// Construct a client pointed at an explicit API base URL. Used by
+    /// fake-server tests.
+    pub fn with_api_base(api_base: String) -> Self {
+        let http = Client::builder()
+            .user_agent("Mozilla/5.0 (compatible; Nisaba/0.1.0)")
+            .build()
+            .expect("Failed to build HTTP client");
+        Self { http, api_base }
+    }
+
+    /// Fetch one page of inventory items.
+    ///
+    /// N-11.1 uses a single page as the setup wizard's "Test connection"
+    /// probe — it proves the API key is accepted without pulling the whole
+    /// catalog.
+    pub async fn fetch_inventory_page(
+        &self,
+        api_key: &str,
+        cursor: Option<&str>,
+    ) -> Result<SquarespaceInventoryResponse, SyncError> {
+        let mut url = format!("{}/1.0/commerce/inventory", self.api_base);
+        if let Some(c) = cursor {
+            url.push_str(&format!("?cursor={}", c));
+        }
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(api_key)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Squarespace,
+                message: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 {
+            return Err(SyncError::AuthError {
+                platform: Platform::Squarespace,
+                message: "Invalid API key".into(),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ApiError {
+                platform: Platform::Squarespace,
+                message: format!("Inventory fetch failed ({status}): {body}"),
+            });
+        }
+
+        resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Squarespace,
+            message: format!("Failed to parse inventory response: {e}"),
+        })
     }
 
     /// Fetch all inventory items with pagination.
@@ -58,42 +119,9 @@ impl SquarespaceClient {
         let mut cursor: Option<String> = None;
 
         loop {
-            let mut url = format!("{}/1.0/commerce/inventory", API_BASE);
-            if let Some(ref c) = cursor {
-                url.push_str(&format!("?cursor={}", c));
-            }
-
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(api_key)
-                .send()
-                .await
-                .map_err(|e| SyncError::NetworkError {
-                    platform: Platform::Squarespace,
-                    message: e.to_string(),
-                })?;
-
-            let status = resp.status();
-            if status.as_u16() == 401 {
-                return Err(SyncError::AuthError {
-                    platform: Platform::Squarespace,
-                    message: "Invalid API key".into(),
-                });
-            }
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(SyncError::ApiError {
-                    platform: Platform::Squarespace,
-                    message: format!("Inventory fetch failed ({status}): {body}"),
-                });
-            }
-
-            let response: SquarespaceInventoryResponse =
-                resp.json().await.map_err(|e| SyncError::ApiError {
-                    platform: Platform::Squarespace,
-                    message: format!("Failed to parse inventory response: {e}"),
-                })?;
+            let response = self
+                .fetch_inventory_page(api_key, cursor.as_deref())
+                .await?;
 
             all_items.extend(response.inventory);
 

@@ -153,3 +153,30 @@ pub struct AmazonListingSubmissionResponse {
     pub submission_id: Option<String>,
     pub issues: Option<Vec<AmazonListingIssue>>,
 }
+
+/// Sellers API v1 `getMarketplaceParticipations` response.
+///
+/// N-11.1 uses this as the setup wizard's "Test connection" probe: it is the
+/// canonical SP-API connectivity check and requires no special role, so it
+/// works before any role approvals.
+#[derive(Debug, Deserialize)]
+pub struct MarketplaceParticipationsResponse {
+    #[serde(default)]
+    pub payload: Vec<MarketplaceParticipation>,
+}
+
+/// One entry of the `getMarketplaceParticipations` payload.
+#[derive(Debug, Deserialize)]
+pub struct MarketplaceParticipation {
+    #[serde(default)]
+    pub marketplace: MarketplaceInfo,
+}
+
+/// The marketplace block of a participation entry.
+#[derive(Debug, Deserialize, Default)]
+pub struct MarketplaceInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}

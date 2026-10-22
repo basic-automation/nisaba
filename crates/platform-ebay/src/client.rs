@@ -419,6 +419,55 @@ impl EbayClient {
         &self.http
     }
 
+    /// Fetch one page of inventory items from the eBay Inventory API.
+    ///
+    /// Returns the parsed page (items plus the server-reported total) so
+    /// callers can decide whether to keep paginating. N-11.1 uses a single
+    /// page as the setup wizard's "Test connection" probe.
+    pub async fn fetch_inventory_page(
+        &self,
+        access_token: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<EbayInventoryItemsResponse, SyncError> {
+        let url = format!(
+            "{}/sell/inventory/v1/inventory_item?limit={}&offset={}",
+            self.api_base, limit, offset
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .header("Content-Language", "en-US")
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 {
+            return Err(SyncError::AuthError {
+                platform: Platform::Ebay,
+                message: "Access token expired".into(),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Inventory fetch failed ({status}): {body}"),
+            });
+        }
+
+        resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse inventory response: {e}"),
+        })
+    }
+
     /// Fetch all inventory items from the eBay Inventory API.
     pub async fn fetch_inventory_items(
         &self,
@@ -430,45 +479,53 @@ impl EbayClient {
         let mut next_url: Option<String> = None;
 
         loop {
-            let url = next_url.take().unwrap_or_else(|| {
-                format!(
-                    "{}/sell/inventory/v1/inventory_item?limit={}&offset={}",
-                    self.api_base, limit, offset
-                )
-            });
+            // Follow the response's `next` href when it offers one; the
+            // offset arithmetic is only the fallback for responses
+            // without one.
+            let response: EbayInventoryItemsResponse;
+            let url: String;
+            if let Some(next) = next_url.take() {
+                url = next;
+                let resp = self
+                    .http
+                    .get(&url)
+                    .bearer_auth(access_token)
+                    .header("Content-Language", "en-US")
+                    .send()
+                    .await
+                    .map_err(|e| SyncError::NetworkError {
+                        platform: Platform::Ebay,
+                        message: e.to_string(),
+                    })?;
 
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(access_token)
-                .header("Content-Language", "en-US")
-                .send()
-                .await
-                .map_err(|e| SyncError::NetworkError {
-                    platform: Platform::Ebay,
-                    message: e.to_string(),
-                })?;
+                let status = resp.status();
+                if status.as_u16() == 401 {
+                    return Err(SyncError::AuthError {
+                        platform: Platform::Ebay,
+                        message: "Access token expired".into(),
+                    });
+                }
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(SyncError::ApiError {
+                        platform: Platform::Ebay,
+                        message: format!("Inventory fetch failed ({status}): {body}"),
+                    });
+                }
 
-            let status = resp.status();
-            if status.as_u16() == 401 {
-                return Err(SyncError::AuthError {
-                    platform: Platform::Ebay,
-                    message: "Access token expired".into(),
-                });
-            }
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(SyncError::ApiError {
-                    platform: Platform::Ebay,
-                    message: format!("Inventory fetch failed ({status}): {body}"),
-                });
-            }
-
-            let response: EbayInventoryItemsResponse =
-                resp.json().await.map_err(|e| SyncError::ApiError {
+                response = resp.json().await.map_err(|e| SyncError::ApiError {
                     platform: Platform::Ebay,
                     message: format!("Failed to parse inventory response: {e}"),
                 })?;
+            } else {
+                url = format!(
+                    "{}/sell/inventory/v1/inventory_item?limit={}&offset={}",
+                    self.api_base, limit, offset
+                );
+                response = self
+                    .fetch_inventory_page(access_token, limit, offset)
+                    .await?;
+            }
 
             let next = response.next.clone();
             let items = response.inventory_items.unwrap_or_default();
@@ -478,9 +535,6 @@ impl EbayClient {
             let total = response.total.unwrap_or(0) as usize;
             offset += count;
 
-            // Follow the response's `next` href when it offers one; the
-            // offset arithmetic is only the fallback for responses
-            // without one.
             if let Some(next) = next_page_url(next.as_deref(), &url) {
                 next_url = Some(next);
                 continue;

@@ -45,6 +45,13 @@ async function checkPlatformConfig() {
   try {
     const caps = await invoke<Record<string, PlatformCapabilities>>('get_platform_capabilities')
     if (Object.keys(caps).length === 0) {
+      // N-11.1: completing or skipping the wizard is persisted per company —
+      // don't auto-open it again for a company whose wizard already ran.
+      try {
+        if (await invoke<boolean>('get_setup_wizard_completed')) return
+      } catch {
+        // ignore; fall through to opening the wizard
+      }
       dismissedSetupIds.add(id)
       // Platform credentials are secrets: configuring them happens in the
       // dedicated settings window, the only context allowed to read them.
