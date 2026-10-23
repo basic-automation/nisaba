@@ -638,6 +638,17 @@ async function handleToggleDropship(include: boolean) {
         </button>
       </section>
 
+      <!-- N-11.2: credential health — per-platform expiry state with advance
+           warnings, each linking back to the wizard step that renews it. -->
+      <section>
+        <h3 class="text-xs font-medium tracking-widest uppercase text-muted/60 mb-5">Credential health</h3>
+        <p class="text-xs text-muted/50 mb-4 max-w-xl">
+          When each platform's token or keys expire, with a warning ahead of time so a
+          mid-sync refresh never fails silently. Renewals happen in the setup wizard.
+        </p>
+        <CredentialHealthPanel mode="full" />
+      </section>
+
       <!-- eBay -->
       <section>
         <div class="flex items-center justify-between mb-5">
