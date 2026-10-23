@@ -9,6 +9,20 @@ sandboxed vendor plugins, and can sync between installs over Tor.
 
 Built with Rust + Tauri 2 and a Nuxt 3 frontend.
 
+## Screenshots
+
+Captured from the real app running a fixture install (sample catalog data — no
+customer data anywhere). The capture is part of the CI UI smoke test
+(`scripts/ui-smoke.py --screenshot ... --seed-sample-catalog`).
+
+| Dashboard | Products | Listings |
+| --- | --- | --- |
+| ![Dashboard](docs/images/readme-dashboard.png) | ![Products](docs/images/readme-products.png) | ![Listings](docs/images/readme-listings.png) |
+
+| Vendors | Inventory |
+| --- | --- |
+| ![Vendors](docs/images/readme-vendors.png) | ![Inventory](docs/images/readme-inventory.png) |
+
 ## Features
 
 - **Multi-platform sync** — eBay, Squarespace, XMR Bazaar and Amazon behind one
