@@ -353,6 +353,8 @@ fn main() {
             // Diagnostics (N-11.4)
             commands::diagnostics::get_app_version,
             commands::diagnostics::export_diagnostics,
+            // Third-party license notices (N-12.3)
+            commands::licenses::get_third_party_licenses,
             // Backups (N-8.1)
             commands::backup::list_backups,
             commands::backup::backup_now,

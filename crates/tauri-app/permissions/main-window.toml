@@ -76,6 +76,7 @@ commands.allow = [
   "get_recent_events",
   "get_setup_wizard_completed",
   "get_sync_status",
+  "get_third_party_licenses",
   "get_update_check_enabled",
   "get_vendor_listings_for_product",
   "get_vendor_plugin_config",

@@ -33,6 +33,10 @@
   },
   "bundle": {
     "active": true,
+    "resources": [
+      "resources/licenses/rust-licenses.json",
+      "resources/licenses/npm-licenses.json"
+    ],
     "targets": [
       "deb",
       "rpm",
