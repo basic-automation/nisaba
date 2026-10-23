@@ -184,10 +184,14 @@ are referenced rather than repeated.
 - [x] Third-party license notices bundled in the app: an *About → Licenses* view generated
       by `cargo-about` (Rust) and a license checker (npm). Most dependencies are MIT or
       Apache-2.0, and both require shipping their notices with binaries.
-- [ ] Each platform's API terms reviewed against what Nisaba does: eBay's API License
+- [x] Each platform's API terms reviewed against what Nisaba does: eBay's API License
       Agreement, Amazon SP-API's Acceptable Use and Data Protection policies (relevant as
       soon as order data with buyer details is read), Squarespace's API terms, and XMR
-      Bazaar's terms on automated access, since that adapter scrapes HTML.
+      Bazaar's terms on automated access, since that adapter scrapes HTML. [N-12.4:
+      reviewed 2026-10-23; recorded in `docs/platform-terms-review.md` with
+      behaviour-change follow-ups: Amazon 429/backoff audit, Squarespace User-Agent
+      check, XMR Bazaar residual-risk guide note, and a re-review trigger rule for any
+      future order/buyer-data access.]
 - [x] eBay **Marketplace Account Deletion** notifications. Every production keyset must
       either subscribe an HTTPS endpoint or be granted an exemption for not storing eBay
       user data. With customers bringing their own keys, each customer does this for their
@@ -197,8 +201,10 @@ are referenced rather than repeated.
       developer docs (subscribe or opt out before the first production call; keyset
       activated only after); the walkthrough ships in the in-app guide as
       `frontend/public/guide/ebay-deletion.html`.]
-- [ ] A short privacy statement: what leaves the machine (update checks, marketplace API
-      calls, P2P relays if enabled) and what never does.
+- [x] A short privacy statement: what leaves the machine (update checks, marketplace API
+      calls, P2P relays if enabled) and what never does. [N-12.4: shipped as
+      `PRIVACY.md` at the repo root, linked from README, and in the app as
+      `frontend/public/guide/privacy.html` with an index card.]
 
 ### Stability contract at 1.0
 
