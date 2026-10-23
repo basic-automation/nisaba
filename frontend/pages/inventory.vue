@@ -126,7 +126,14 @@ const avgVelocity = computed(() => {
                 <span v-if="a.platform_sales.length === 0" class="text-xs text-muted/20">—</span>
               </div>
             </td>
-            <td class="py-2.5 text-muted/30 text-xs tabular-nums">{{ a.history.length }}</td>
+            <td class="py-2.5">
+              <StockHistoryChart
+                v-if="a.history.length > 0"
+                :history="a.history"
+                :low-stock-threshold="a.low_stock_threshold"
+              />
+              <span v-else class="text-xs text-muted/20">—</span>
+            </td>
           </tr>
         </tbody>
       </table>

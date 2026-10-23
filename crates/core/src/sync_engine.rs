@@ -806,7 +806,7 @@ impl SyncEngine {
                                 self.db
                                     .insert_sync_event(&NewSyncEvent {
                                         product_id: &product.id,
-                                        source_platform: "sync_engine",
+                                        source_platform: mapping.platform.as_str(),
                                         target_platform: mapping.platform.as_str(),
                                         old_quantity: canonical_old,
                                         new_quantity: new_canonical,
@@ -838,7 +838,7 @@ impl SyncEngine {
                                 self.db
                                     .insert_sync_event(&NewSyncEvent {
                                         product_id: &product.id,
-                                        source_platform: "sync_engine",
+                                        source_platform: mapping.platform.as_str(),
                                         target_platform: mapping.platform.as_str(),
                                         old_quantity: canonical_old,
                                         new_quantity: new_canonical,
@@ -927,11 +927,17 @@ impl SyncEngine {
                                 )
                                 .await?;
 
-                            // Log the sync event
+                            // Log the sync event. Push events record the real platform
+                            // as the source: the engine is the pusher, but the platform
+                            // is where the units moved, and that is what the
+                            // per-platform sales breakdown groups on. (N-11.8: the
+                            // old "sync_engine" sentinel was dropped by
+                            // `Platform::from_str_loose`, leaving the breakdown
+                            // permanently empty.)
                             self.db
                                 .insert_sync_event(&NewSyncEvent {
                                     product_id: &product.id,
-                                    source_platform: "sync_engine",
+                                    source_platform: mapping.platform.as_str(),
                                     target_platform: mapping.platform.as_str(),
                                     old_quantity: canonical_old,
                                     new_quantity: new_canonical,
@@ -963,7 +969,7 @@ impl SyncEngine {
                             self.db
                                 .insert_sync_event(&NewSyncEvent {
                                     product_id: &product.id,
-                                    source_platform: "sync_engine",
+                                    source_platform: mapping.platform.as_str(),
                                     target_platform: mapping.platform.as_str(),
                                     old_quantity: canonical_old,
                                     new_quantity: new_canonical,
@@ -1732,6 +1738,83 @@ mod tests {
 
         let recorded = harness.events_of_type("p1", "quantity_change").await;
         assert_eq!(recorded.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn push_events_record_the_real_platform_and_feed_the_sales_breakdown() {
+        // N-11.8: push events used to write "sync_engine" into
+        // source_platform, which `Platform::from_str_loose` drops — so the
+        // per-platform sales breakdown was always empty. Engine-written
+        // events now carry the real platform, and the analytics grouping
+        // picks them up.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 8)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 9)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+        harness
+            .db
+            .upsert_snapshot("p1", "ebay", None, 10, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+        harness
+            .db
+            .upsert_snapshot("p1", "squarespace", None, 10, "2026-01-01 00:00:00")
+            .await
+            .unwrap();
+
+        let (synced, pushed) = harness.engine.run_cycle().await.unwrap();
+        assert_eq!((synced, pushed), (1, 2));
+        assert_eq!(harness.quantity("p1").await, 7);
+
+        let recorded = harness.events_of_type("p1", "quantity_change").await;
+        assert_eq!(recorded.len(), 2);
+        for event in &recorded {
+            // Engine-written events must carry a real platform so the
+            // analytics grouping does not drop them.
+            assert!(
+                Platform::from_str_loose(&event.source_platform).is_some(),
+                "source_platform is not a real platform: {}",
+                event.source_platform
+            );
+            assert_eq!(event.source_platform, event.target_platform);
+            assert_eq!((event.old_quantity, event.new_quantity), (10, 7));
+        }
+        let mut platforms: Vec<&str> = recorded
+            .iter()
+            .map(|e| e.source_platform.as_str())
+            .collect();
+        platforms.sort_unstable();
+        assert_eq!(platforms, ["ebay", "squarespace"]);
+
+        // The per-platform sales breakdown picks the engine's rows up.
+        let analytics = crate::analytics::compute_product_analytics(
+            &harness.db,
+            "p1",
+            crate::types::TimeWindow::All,
+        )
+        .await
+        .unwrap();
+        let mut sales: Vec<(String, i64)> = analytics
+            .platform_sales
+            .iter()
+            .map(|(p, s)| (p.as_str().to_string(), *s))
+            .collect();
+        sales.sort_unstable();
+        assert_eq!(
+            sales,
+            [("ebay".to_string(), 3), ("squarespace".to_string(), 3)]
+        );
     }
 
     #[tokio::test]
