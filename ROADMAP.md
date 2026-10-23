@@ -1357,16 +1357,27 @@ any peer can record a sale.
       `radix-vue`), covering products, listings, vendors, inventory and companies. The
       `shadcn-nuxt` module is a dependency but is not registered in `nuxt.config.ts`.
 - [x] Multi-tier pricing display, dealer price, UPC and weight on vendor cards
-- [ ] Empty and error states — the pages assume data exists. Named cases:
+- [x] Empty and error states — the pages assume data exists. Named cases:
       - Creating a product (`products/index.vue` ~254–264) has no validation and no
         `catch`; a duplicate SKU hits the unique index and the user sees nothing.
       - The dashboard's `Promise.all` (`pages/index.vue` ~14–22) has no `catch`.
       - "Sync now" (`StatusBar.vue` ~40) gives no progress or error feedback.
       - `inventory.vue` shows a load error as "No analytics data yet".
-- [ ] Confirm destructive actions, using one mechanism. Unlinking a mapping, removing a peer
+      [N-11.3: create-product dialog validates (name/SKU required) and shows
+      backend errors inline incl. duplicate SKU; dashboard wraps the `Promise.all`
+      in try/catch with an error banner + retry; Sync Now shows a spinner and
+      notifies on failure; inventory distinguishes load errors (with retry)
+      from the genuine empty state.]
+- [x] Confirm destructive actions, using one mechanism. Unlinking a mapping, removing a peer
       and uninstalling a plugin act immediately. Import (`products/index.vue` ~309) does
       `INSERT OR REPLACE` over live rows with no preview. The confirms that do exist use
       three different mechanisms: `window.confirm`, the dialog plugin, and an in-app modal.
+      [N-11.3: one shared `<ConfirmDialog>` component (+ `useConfirmDialog`) now
+      covers unlinking a mapping, removing a peer, uninstalling/removing a plugin,
+      deleting a product/variant, leaving a company and restoring a backup;
+      import is preview-then-apply (`preview_import_data`/`apply_import_data`
+      commands) showing new/replaced/skipped counts and the affected SKUs before
+      anything is written.]
 - [ ] Sync status goes stale: each `useSync()` call creates its own `isRunning`, starting
       at `true` (`useSync.ts:7`). Nothing refetches it on a company switch, so the dashboard
       and sidebar disagree after a pause. Make it one shared store, updated from engine

@@ -12,6 +12,10 @@ const saving = ref(false)
 
 const { notify } = useNotifications()
 
+// N-11.3: restoring a backup replaces the whole database — confirm through
+// the single shared <ConfirmDialog> component.
+const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
+
 // Plugin config state
 const activePluginId = ref('')
 const pluginConfigs = ref<Record<string, Record<string, string>>>({})
@@ -170,25 +174,29 @@ async function runBackupNow() {
   }
 }
 
-async function restoreBackup(b: BackupInfo) {
-  const ok = confirm(
-    `Restore the database from backup "${b.name}" (${formatBackupDate(b.created_at)})?\n\n` +
-    `Everything written after this backup will be lost. A safety backup of the current database ` +
-    `is taken first. The app will restart after the restore.`
-  )
-  if (!ok) return
-  restoringPath.value = b.path
-  try {
-    await invoke('restore_backup', { backup_path: b.path })
-    notify({ type: 'info', title: 'Restore complete', message: 'Restarting the app…', source: 'config' })
-    // The database file was swapped on disk; open connections still cache
-    // the old file, so the app must restart to see the restored state.
-    await invoke('plugin:process|restart')
-  } catch (e) {
-    const msg = String(e)
-    notify({ type: 'error', title: 'Restore failed', message: msg, detail: msg, source: 'config' })
-    restoringPath.value = null
-  }
+function restoreBackup(b: BackupInfo) {
+  requestConfirm({
+    title: 'Restore backup',
+    message:
+      `Restore the database from backup "${b.name}" (${formatBackupDate(b.created_at)})?\n\n` +
+      'Everything written after this backup will be lost. A safety backup of the current database ' +
+      'is taken first. The app will restart after the restore.',
+    confirmLabel: 'Restore',
+    action: async () => {
+      restoringPath.value = b.path
+      try {
+        await invoke('restore_backup', { backup_path: b.path })
+        notify({ type: 'info', title: 'Restore complete', message: 'Restarting the app…', source: 'config' })
+        // The database file was swapped on disk; open connections still cache
+        // the old file, so the app must restart to see the restored state.
+        await invoke('plugin:process|restart')
+      } catch (e) {
+        const msg = String(e)
+        notify({ type: 'error', title: 'Restore failed', message: msg, detail: msg, source: 'config' })
+        restoringPath.value = null
+      }
+    },
+  })
 }
 
 // Load plugin config when switching sub-tabs
@@ -948,4 +956,15 @@ async function handleToggleDropship(include: boolean) {
     </div>
     </div>
   </div>
+
+  <ConfirmDialog
+    :open="dialog.open"
+    :title="dialog.title"
+    :message="dialog.message"
+    :confirm-label="dialog.confirmLabel"
+    :danger="dialog.danger"
+    :confirming="confirming"
+    @confirm="confirmDialogAction"
+    @cancel="cancelDialog"
+  />
 </template>

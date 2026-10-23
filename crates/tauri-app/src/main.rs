@@ -328,7 +328,9 @@ fn main() {
             commands::pricing::get_pricing_history,
             // Export / Import
             commands::export_import::export_data,
-            commands::export_import::import_data,
+            // N-11.3: import is preview-then-apply so nothing is replaced blindly
+            commands::export_import::preview_import_data,
+            commands::export_import::apply_import_data,
             // Backups (N-8.1)
             commands::backup::list_backups,
             commands::backup::backup_now,

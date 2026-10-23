@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { confirm } from '@tauri-apps/plugin-dialog'
-import type { P2PEvent } from '~/types'
+import type { P2PEvent, CompanyPeer } from '~/types'
 
 const {
   company,
@@ -34,6 +33,10 @@ const secretVisible = ref(false)
 const companySecret = ref<string | null>(null)
 
 const { notify } = useNotifications()
+
+// N-11.3: remove-peer, leave-company and other destructive actions go through
+// the single shared <ConfirmDialog> component.
+const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
 
 function showStatus(msg: string, type: 'success' | 'error' = 'success') {
   notify({
@@ -201,20 +204,37 @@ async function handleLeave() {
     message = 'Leaving will delete all company data from this device. Sync will stop and you will lose access to company products.'
   }
 
-  const confirmed = await confirm(message, {
+  requestConfirm({
     title: 'Leave Company',
-    kind: 'warning',
-    okLabel: 'Leave',
-    cancelLabel: 'Cancel',
+    message,
+    confirmLabel: 'Leave',
+    action: async () => {
+      try {
+        await leaveCompany()
+        showStatus('Left company')
+      } catch (e: any) {
+        showStatus(e?.toString() || 'Failed to leave company', 'error')
+      }
+    },
   })
-  if (!confirmed) return
+}
 
-  try {
-    await leaveCompany()
-    showStatus('Left company')
-  } catch (e: any) {
-    showStatus(e?.toString() || 'Failed to leave company', 'error')
-  }
+// N-11.3: removing a peer used to act immediately.
+function confirmRemovePeer(peer: CompanyPeer) {
+  const label = peer.name || truncateAddress(peer.onion_address)
+  requestConfirm({
+    title: 'Remove peer',
+    message: `Remove "${label}" from the company?\n\nThey will lose access to company sync. This cannot be undone.`,
+    confirmLabel: 'Remove',
+    action: async () => {
+      try {
+        await removePeer(peer.onion_address)
+        showStatus(`Removed ${label}`)
+      } catch (e: any) {
+        showStatus(e?.toString() || 'Failed to remove peer', 'error')
+      }
+    },
+  })
 }
 
 // Computed helpers
@@ -515,7 +535,7 @@ onUnmounted(() => {
                       </button>
                       <button
                         class="text-[11px] text-muted/30 hover:text-red-400/80 transition-colors"
-                        @click="removePeer(peer.onion_address)"
+                        @click="confirmRemovePeer(peer)"
                       >
                         Remove
                       </button>
@@ -550,5 +570,16 @@ onUnmounted(() => {
       </div>
     </template>
     </div>
+
+    <ConfirmDialog
+      :open="dialog.open"
+      :title="dialog.title"
+      :message="dialog.message"
+      :confirm-label="dialog.confirmLabel"
+      :danger="dialog.danger"
+      :confirming="confirming"
+      @confirm="confirmDialogAction"
+      @cancel="cancelDialog"
+    />
   </div>
 </template>

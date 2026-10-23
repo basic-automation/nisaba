@@ -20,6 +20,27 @@ const {
 
 const { companiesInitialized } = useCompanyContext()
 
+// N-11.3: uninstalling a plugin and removing it from the registry go through
+// the single shared <ConfirmDialog> component.
+const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
+const { notify } = useNotifications()
+
+function confirmUninstall(plugin: VendorPluginInfo) {
+  requestConfirm({
+    title: 'Uninstall plugin',
+    message: `Uninstall "${plugin.display_name}"?\n\nIts cached listings are cleared and it stops running. Your products and mappings are kept.`,
+    confirmLabel: 'Uninstall',
+    action: async () => {
+      try {
+        await uninstallPlugin(plugin.id)
+        notify({ type: 'success', title: 'Plugin uninstalled', message: plugin.display_name, source: 'marketplace' })
+      } catch (e: any) {
+        notify({ type: 'error', title: 'Uninstall failed', message: String(e), source: 'marketplace' })
+      }
+    },
+  })
+}
+
 // Tab state
 type MarketTab = 'available' | 'installed' | 'pending'
 const activeTab = ref<MarketTab>('available')
@@ -163,12 +184,18 @@ async function handleToggleEnabled(plugin: VendorPluginInfo) {
 }
 
 async function handleRemovePlugin(plugin: VendorPluginInfo) {
-  if (!confirm(`Remove "${plugin.display_name}" from the marketplace?`)) return
-  try {
-    await removeRegistryPlugin(plugin.id)
-  } catch (e: any) {
-    submitError.value = e?.toString() || 'Failed to remove plugin'
-  }
+  requestConfirm({
+    title: 'Remove plugin',
+    message: `Remove "${plugin.display_name}" from the marketplace registry?\n\nSubmitted code and metadata are deleted. This cannot be undone.`,
+    confirmLabel: 'Remove',
+    action: async () => {
+      try {
+        await removeRegistryPlugin(plugin.id)
+      } catch (e: any) {
+        submitError.value = e?.toString() || 'Failed to remove plugin'
+      }
+    },
+  })
 }
 
 // Category badge color
@@ -310,7 +337,7 @@ function categoryColor(cat: string): string {
                   variant="solid"
                   color="muted"
                   size="xs"
-                  @click="uninstallPlugin(plugin.id)"
+                  @click="confirmUninstall(plugin)"
                 >
                   Uninstall
                 </Button>
@@ -491,6 +518,17 @@ function categoryColor(cat: string): string {
         </GroundGlass>
       </div>
     </Teleport>
+
+    <ConfirmDialog
+      :open="dialog.open"
+      :title="dialog.title"
+      :message="dialog.message"
+      :confirm-label="dialog.confirmLabel"
+      :danger="dialog.danger"
+      :confirming="confirming"
+      @confirm="confirmDialogAction"
+      @cancel="cancelDialog"
+    />
   </div>
   </CompanyRequired>
 </template>
