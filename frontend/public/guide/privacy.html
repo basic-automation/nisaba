@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy statement — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>Privacy statement</h1>
+
+<p>
+  Nisaba is a desktop inventory-sync manager: it keeps one canonical catalog
+  of your products on your own machine and synchronizes quantities and
+  listings with the marketplaces you sell on. <strong>There is no Nisaba cloud
+  account, no Nisaba server that receives your data, no telemetry, and no
+  crash-reporting service.</strong> This page says exactly what leaves your
+  machine, and what never does.
+</p>
+
+<h2>What leaves the machine</h2>
+
+<h3>Marketplace API calls — only to platforms you connected</h3>
+<p>
+  When you connect a platform and run a sync cycle, Nisaba sends requests to
+  that platform's own servers. What travels is your own catalog and listing
+  data — products, variants, prices, quantities, photos — and it goes
+  <strong>only to the platform it belongs to</strong>. Marketplace requests
+  never pass through any Nisaba-operated infrastructure, because there isn't
+  any.
+</p>
+<ul>
+  <li><strong>eBay</strong> (HTTPS, OAuth): your listings, offers, inventory
+    quantities, and category/business-policy lookups. Nisaba only asks for
+    inventory and account-metadata scopes — it never requests order or buyer
+    data.</li>
+  <li><strong>Amazon</strong> (HTTPS, login-with-Amazon OAuth): your listings
+    and quantity/price updates. Nisaba never calls the Orders API and never
+    requests restricted buyer data.</li>
+  <li><strong>Squarespace</strong> (HTTPS, your own API key): your products
+    and inventory adjustments.</li>
+  <li><strong>XMR&nbsp;Bazaar</strong> (HTTPS, your own account): your own
+    listings, inventory fields, and sales-page reads — exactly the pages your
+    logged-in account would open in a browser.</li>
+</ul>
+<p>
+  Your credentials are stored in the <strong>OS keyring</strong> and are sent
+  only to that platform's own login/token endpoints. They are never sent to
+  any third party.
+</p>
+
+<h3>Update checks — GitHub, and you can turn them off</h3>
+<p>
+  The app checks for updates at launch and then every 6 hours. Each check is a
+  single HTTPS request to the GitHub-hosted release feed. GitHub sees what
+  any HTTPS request reveals — your IP address, the app version, the OS —
+  and nothing about your catalog, credentials, or sync activity.
+</p>
+<p>
+  You can turn automatic checks off in <strong>Settings</strong>. A manual
+  "Check for updates" is your own explicit action and is not gated by the
+  setting.
+</p>
+
+<h3>P2P company sync — only if you enable it, over Tor</h3>
+<p>
+  Syncing between your own installs is <strong>off by default</strong>. When
+  you enable it, traffic runs over Tor onion services, which hides each
+  peer's IP from the other peers and from network observers, and payloads
+  are encrypted peer-to-peer (AES-GCM). What observers of the network can
+  see is only what any onion-service traffic reveals — timing and circuit
+  metadata — not content.
+</p>
+
+<h3>Vendor plugins — only hosts you allow</h3>
+<p>
+  Vendor plugins (like a supplier catalog importer) run in a sandbox. A
+  plugin can only reach the network through the hosts it declared when you
+  installed it; you approve each plugin and its hosts, and private-network
+  addresses are always refused.
+</p>
+
+<h2>What never leaves the machine</h2>
+<ul>
+  <li><strong>No telemetry, no analytics calls home.</strong> The analytics
+    features are computed locally from your own database. No usage
+    statistics, no crash reports, no phone-home of any kind.</li>
+  <li><strong>Your full catalog and local database</strong> stay on your
+    machine. They are only pushed, listing by listing, to the marketplaces
+    you configured.</li>
+  <li><strong>API keys and OAuth tokens</strong> live in the OS keyring and
+    travel only to their own platform's endpoints.</li>
+  <li><strong>Order and buyer data are not read at all.</strong> None of the
+    adapters reads order APIs with buyer details today, so no buyer data is
+    collected, stored, transmitted, or shared anywhere. If a future version
+    ever reads order data, this statement gets updated first.</li>
+</ul>
+
+<div class="callout tip">
+  <p class="title">Your keys, your terms</p>
+  <p>
+    Nisaba runs on your own developer credentials, not a shared keyset. That
+    means you accept each platform's developer terms when you create the
+    keys — see the eBay account-deletion page and the credentials page for
+    the steps each platform asks of you — and you are responsible for
+    keeping your machine's keyring and backups safe.
+  </p>
+</div>
+
+<footer class="guide-footer">
+  <span>Nisaba — Inventory Sync Manager</span>
+  <span>Guide version 1.0</span>
+</footer>
+
+</div>
+</body>
+</html>
