@@ -12,6 +12,18 @@ pub async fn trigger_sync(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// N-11.6: run one dry-run cycle and report what it *would* change.
+/// The engine resolves everything as normal but writes to no platform and
+/// no local tables; each planned change arrives as a `DryRunChange` event
+/// bracketed by `DryRunStarted`/`DryRunComplete` on the `sync-event` stream.
+#[tauri::command]
+pub async fn preview_sync(state: State<'_, AppState>) -> Result<(), String> {
+    let tx = state.active_sync_tx().await?;
+    tx.send(SyncCommand::PreviewSync)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn pause_sync(state: State<'_, AppState>) -> Result<(), String> {
     let tx = state.active_sync_tx().await?;

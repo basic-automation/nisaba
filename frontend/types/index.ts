@@ -164,6 +164,30 @@ export type SyncEngineEvent =
   | { PlatformError: { platform: Platform; message: string } }
   | { AuthExpired: { platform: Platform } }
   | { UnmappedListingsDetected: { count: number } }
+  // N-11.6: dry-run preview events — were missing from the TS type (Phase 7
+  // type drift) even though the engine already emitted DryRunChange.
+  | { DryRunChange: { product_id: string; product_name: string; platform: Platform; current_quantity: number; planned_quantity: number } }
+  | { DryRunStarted: { cycle_id: string } }
+  | { DryRunComplete: { cycle_id: string; planned_changes: number } }
+
+// N-11.6: one planned change from a dry-run preview cycle
+export interface DryRunChangePayload {
+  product_id: string
+  product_name: string
+  platform: Platform
+  current_quantity: number
+  planned_quantity: number
+}
+
+// N-11.6: per-cycle reconciliation summary built from the live event stream
+export interface CycleReconciliationReport {
+  cycle_id: string
+  products_synced: number
+  changes_pushed: number
+  changes_by_platform: Record<string, number>
+  errors: string[]
+  unmapped_listings: number
+}
 
 // Multi-company registry
 export interface CompanyRegistryEntry {
