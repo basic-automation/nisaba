@@ -937,8 +937,10 @@ is used only when no platform reports.
 - [ ] Oversell protection: a configurable reserve buffer so concurrent sales across platforms
       cannot drive true stock negative. Moved to Phase 5, Sync v2 Step 3 (escrow), where a
       reserve is a share of stock rights held back from every peer.
-- [ ] Chart `InventoryHistoryEntry` analytics. There are no charts today (`chart.js` and
+- [x] Chart `InventoryHistoryEntry` analytics. There are no charts today (`chart.js` and
       `vue-chartjs` are installed but never imported); `inventory.vue` shows a count.
+      N-11.8: `inventory.vue` now renders the history as a chart via the new
+      `StockHistoryChart.vue` component (vue-chartjs Line on chart.js).
 - [x] **The sync schedule accepts anything and can kill the engine.** `config.vue` offers
       free-form cron. `parse_interval` (`tauri-app/src/main.rs` ~492) understands only a
       minute field of `*/N` and silently uses 300 s for anything else. `*/0` yields a 0 s
@@ -1424,10 +1426,12 @@ any peer can record a sale.
       Wire up or remove each one.
 - [ ] The publish flow (`products/[id]/publish.vue`) should show, per platform, exactly which
       fields will be written and which are unsupported, driven by `PlatformCapabilities`
-- [ ] The per-platform sales breakdown is always empty. `analytics.rs` (~76–91) groups by
+- [x] The per-platform sales breakdown is always empty. `analytics.rs` (~76–91) groups by
       `source_platform`, but every sync event is written with `"sync_engine"` there
       (`sync_engine.rs` ~465, ~497, ~565, ~597), and `from_str_loose` drops those rows, so
-      `inventory.vue` always shows "—".
+      `inventory.vue` always shows "—". N-11.8: the engine now records the real platform
+      on push events, and `analytics.rs`/`sync_engine.rs` carry tests covering the
+      grouping for engine-written events.
 - [ ] Startup failures are silent. `main.rs` (~72, ~84–86) calls `expect()` on loading the
       config and opening the database, and a Windows release build has no console, so the
       app just exits. Show a native error dialog and write a log file.
