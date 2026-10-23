@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -9,6 +10,22 @@ pub struct EbayTokenResponse {
     pub token_type: String,
     pub refresh_token: Option<String>,
     pub refresh_token_expires_in: Option<i64>,
+}
+
+impl EbayTokenResponse {
+    /// N-11.2: absolute UTC timestamp (`YYYY-MM-DD HH:MM:SS`, the same shape
+    /// the adapters persist in `auth_tokens`) at which the refresh token
+    /// expires. `None` when the response does not expose a refresh-token
+    /// expiry — callers must preserve any previously stored value rather
+    /// than erase it. `now` is a parameter so the computation is
+    /// unit-testable without clock mocking.
+    pub fn refresh_token_expires_at(&self, now: DateTime<Utc>) -> Option<String> {
+        self.refresh_token_expires_in.map(|secs| {
+            (now + chrono::Duration::seconds(secs))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+    }
 }
 
 /// eBay inventory item from the Inventory API.
@@ -617,3 +634,39 @@ pub const EBAY_CONDITIONS: &[(&str, &str)] = &[
     ("USED_ACCEPTABLE", "Used - Acceptable"),
     ("FOR_PARTS_OR_NOT_WORKING", "For Parts or Not Working"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn token_response(refresh_token_expires_in: Option<i64>) -> EbayTokenResponse {
+        EbayTokenResponse {
+            access_token: "a".to_string(),
+            expires_in: 7200,
+            token_type: "Bearer".to_string(),
+            refresh_token: Some("r".to_string()),
+            refresh_token_expires_in,
+        }
+    }
+
+    /// N-11.2: the absolute refresh-token expiry is `now + refresh_token_expires_in`.
+    #[test]
+    fn refresh_token_expires_at_adds_lifetime_to_now() {
+        let token = token_response(Some(86_400)); // 1 day
+        let now = Utc.with_ymd_and_hms(2027, 1, 1, 12, 0, 0).unwrap();
+        assert_eq!(
+            token.refresh_token_expires_at(now).as_deref(),
+            Some("2027-01-02 12:00:00")
+        );
+    }
+
+    /// N-11.2: no expiry in the response means no timestamp — the caller
+    /// must preserve any previously stored value, not erase it.
+    #[test]
+    fn refresh_token_expires_at_is_none_when_not_exposed() {
+        let token = token_response(None);
+        let now = Utc.with_ymd_and_hms(2027, 1, 1, 12, 0, 0).unwrap();
+        assert_eq!(token.refresh_token_expires_at(now), None);
+    }
+}
