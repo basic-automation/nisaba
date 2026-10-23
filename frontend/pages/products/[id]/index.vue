@@ -97,20 +97,8 @@ watch(selectedVariantId, (vid) => {
   }
 })
 
-// Confirm-dialog state
-const confirmDialog = ref<{ show: boolean; title: string; message: string; action: (() => Promise<void>) | null }>({
-  show: false, title: '', message: '', action: null,
-})
-function requestConfirm(title: string, message: string, action: () => Promise<void>) {
-  confirmDialog.value = { show: true, title, message, action }
-}
-async function confirmAction() {
-  if (confirmDialog.value.action) await confirmDialog.value.action()
-  confirmDialog.value = { show: false, title: '', message: '', action: null }
-}
-function cancelConfirm() {
-  confirmDialog.value = { show: false, title: '', message: '', action: null }
-}
+// N-11.3: confirmations go through the single shared <ConfirmDialog> component.
+const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
 
 // Platform accordion state + grouped mappings
 const openPlatforms = ref(new Set<Platform>())
@@ -371,10 +359,15 @@ async function saveVariant() {
 }
 
 function handleDeleteVariant(id: string) {
-  requestConfirm('Delete variant', 'Delete this variant? This cannot be undone.', async () => {
-    await deleteVariant(id)
-    await loadVariants()
-    product.value = await getProduct(productId)
+  requestConfirm({
+    title: 'Delete variant',
+    message: 'Delete this variant? This cannot be undone.',
+    confirmLabel: 'Delete',
+    action: async () => {
+      await deleteVariant(id)
+      await loadVariants()
+      product.value = await getProduct(productId)
+    },
   })
 }
 
@@ -395,15 +388,28 @@ async function saveEdit() {
 }
 
 function handleDelete() {
-  requestConfirm('Delete product', 'Delete this product and all its mappings? This cannot be undone.', async () => {
-    await deleteProduct(productId)
-    navigateTo('/products')
+  requestConfirm({
+    title: 'Delete product',
+    message: 'Delete this product and all its mappings? This cannot be undone.',
+    confirmLabel: 'Delete',
+    action: async () => {
+      await deleteProduct(productId)
+      navigateTo('/products')
+    },
   })
 }
 
-async function handleDeleteMapping(id: number) {
-  await deleteMapping(id)
-  await loadMappings()
+function handleDeleteMapping(id: number, label: string) {
+  // N-11.3: unlinking used to act immediately.
+  requestConfirm({
+    title: 'Unlink mapping',
+    message: `Stop syncing "${label}" with this product?\n\nThe platform listing itself is not changed; the link can be recreated later.`,
+    confirmLabel: 'Unlink',
+    action: async () => {
+      await deleteMapping(id)
+      await loadMappings()
+    },
+  })
 }
 
 function openAddMapping() {
@@ -918,7 +924,7 @@ function formatTimeAgo(isoTimestamp: string): string {
                         </div>
                         <button
                           class="text-[11px] text-red-400/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                          @click="handleDeleteMapping(m.id)"
+                          @click="handleDeleteMapping(m.id, mappingLabel(m))"
                         >Unlink</button>
                       </div>
                     </div>
@@ -1334,23 +1340,17 @@ function formatTimeAgo(isoTimestamp: string): string {
       </Transition>
     </Teleport>
 
-    <!-- Confirm dialog -->
-    <Teleport to="body">
-      <Transition name="modal">
-        <div v-if="confirmDialog.show" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" @click.self="cancelConfirm">
-          <GroundGlass :opacity="3" :blur="12" :sizes="['70%', '70%', '65%']" class="p-8 w-full max-w-sm" style="background: rgba(30, 41, 59, 0.35)">
-            <div class="relative z-[1]">
-              <h3 class="text-sm font-medium tracking-widest uppercase text-foreground/70 mb-4">{{ confirmDialog.title }}</h3>
-              <p class="text-sm text-muted/60 mb-8">{{ confirmDialog.message }}</p>
-              <div class="flex justify-end gap-3">
-                <Button variant="solid" color="muted" size="sm" @click="cancelConfirm">Cancel</Button>
-                <Button variant="solid" color="danger" size="sm" @click="confirmAction">Delete</Button>
-              </div>
-            </div>
-          </GroundGlass>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- N-11.3: shared confirmation dialog (one mechanism for all destructive actions) -->
+    <ConfirmDialog
+      :open="dialog.open"
+      :title="dialog.title"
+      :message="dialog.message"
+      :confirm-label="dialog.confirmLabel"
+      :danger="dialog.danger"
+      :confirming="confirming"
+      @confirm="confirmDialogAction"
+      @cancel="cancelDialog"
+    />
   </div>
   </CompanyRequired>
 </template>

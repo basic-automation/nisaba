@@ -442,6 +442,27 @@ export interface BackupInfo {
   reason: string
 }
 
+// N-11.3: import preview — what applying an import file would change, computed
+// without writing anything (mirrors the Rust ImportPreview struct).
+export interface ImportPreview {
+  file_name: string
+  file_path: string
+  products_new: number
+  products_replaced: number
+  variants_new: number
+  variants_replaced: number
+  mappings_new: number
+  mappings_skipped: number
+  snapshots_new: number
+  snapshots_replaced: number
+  orders_new: number
+  orders_skipped: number
+  replaced_skus: string[]
+  new_skus: string[]
+  replaced_skus_extra: number
+  new_skus_extra: number
+}
+
 // Notification system
 export type NotificationType = 'success' | 'error' | 'warning' | 'info'
 

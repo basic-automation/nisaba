@@ -16,6 +16,7 @@ identifier = "settings-window"
 description = "All Nisaba app commands including secret-returning commands (settings window only)."
 commands.allow = [
   "add_company_peer",
+  "apply_import_data",
   "approve_company_peer",
   "approve_vendor_plugin",
   "backup_now",
@@ -77,7 +78,7 @@ commands.allow = [
   "get_vendor_plugin_config",
   "get_vendor_sync_status",
   "get_xmrbazaar_monero_address",
-  "import_data",
+  "preview_import_data",
   "import_vendor_listings",
   "import_vendor_plugin",
   "install_vendor_plugin",

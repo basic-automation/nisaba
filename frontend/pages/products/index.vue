@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { Platform, PlatformListing, PlatformMapping, PricingSnapshot, ProductVariant } from '~/types'
+import type { Platform, PlatformListing, PlatformMapping, PricingSnapshot, ProductVariant, ImportPreview } from '~/types'
 import { invoke } from '@tauri-apps/api/core'
 
-const { products, loading, fetchProducts, createProduct, deleteProduct, getMappings, createMapping, deleteMapping, listVariants } = useProducts()
+const { products, loading, fetchProducts, createProduct, getMappings, createMapping, deleteMapping, listVariants } = useProducts()
 
 // Variants per product (used for images + counts)
 const productVariants = ref<Record<string, ProductVariant[]>>({})
@@ -21,6 +21,8 @@ const notOnPlatform = ref<Platform | 'any'>('any')
 
 // New product form
 const newProduct = ref({ name: '', sku: '', quantity: 0, lowStockThreshold: null as number | null })
+// N-11.3: inline validation / backend error shown inside the create dialog
+const createError = ref('')
 
 // Mapping data
 const productMappings = ref<Record<string, PlatformMapping[]>>({})
@@ -252,22 +254,47 @@ const filteredProducts = computed(() => {
 })
 
 async function handleCreateProduct() {
-  await createProduct(
-    newProduct.value.name,
-    newProduct.value.sku,
-    newProduct.value.quantity,
-    newProduct.value.lowStockThreshold ?? undefined,
-  )
+  createError.value = ''
+  const name = newProduct.value.name.trim()
+  const sku = newProduct.value.sku.trim()
+  if (!name) {
+    createError.value = 'Name is required.'
+    return
+  }
+  if (!sku) {
+    createError.value = 'SKU is required.'
+    return
+  }
+  if (newProduct.value.quantity < 0) {
+    createError.value = 'Quantity cannot be negative.'
+    return
+  }
+  try {
+    await createProduct(
+      name,
+      sku,
+      newProduct.value.quantity,
+      newProduct.value.lowStockThreshold ?? undefined,
+    )
+  } catch (e: any) {
+    // A duplicate SKU hits the unique index — surface it instead of failing silently.
+    createError.value = friendlyCreateError(e)
+    return
+  }
   newProduct.value = { name: '', sku: '', quantity: 0, lowStockThreshold: null }
   showCreateDialog.value = false
   await loadMappings()
 }
 
-async function handleDeleteProduct(id: string) {
-  if (confirm('Delete this product and all its mappings?')) {
-    await deleteProduct(id)
-    await loadMappings()
-  }
+function friendlyCreateError(e: any): string {
+  const msg = String(e?.message ?? e ?? '')
+  if (/unique|duplicate/i.test(msg)) return 'A product with this SKU already exists.'
+  return msg || 'Failed to create product.'
+}
+
+function openCreateDialog() {
+  createError.value = ''
+  showCreateDialog.value = true
 }
 
 function formatPrice(price: number | null): string {
@@ -296,6 +323,9 @@ function getProductImageUrl(productId: string): string | null {
 
 const { notify } = useNotifications()
 
+// N-11.3: all destructive actions on this page go through the shared confirm dialog
+const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
+
 async function handleExport() {
   try {
     const { invoke } = await import('@tauri-apps/api/core')
@@ -306,17 +336,55 @@ async function handleExport() {
   }
 }
 
+// ── N-11.3: import shows a preview before replacing anything ──
+const importPreview = ref<ImportPreview | null>(null)
+const importApplying = ref(false)
+
 async function handleImport() {
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const result = await invoke<string>('import_data')
-    if (result !== 'Cancelled') {
-      await fetchProducts()
-      await loadMappings()
-      notify({ type: 'success', title: 'Import complete', message: result, source: 'products' })
-    }
+    const preview = await invoke<ImportPreview | null>('preview_import_data')
+    if (preview) importPreview.value = preview
+    // null = user cancelled the file picker; nothing to do
   } catch (e: any) {
     notify({ type: 'error', title: 'Import failed', message: String(e), detail: String(e), source: 'products' })
+  }
+}
+
+// The preview dialog's Import button asks through the shared confirm dialog,
+// since applying replaces live rows (INSERT OR REPLACE).
+function confirmImportApply() {
+  const preview = importPreview.value
+  if (!preview) return
+  const replacedTotal = preview.products_replaced + preview.variants_replaced + preview.snapshots_replaced
+  requestConfirm({
+    title: 'Apply import',
+    message:
+      `Import "${preview.file_name}"?\n\n` +
+      `${preview.products_new} new products, ${preview.products_replaced} replaced.\n` +
+      (replacedTotal > 0
+        ? 'Replaced rows are overwritten in place — this cannot be undone.'
+        : 'Nothing already in your catalog will be touched.'),
+    confirmLabel: 'Import',
+    action: applyImport,
+  })
+}
+
+async function applyImport() {
+  const preview = importPreview.value
+  if (!preview) return
+  importApplying.value = true
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const result = await invoke<string>('apply_import_data', { filePath: preview.file_path })
+    importPreview.value = null
+    await fetchProducts()
+    await loadMappings()
+    notify({ type: 'success', title: 'Import complete', message: result, source: 'products' })
+  } catch (e: any) {
+    notify({ type: 'error', title: 'Import failed', message: String(e), detail: String(e), source: 'products' })
+  } finally {
+    importApplying.value = false
   }
 }
 
@@ -342,7 +410,7 @@ const tabModel = computed({
       <div class="flex items-center gap-3">
         <Button variant="solid" color="default" @click="handleExport">Export</Button>
         <Button variant="solid" color="default" @click="handleImport">Import</Button>
-        <Button variant="solid" color="accent" @click="showCreateDialog = true">+ New product</Button>
+        <Button variant="solid" color="accent" @click="openCreateDialog">+ New product</Button>
       </div>
     </div>
 
@@ -431,6 +499,7 @@ const tabModel = computed({
                 <InputNumber v-model="newProduct.lowStockThreshold" :min="0" placeholder="Optional" />
               </div>
             </div>
+            <p v-if="createError" class="mt-4 text-xs text-red-400">{{ createError }}</p>
             <div class="flex justify-end gap-4 mt-8">
               <Button variant="solid" color="muted" size="sm" @click="showCreateDialog = false">Cancel</Button>
               <Button variant="solid" color="accent" size="sm" @click="handleCreateProduct">Create</Button>
@@ -439,6 +508,97 @@ const tabModel = computed({
         </GroundGlass>
       </div>
     </Teleport>
+
+    <!-- N-11.3: import preview — shows what would change before anything is written -->
+    <Teleport to="body">
+      <div v-if="importPreview" class="fixed inset-0 z-50 flex items-center justify-center bg-black/35" @click.self="importPreview = null">
+        <GroundGlass :opacity="3" :blur="10" :sizes="['70%', '70%', '65%']" class="p-8 w-full max-w-lg max-h-[80vh] overflow-auto" style="background: rgba(30, 41, 59, 0.30)">
+          <div class="relative z-[1]">
+            <h3 class="text-sm font-medium tracking-widest uppercase text-foreground/70 mb-2">Import preview</h3>
+            <p class="text-xs text-muted/40 mb-6 font-mono">{{ importPreview.file_name }}</p>
+
+            <table class="w-full text-sm mb-6">
+              <thead>
+                <tr class="text-left text-[11px] text-muted/40 uppercase tracking-wider">
+                  <th class="pb-2 font-medium"></th>
+                  <th class="pb-2 font-medium text-right">New</th>
+                  <th class="pb-2 font-medium text-right">Replaced</th>
+                </tr>
+              </thead>
+              <tbody class="text-foreground/80">
+                <tr class="border-t border-border/20">
+                  <td class="py-2">Products</td>
+                  <td class="py-2 text-right tabular-nums">{{ importPreview.products_new }}</td>
+                  <td class="py-2 text-right tabular-nums" :class="importPreview.products_replaced > 0 ? 'text-warning' : ''">{{ importPreview.products_replaced }}</td>
+                </tr>
+                <tr class="border-t border-border/20">
+                  <td class="py-2">Variants</td>
+                  <td class="py-2 text-right tabular-nums">{{ importPreview.variants_new }}</td>
+                  <td class="py-2 text-right tabular-nums" :class="importPreview.variants_replaced > 0 ? 'text-warning' : ''">{{ importPreview.variants_replaced }}</td>
+                </tr>
+                <tr class="border-t border-border/20">
+                  <td class="py-2">Mappings</td>
+                  <td class="py-2 text-right tabular-nums">{{ importPreview.mappings_new }}</td>
+                  <td class="py-2 text-right tabular-nums text-muted/40" title="Existing mappings are kept, never overwritten">{{ importPreview.mappings_skipped }} kept</td>
+                </tr>
+                <tr class="border-t border-border/20">
+                  <td class="py-2">Snapshots</td>
+                  <td class="py-2 text-right tabular-nums">{{ importPreview.snapshots_new }}</td>
+                  <td class="py-2 text-right tabular-nums" :class="importPreview.snapshots_replaced > 0 ? 'text-warning' : ''">{{ importPreview.snapshots_replaced }}</td>
+                </tr>
+                <tr class="border-t border-border/20">
+                  <td class="py-2">XMR orders</td>
+                  <td class="py-2 text-right tabular-nums">{{ importPreview.orders_new }}</td>
+                  <td class="py-2 text-right tabular-nums text-muted/40" title="Already-imported orders are kept">{{ importPreview.orders_skipped }} kept</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div v-if="importPreview.replaced_skus.length > 0" class="mb-4">
+              <p class="text-[11px] uppercase tracking-wider text-warning/80 mb-2">
+                Will be replaced ({{ importPreview.products_replaced }})
+              </p>
+              <ul class="text-xs text-muted/60 space-y-1 font-mono max-h-28 overflow-auto">
+                <li v-for="sku in importPreview.replaced_skus" :key="sku">{{ sku }}</li>
+                <li v-if="importPreview.replaced_skus_extra > 0" class="text-muted/30">
+                  …and {{ importPreview.replaced_skus_extra }} more
+                </li>
+              </ul>
+            </div>
+
+            <div v-if="importPreview.new_skus.length > 0" class="mb-4">
+              <p class="text-[11px] uppercase tracking-wider text-muted/40 mb-2">
+                Will be added ({{ importPreview.products_new }})
+              </p>
+              <ul class="text-xs text-muted/60 space-y-1 font-mono max-h-28 overflow-auto">
+                <li v-for="sku in importPreview.new_skus" :key="sku">{{ sku }}</li>
+                <li v-if="importPreview.new_skus_extra > 0" class="text-muted/30">
+                  …and {{ importPreview.new_skus_extra }} more
+                </li>
+              </ul>
+            </div>
+
+            <div class="flex justify-end gap-4 mt-8">
+              <Button variant="solid" color="muted" size="sm" @click="importPreview = null">Cancel</Button>
+              <Button variant="solid" color="accent" size="sm" :disabled="importApplying" @click="confirmImportApply">
+                {{ importApplying ? 'Importing…' : 'Import' }}
+              </Button>
+            </div>
+          </div>
+        </GroundGlass>
+      </div>
+    </Teleport>
+
+    <ConfirmDialog
+      :open="dialog.open"
+      :title="dialog.title"
+      :message="dialog.message"
+      :confirm-label="dialog.confirmLabel"
+      :danger="dialog.danger"
+      :confirming="confirming"
+      @confirm="confirmDialogAction"
+      @cancel="cancelDialog"
+    />
   </div>
   </CompanyRequired>
 </template>

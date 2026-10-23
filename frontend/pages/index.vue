@@ -8,16 +8,23 @@ const { capabilities, fetchCapabilities } = useConfig()
 const { companiesInitialized } = useCompanyContext()
 
 const capabilitiesLoaded = ref(false)
+// N-11.3: the Promise.all below used to reject silently — surface load failures.
+const dashboardError = ref<string | null>(null)
 
 startListening()
 
 async function loadDashboardData() {
   if (!companiesInitialized.value) return
-  await Promise.all([
-    fetchProducts(),
-    fetchStatus(),
-    fetchCapabilities(),
-  ])
+  dashboardError.value = null
+  try {
+    await Promise.all([
+      fetchProducts(),
+      fetchStatus(),
+      fetchCapabilities(),
+    ])
+  } catch (e: any) {
+    dashboardError.value = String(e?.message ?? e ?? 'Unknown error')
+  }
   capabilitiesLoaded.value = true
 }
 
@@ -100,6 +107,17 @@ function formatEvent(event: any): string {
 
     <!-- Scrollable content -->
     <div class="flex-1 overflow-auto min-h-0 -mr-6 pr-6">
+
+    <!-- N-11.3: load failure banner (was a silent Promise.all rejection) -->
+    <div
+      v-if="dashboardError"
+      class="mb-10 px-4 py-3 rounded-lg border border-red-500/20 bg-red-500/[0.05]"
+    >
+      <p class="text-xs text-red-400/80">
+        Couldn't load dashboard data: {{ dashboardError }}
+        <button class="text-accent hover:text-accent/80 ml-1" @click="loadDashboardData">Retry</button>
+      </p>
+    </div>
 
     <!-- No platforms configured banner -->
     <div

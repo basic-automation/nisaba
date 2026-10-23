@@ -4,10 +4,17 @@ import type { TimeWindow, ProductAnalytics } from '~/types'
 const { analytics, loading, fetchAllAnalytics } = useAnalytics()
 const { companiesInitialized } = useCompanyContext()
 const timeWindow = ref<TimeWindow>('Week')
+// N-11.3: a load failure used to render as "No analytics data yet".
+const analyticsError = ref<string | null>(null)
 
 async function initInventory() {
   if (!companiesInitialized.value) return
-  await fetchAllAnalytics(timeWindow.value)
+  analyticsError.value = null
+  try {
+    await fetchAllAnalytics(timeWindow.value)
+  } catch (e: any) {
+    analyticsError.value = String(e?.message ?? e ?? 'Unknown error')
+  }
 }
 
 onMounted(initInventory)
@@ -15,7 +22,12 @@ watch(companiesInitialized, initInventory)
 
 async function changeWindow(window: TimeWindow) {
   timeWindow.value = window
-  await fetchAllAnalytics(window)
+  analyticsError.value = null
+  try {
+    await fetchAllAnalytics(window)
+  } catch (e: any) {
+    analyticsError.value = String(e?.message ?? e ?? 'Unknown error')
+  }
 }
 
 const windows: TimeWindow[] = ['Day', 'Week', 'Month', 'All']
@@ -119,6 +131,11 @@ const avgVelocity = computed(() => {
         </tbody>
       </table>
     </template>
+
+    <div v-else-if="analyticsError" class="py-16">
+      <p class="text-sm text-red-400/80 mb-3">Couldn't load analytics: {{ analyticsError }}</p>
+      <button class="text-xs text-accent hover:text-accent/80" @click="initInventory">Retry</button>
+    </div>
 
     <div v-else class="py-16 text-sm text-muted/40">
       No analytics data yet. Analytics populate after sync cycles run.

@@ -1,5 +1,10 @@
 <script setup lang="ts">
 const { isRunning, fetchStatus, triggerSync, pauseSync, resumeSync, startListening } = useSync()
+const { notify } = useNotifications()
+
+// N-11.3: "Sync now" gave no progress or error feedback — track the in-flight
+// trigger and surface failures as notifications.
+const syncingNow = ref(false)
 
 startListening()
 
@@ -12,10 +17,27 @@ onMounted(async () => {
 })
 
 async function toggleSync() {
-  if (isRunning.value) {
-    await pauseSync()
-  } else {
-    await resumeSync()
+  try {
+    if (isRunning.value) {
+      await pauseSync()
+    } else {
+      await resumeSync()
+    }
+  } catch (e: any) {
+    notify({ type: 'error', title: 'Sync toggle failed', message: String(e), source: 'statusbar' })
+  }
+}
+
+async function handleSyncNow() {
+  if (syncingNow.value) return
+  syncingNow.value = true
+  try {
+    await triggerSync()
+    notify({ type: 'success', title: 'Sync triggered', message: 'A sync cycle has started.', source: 'statusbar' })
+  } catch (e: any) {
+    notify({ type: 'error', title: 'Sync failed to start', message: String(e), source: 'statusbar' })
+  } finally {
+    syncingNow.value = false
   }
 }
 </script>
@@ -36,16 +58,24 @@ async function toggleSync() {
 
     <!-- Sync now -->
     <button
-      class="group relative flex items-center justify-center w-8 h-8 rounded text-muted/40 hover:text-muted transition-colors hover:bg-surface/30"
-      @click="triggerSync"
+      class="group relative flex items-center justify-center w-8 h-8 rounded text-muted/40 hover:text-muted transition-colors hover:bg-surface/30 disabled:opacity-50"
+      :disabled="syncingNow"
+      @click="handleSyncNow"
     >
-      <svg class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
+      <svg
+        class="w-5 h-5"
+        :class="{ 'animate-spin': syncingNow }"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+      >
         <path d="M17 10a7 7 0 0 1-12.9 3.7" />
         <path d="M3 10a7 7 0 0 1 12.9-3.7" />
         <path d="M17 4v4h-4" />
         <path d="M3 16v-4h4" />
       </svg>
-      <span class="tooltip">Sync now</span>
+      <span class="tooltip">{{ syncingNow ? 'Syncing…' : 'Sync now' }}</span>
     </button>
   </div>
 </template>
