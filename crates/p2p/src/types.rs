@@ -177,7 +177,7 @@ impl SyncableVendorPlugin {
 }
 
 /// Summary of a merge operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 pub struct MergeSummary {
     pub products_updated: usize,
     pub products_created: usize,

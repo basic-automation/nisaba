@@ -130,6 +130,25 @@ pub async fn delete_mapping(state: State<'_, AppState>, id: i64) -> Result<(), S
     db.delete_mapping(id).await.map_err(|e| e.to_string())
 }
 
+/// Batch version of `get_mappings`: one IPC round trip for many products
+/// (N-11.7 — replaces the per-product loop on dashboard/listings/products).
+/// Only live (non-soft-deleted) mappings are returned, matching `get_mappings`.
+#[tauri::command]
+pub async fn get_mappings_batch(
+    state: State<'_, AppState>,
+    product_ids: Vec<String>,
+) -> Result<HashMap<String, Vec<PlatformMapping>>, String> {
+    let db = state.active_db().await?;
+    let all = db.list_all_mappings().await.map_err(|e| e.to_string())?;
+    let mut out: HashMap<String, Vec<PlatformMapping>> = HashMap::new();
+    for m in all {
+        if m.deleted_at.is_none() && product_ids.contains(&m.product_id) {
+            out.entry(m.product_id.clone()).or_default().push(m);
+        }
+    }
+    Ok(out)
+}
+
 // ── Product Variants ─────────────────────────────────────
 
 #[tauri::command]
@@ -141,6 +160,24 @@ pub async fn list_variants(
     db.list_variants(&product_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Batch version of `list_variants`: one IPC round trip for many products
+/// (N-11.7 — replaces the per-product loop on the products page).
+#[tauri::command]
+pub async fn list_variants_batch(
+    state: State<'_, AppState>,
+    product_ids: Vec<String>,
+) -> Result<HashMap<String, Vec<ProductVariant>>, String> {
+    let db = state.active_db().await?;
+    let all = db.list_all_variants().await.map_err(|e| e.to_string())?;
+    let mut out: HashMap<String, Vec<ProductVariant>> = HashMap::new();
+    for v in all {
+        if product_ids.contains(&v.product_id) {
+            out.entry(v.product_id.clone()).or_default().push(v);
+        }
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -239,43 +276,11 @@ pub async fn delete_variant(state: State<'_, AppState>, id: String) -> Result<()
 }
 
 #[tauri::command]
-pub async fn update_variant_quantity(
-    state: State<'_, AppState>,
-    variant_id: String,
-    quantity: i64,
-) -> Result<(), String> {
-    let db = state.active_db().await?;
-    let variant = db
-        .get_variant(&variant_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("Variant not found")?;
-    db.update_variant_quantity(&variant_id, quantity)
-        .await
-        .map_err(|e| e.to_string())?;
-    db.recalc_product_quantity(&variant.product_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn get_all_product_first_photos(
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, String)>, String> {
     let db = state.active_db().await?;
     db.get_all_product_first_photos()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_product_cache_freshness(
-    state: State<'_, AppState>,
-    product_id: String,
-) -> Result<Option<String>, String> {
-    let db = state.active_db().await?;
-    db.get_product_cache_freshness(&product_id)
         .await
         .map_err(|e| e.to_string())
 }

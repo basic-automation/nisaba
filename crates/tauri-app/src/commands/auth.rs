@@ -100,22 +100,6 @@ pub async fn start_ebay_auth(
 }
 
 #[tauri::command]
-pub async fn get_ebay_auth_url(state: State<'_, AppState>) -> Result<String, String> {
-    let adapters = state.active_adapters().await?;
-    let adapters = adapters.read().await;
-    let adapter = adapters
-        .get(&Platform::Ebay)
-        .ok_or("eBay adapter is not enabled")?;
-
-    let ebay = adapter
-        .as_any()
-        .downcast_ref::<EbayAdapter>()
-        .ok_or("Failed to get eBay adapter")?;
-
-    Ok(ebay.authorization_url())
-}
-
-#[tauri::command]
 pub async fn complete_ebay_auth(
     state: State<'_, AppState>,
     code: String,

@@ -1,5 +1,21 @@
-// Platform types - mirrors Rust types
-export type Platform = 'ebay' | 'squarespace' | 'xmrbazaar' | 'amazon'
+// N-11.7: these types are generated from the Rust sources via ts-rs
+// (frontend/types/generated.ts). Imported for local use and re-exported so
+// `~/types` imports keep working.
+import type {
+  Platform,
+  ProductVariant,
+  SyncEngineEvent,
+  MergeSummary,
+  SyncStatusPayload,
+} from './generated'
+
+export type {
+  Platform,
+  ProductVariant,
+  SyncEngineEvent,
+  MergeSummary,
+  SyncStatusPayload,
+}
 
 export interface Product {
   id: string
@@ -9,20 +25,6 @@ export interface Product {
   low_stock_threshold: number | null
   is_tracked: boolean
   has_variants: boolean
-  created_at: string
-  updated_at: string
-}
-
-export interface ProductVariant {
-  id: string
-  product_id: string
-  sku: string
-  name: string
-  attributes: Record<string, string>
-  quantity: number
-  on_hand_quantity: number
-  image_url: string | null
-  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -157,19 +159,6 @@ export interface ProductAnalytics {
 
 export type TimeWindow = 'Day' | 'Week' | 'Month' | 'All'
 
-// Sync engine events emitted via Tauri
-export type SyncEngineEvent =
-  | { CycleComplete: { cycle_id: string; products_synced: number; changes_pushed: number } }
-  | { QuantityUpdated: { product_id: string; product_name: string; platform: Platform; old_quantity: number; new_quantity: number } }
-  | { PlatformError: { platform: Platform; message: string } }
-  | { AuthExpired: { platform: Platform } }
-  | { UnmappedListingsDetected: { count: number } }
-  // N-11.6: dry-run preview events — were missing from the TS type (Phase 7
-  // type drift) even though the engine already emitted DryRunChange.
-  | { DryRunChange: { product_id: string; product_name: string; platform: Platform; current_quantity: number; planned_quantity: number } }
-  | { DryRunStarted: { cycle_id: string } }
-  | { DryRunComplete: { cycle_id: string; planned_changes: number } }
-
 // N-11.6: one planned change from a dry-run preview cycle
 export interface DryRunChangePayload {
   product_id: string
@@ -226,14 +215,6 @@ export interface PeerSyncState {
   last_sync_success: boolean
   last_error: string | null
   sync_count: number
-}
-
-export interface MergeSummary {
-  products_updated: number
-  products_created: number
-  mappings_updated: number
-  snapshots_updated: number
-  orders_added: number
 }
 
 export type P2PEvent =

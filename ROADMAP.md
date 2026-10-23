@@ -1399,21 +1399,21 @@ any peer can record a sale.
       import is preview-then-apply (`preview_import_data`/`apply_import_data`
       commands) showing new/replaced/skipped counts and the affected SKUs before
       anything is written.]
-- [ ] Sync status goes stale: each `useSync()` call creates its own `isRunning`, starting
+- [x] Sync status goes stale: each `useSync()` call creates its own `isRunning`, starting
       at `true` (`useSync.ts:7`). Nothing refetches it on a company switch, so the dashboard
       and sidebar disagree after a pause. Make it one shared store, updated from engine
       events.
-- [ ] N+1 IPC calls. The dashboard, listings and products pages call `get_mappings`, and
+- [x] N+1 IPC calls. The dashboard, listings and products pages call `get_mappings`, and
       sometimes `list_variants`, once per product, sequentially, on every change. Add batch
       commands.
-- [ ] Type drift between TypeScript and Rust:
+- [x] Type drift between TypeScript and Rust:
       - `SyncEngineEvent` lacks `DryRunChange`;
       - `MergeSummary` lacks `vendor_plugins_updated`, `variants_updated` and
         `rejected_timestamps`;
       - `ProductVariant` lacks `source_plugin_id` and `source_vendor_item_id`.
       `company.vue` also ignores the merge summary, so rejected peer rows are never shown.
       Generate the types from Rust (`ts-rs` or `specta`) instead of maintaining them by hand.
-- [ ] Dead code:
+- [x] Dead code:
       - `usePricing.ts` and `useTauriCommand.ts` are never imported, so `update_price` and
         `get_pricing_history` cannot be reached from the UI.
       - Five registered commands have no caller: `get_cached_images`, `get_ebay_auth_url`,

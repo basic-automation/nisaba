@@ -1617,19 +1617,6 @@ impl Db {
         Ok(())
     }
 
-    pub async fn update_variant_quantity(
-        &self,
-        variant_id: &str,
-        qty: i64,
-    ) -> Result<(), SyncError> {
-        self.execute_write(
-            "UPDATE product_variants SET quantity = ?1, updated_at = datetime('now') WHERE id = ?2",
-            params![qty, variant_id],
-        )
-        .await?;
-        Ok(())
-    }
-
     // ── Stock ledger (N-4.1) ────────────────────────────────────────
     // ── Stock ledger (N-4.1) ────────────────────────────────────────
     //
@@ -2848,32 +2835,6 @@ impl Db {
     }
 
     // ── Cache Freshness ───────────────────────────────────────
-
-    /// Get the most recent fetched/recorded timestamp across listing_photos,
-    /// listing_descriptions, and pricing_snapshots for a single product.
-    pub async fn get_product_cache_freshness(
-        &self,
-        product_id: &str,
-    ) -> Result<Option<String>, SyncError> {
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                "SELECT MAX(ts) FROM (
-                     SELECT MAX(fetched_at) AS ts FROM listing_photos WHERE product_id = ?1
-                     UNION ALL
-                     SELECT MAX(fetched_at) AS ts FROM listing_descriptions WHERE product_id = ?1
-                     UNION ALL
-                     SELECT MAX(recorded_at) AS ts FROM pricing_snapshots WHERE product_id = ?1
-                 )",
-                params![product_id],
-            )
-            .await?;
-        if let Some(row) = rows.next().await? {
-            Ok(row.get::<Option<String>>(0)?)
-        } else {
-            Ok(None)
-        }
-    }
 
     /// Get cache freshness for ALL products (bulk query for product grid).
     /// Returns (product_id, most_recent_timestamp) pairs.

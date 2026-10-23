@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { P2PEvent, CompanyPeer } from '~/types'
+import type { P2PEvent, CompanyPeer, MergeSummary } from '~/types'
 
 const {
   company,
@@ -38,13 +38,41 @@ const { notify } = useNotifications()
 // the single shared <ConfirmDialog> component.
 const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
 
-function showStatus(msg: string, type: 'success' | 'error' = 'success') {
+function showStatus(msg: string, type: 'success' | 'error' | 'warning' = 'success') {
   notify({
-    type: type === 'error' ? 'error' : 'success',
-    title: type === 'error' ? 'Error' : 'Success',
+    type: type === 'error' ? 'error' : type === 'warning' ? 'warning' : 'success',
+    title: type === 'error' ? 'Error' : type === 'warning' ? 'Warning' : 'Success',
     message: msg,
     source: 'company',
   })
+}
+
+// N-11.7: the SyncCompleted handler used to ignore the merge summary, so
+// rejected peer rows were never shown. Now the summary is surfaced, with a
+// warning when rows were rejected for implausible timestamps.
+function describeMergeSummary(peer: string, s: MergeSummary): string {
+  const who = truncateAddress(peer)
+  const applied: string[] = []
+  const n = (count: number, one: string, many: string) =>
+    count > 0 ? `${count} ${count === 1 ? one : many}` : ''
+  for (const part of [
+    n(s.products_created, 'product created', 'products created'),
+    n(s.products_updated, 'product updated', 'products updated'),
+    n(s.variants_updated, 'variant updated', 'variants updated'),
+    n(s.mappings_updated, 'mapping updated', 'mappings updated'),
+    n(s.vendor_plugins_updated, 'vendor plugin updated', 'vendor plugins updated'),
+    n(s.snapshots_updated, 'snapshot updated', 'snapshots updated'),
+    n(s.orders_added, 'order added', 'orders added'),
+  ]) {
+    if (part) applied.push(part)
+  }
+  let msg = applied.length > 0
+    ? `Synced with ${who}: ${applied.join(', ')}`
+    : `Synced with ${who}: no changes`
+  if (s.rejected_timestamps > 0) {
+    msg += ` — ${s.rejected_timestamps} peer row${s.rejected_timestamps === 1 ? '' : 's'} rejected (implausible timestamps)`
+  }
+  return msg
 }
 
 // Logo upload
@@ -267,7 +295,8 @@ onMounted(async () => {
   await getOnionAddress()
   const u = await listenForEvents((event: P2PEvent) => {
     if (event.type === 'SyncCompleted') {
-      showStatus(`Synced with ${truncateAddress(event.peer)}`)
+      const rejected = event.summary.rejected_timestamps > 0
+      showStatus(describeMergeSummary(event.peer, event.summary), rejected ? 'warning' : 'success')
     } else if (event.type === 'SyncFailed') {
       showStatus(`Sync failed: ${event.error}`, 'error')
     } else if (event.type === 'PeerJoinRequest') {

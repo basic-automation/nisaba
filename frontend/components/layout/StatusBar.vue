@@ -18,7 +18,9 @@ onMounted(async () => {
 
 async function toggleSync() {
   try {
-    if (isRunning.value) {
+    if (isRunning.value === null) {
+      await fetchStatus()
+    } else if (isRunning.value) {
       await pauseSync()
     } else {
       await resumeSync()
@@ -51,9 +53,9 @@ async function handleSyncNow() {
     >
       <span
         class="block w-2.5 h-2.5 rounded-full transition-colors"
-        :class="isRunning ? 'bg-green-400' : 'bg-yellow-400'"
+        :class="isRunning === null ? 'bg-muted/30' : isRunning ? 'bg-green-400' : 'bg-yellow-400'"
       />
-      <span class="tooltip">{{ isRunning ? 'Pause sync' : 'Resume sync' }}</span>
+      <span class="tooltip">{{ isRunning === null ? 'Loading…' : isRunning ? 'Pause sync' : 'Resume sync' }}</span>
     </button>
 
     <!-- Sync now -->

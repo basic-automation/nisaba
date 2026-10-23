@@ -2,7 +2,7 @@
 import type { Platform, PlatformListing, PlatformMapping, ProductVariant } from '~/types'
 import { invoke } from '@tauri-apps/api/core'
 
-const { products, fetchProducts, createProduct, createVariant, listVariants, getMappings, createMapping } = useProducts()
+const { products, fetchProducts, createProduct, createVariant, listVariants, createMapping, getMappingsBatch } = useProducts()
 const { resolveThumb, ensureCached } = useImageCache()
 
 const platforms: { key: Platform; label: string }[] = [
@@ -77,15 +77,14 @@ async function initListings() {
 onMounted(initListings)
 watch(companiesInitialized, initListings)
 
+// N-11.7: one batch IPC call instead of a sequential per-product loop.
 async function loadMappings() {
-  const entries = await Promise.all(
-    products.value.map(async (p) => {
-      const m = await getMappings(p.id)
-      return [p.id, m] as const
-    })
-  )
+  const ids = products.value.map((p) => p.id)
   const fresh: Record<string, PlatformMapping[]> = {}
-  for (const [id, m] of entries) fresh[id] = m
+  if (ids.length > 0) {
+    const batch = await getMappingsBatch(ids)
+    for (const p of products.value) fresh[p.id] = batch[p.id] ?? []
+  }
   productMappings.value = fresh
 }
 

@@ -40,6 +40,12 @@ export function useProducts() {
     return invoke<PlatformMapping[]>('get_mappings', { productId })
   }
 
+  // N-11.7: batch — one IPC round trip for many products (replaces the
+  // per-product get_mappings loop on dashboard/listings/products pages).
+  async function getMappingsBatch(productIds: string[]): Promise<Record<string, PlatformMapping[]>> {
+    return invoke<Record<string, PlatformMapping[]>>('get_mappings_batch', { productIds })
+  }
+
   async function createMapping(productId: string, platform: string, platformItemId: string, variantId: string, platformSku?: string) {
     await invoke('create_mapping', { productId, platform, platformItemId, platformSku: platformSku ?? null, variantId })
   }
@@ -52,6 +58,12 @@ export function useProducts() {
 
   async function listVariants(productId: string): Promise<ProductVariant[]> {
     return invoke<ProductVariant[]>('list_variants', { productId })
+  }
+
+  // N-11.7: batch — one IPC round trip for many products (replaces the
+  // per-product list_variants loop on the products page).
+  async function listVariantsBatch(productIds: string[]): Promise<Record<string, ProductVariant[]>> {
+    return invoke<Record<string, ProductVariant[]>>('list_variants_batch', { productIds })
   }
 
   async function createVariant(productId: string, sku: string, name: string, attributes: Record<string, string>, quantity: number, imageUrl?: string): Promise<ProductVariant> {
@@ -77,9 +89,11 @@ export function useProducts() {
     updateProduct,
     deleteProduct,
     getMappings,
+    getMappingsBatch,
     createMapping,
     deleteMapping,
     listVariants,
+    listVariantsBatch,
     createVariant,
     updateVariant,
     deleteVariant,

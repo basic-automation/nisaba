@@ -39,6 +39,7 @@ oauth2 = "5"
 scraper = "0.25"
 thiserror = "2"
 anyhow = "1"
+ts-rs = "12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }

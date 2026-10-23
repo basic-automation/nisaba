@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { PlatformMapping } from '~/types'
 
-const { products, loading, fetchProducts } = useProducts()
+const { products, loading, fetchProducts, getMappingsBatch } = useProducts()
 const {
   isRunning,
   fetchStatus,
@@ -57,10 +57,20 @@ watch(companiesInitialized, loadDashboardData)
 
 const mappingCounts = ref<Record<string, number>>({})
 
+// N-11.7: one batch IPC call instead of a sequential per-product loop.
 watch(products, async () => {
-  for (const p of products.value) {
-    const mappings = await invoke<PlatformMapping[]>('get_mappings', { productId: p.id })
-    mappingCounts.value[p.id] = mappings.length
+  const ids = products.value.map((p) => p.id)
+  if (ids.length === 0) {
+    mappingCounts.value = {}
+    return
+  }
+  try {
+    const batch = await getMappingsBatch(ids)
+    const counts: Record<string, number> = {}
+    for (const p of products.value) counts[p.id] = batch[p.id]?.length ?? 0
+    mappingCounts.value = counts
+  } catch {
+    // Leave the previous counts; the mappings column shows '—' for unknowns.
   }
 }, { immediate: false })
 
@@ -72,7 +82,7 @@ const lowStockProducts = computed(() =>
 
 const enabledPlatforms = computed(() => Object.keys(capabilities.value))
 
-const syncStatus = computed(() => isRunning.value ? 'Active' : 'Paused')
+const syncStatus = computed(() => isRunning.value === null ? '…' : isRunning.value ? 'Active' : 'Paused')
 
 function formatEvent(event: any): string {
   if ('CycleComplete' in event) {
@@ -133,7 +143,7 @@ function formatEvent(event: any): string {
       <div>
         <span
           class="text-5xl font-light"
-          :class="isRunning ? 'text-green-400' : 'text-yellow-400'"
+          :class="isRunning === null ? 'text-muted/40' : isRunning ? 'text-green-400' : 'text-yellow-400'"
         >{{ syncStatus }}</span>
         <p class="text-xs text-muted/60 mt-1 tracking-wide uppercase">Sync</p>
       </div>
