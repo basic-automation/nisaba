@@ -144,8 +144,9 @@ pub mod decimal_money {
 /// Typed product weight (N-7.2): a numeric amount in a named unit, e.g.
 /// `{ "value": 1.5, "unit": "lb" }`. Replaces the free-form `weight` string
 /// that used to hide in a vendor listing's `extras`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Weight {
+    /// The amount, in `unit`.
     pub value: f64,
     /// Unit of `value`, e.g. `"lb"`, `"oz"`, `"kg"`, `"g"`.
     pub unit: String,
@@ -153,7 +154,7 @@ pub struct Weight {
 
 /// Typed physical dimensions (N-7.2): all three linear measures share `unit`,
 /// e.g. `{ "length": 12, "width": 9, "height": 4, "unit": "in" }`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Dimensions {
     pub length: f64,
     pub width: f64,

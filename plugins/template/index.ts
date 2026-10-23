@@ -5,150 +5,35 @@
 // from the Vendors → Marketplace page (a directory or a .zip of it).
 //
 // The plugin runs in Nisaba's sandbox: there is no filesystem, no `Deno`, no `fetch`
-// global and no timers — only the `Nisaba` object declared below. A run is limited to
-// 30 minutes, a 1 GiB heap, 256 MiB of listing output and 64 MiB per response body.
-
+// global and no timers — only the `Nisaba` object declared in `nisaba.d.ts`. A run is
+// limited to 30 minutes, a 1 GiB heap, 256 MiB of listing output and 64 MiB per
+// response body.
+//
 // ── Plugin API v1 (frozen) ──────────────────────────────────────────────────
 //
+// The full v1 surface lives in `nisaba.d.ts` next to this file — generated from
+// the host's Rust types, so it cannot drift from what the host actually
+// accepts. It declares:
+//
+//   - the data types: `VendorListing`, `Weight`, `Dimensions`,
+//     `FetchListingsArgs` (also as `FetchListingsOptions`), `ListingDelta`
+//     (also as `ListingChanges`), `FetchListingsResult`, `PluginMetadata`,
+//     `ConfigField`
+//   - the host API: the `Nisaba` global (`fetch`, `sleep`, `emitBatch`,
+//     `store`, `log`) and the `NisabaResponse`
+//   - the entry points: `metadata: PluginMetadata` and
+//     `fetchListings: FetchListingsFn`
+//
 // This template targets plugin API v1 (`metadata.api_version: 1`). The host
-// refuses to install a plugin whose `api_version` major it does not support,
-// so this file also serves as the written-down v1 surface:
-//
-//   metadata: name, version, api_version, description, config_fields
-//             (key, label, required, secret, placeholder), category, icon,
-//             allowed_hosts
-//   entry points: `metadata` (a plain object literal, read before any run)
-//                 and `fetchListings(config, { since, cursor }): Promise<VendorListing[] | ListingChanges>`
-//                 (a full catalog, or only what changed — see "Going incremental" below)
-//   the Nisaba object: fetch, sleep, emitBatch, store, log — see "The host API" below
-//   VendorListing: vendor_item_id, title, price, currency, quantity, sku,
-//                  images, url, upc, brand, mpn, weight, dimensions,
-//                  extras, group_key, variant_attributes
-//
-// Keep to this surface and the plugin keeps installing on every 1.x host.
+// refuses to install a plugin whose `api_version` major it does not support.
+// Keep to the surface in `nisaba.d.ts` and the plugin keeps installing on
+// every 1.x host.
 
-// ── The host API ────────────────────────────────────────────────────────────
-
-interface NisabaResponse {
-  readonly ok: boolean // status is 2xx
-  readonly status: number
-  readonly headers: Record<string, string> // names are lower-case
-  text(): string
-  json(): any
-}
-
-declare const Nisaba: {
-  /** HTTP request to a host listed in `metadata.allowed_hosts`. Redirects are followed
-   *  only to listed hosts. Resolves for any HTTP status (check `ok`); rejects when the
-   *  request cannot be made at all or the host is not allowed. */
-  fetch(
-    url: string,
-    options?: { method?: string; headers?: Record<string, string>; body?: string },
-  ): Promise<NisabaResponse>
-  /** Wait — for rate limiting. There is no setTimeout. */
-  sleep(ms: number): Promise<void>
-  /** Hand listings to the app as they are built, so the UI can show progress on a long
-   *  import. Batches are for display; the array `fetchListings` returns is the result. */
-  emitBatch(listings: VendorListing[]): void
-  /** Per-plugin key–value storage for cursors, ETags and last-seen timestamps.
-   *
-   *  Keys are scoped to this plugin *and* this company: a plugin can never read
-   *  another plugin's keys, and the same plugin under another company gets a
-   *  separate store. Values persist between runs in the company database (they
-   *  are cleared if the plugin is uninstalled).
-   *
-   *  Both keys and values are strings — `JSON.stringify` objects first. Keys
-   *  are at most 256 bytes. The whole store is capped at 1 MiB per plugin;
-   *  `set` rejects past the cap, so keep values small (a cursor or an ETag,
-   *  not a cached catalog).
-   *
-   *  Example — resume a paged supplier API where the last run left off:
-   *
-   *    const cursor = (await Nisaba.store.get('cursor')) ?? '1'
-   *    // ... fetch pages starting at `cursor` ...
-   *    await Nisaba.store.set('cursor', nextCursor)
-   */
-  store: {
-    /** The stored string, or `null` when the key was never set. */
-    get(key: string): Promise<string | null>
-    /** Persist a string. Rejects when the write would exceed the 1 MiB cap. */
-    set(key: string, value: string): Promise<void>
-    /** Remove a key. Resolves to whether the key existed. */
-    delete(key: string): Promise<boolean>
-  }
-  /** Lines in the app's log under the `vendor_plugin` target. `console.log` and friends
-   *  write there too. */
-  log: Record<'trace' | 'debug' | 'info' | 'warn' | 'error', (msg: unknown) => void>
-}
-
-/** What the host passes as the second argument to `fetchListings`.
- *
- *  `since` is the UTC timestamp of the last successful sync (`null` on the
- *  first run — return the whole catalog then). `cursor` is the opaque cursor
- *  your plugin returned on the previous run (`null` when it returned none).
- *  A plugin may ignore both and keep returning the full catalog; the host
- *  then keeps full-pull semantics. */
-export interface FetchListingsOptions {
-  since: string | null
-  cursor: string | null
-}
-
-/** The incremental alternative to returning the whole catalog. The host
- *  merges it into the cached catalog: `changes` are upserted by
- *  `vendor_item_id`, ids in `deleted` are removed, and everything else is
- *  left untouched. Return a new `cursor` so the next run can pick up where
- *  this one stopped. */
-export interface ListingChanges {
-  /** Only the listings that are new or changed since `since`/`cursor`. */
-  changes: VendorListing[]
-  /** `vendor_item_id`s that no longer exist at the supplier. */
-  deleted?: string[]
-  /** Opaque cursor for the next run — a page token, an ETag, a timestamp. */
-  cursor?: string | null
-}
-/** One purchasable item. Only `vendor_item_id` and `title` are required. */
-export interface VendorListing {
-  /** Stable and unique within this vendor — how Nisaba recognises the item next run. */
-  vendor_item_id: string
-  title: string
-  /** Exact decimal amount as a string, e.g. `"12.99"` — never binary floating
-   *  point. A JSON number is still accepted (plugins written before the v1
-   *  freeze), but new plugins must send the exact decimal text. `currency` is
-   *  required whenever a price is present; the host refuses the listing
-   *  otherwise. */
-  price?: string | number | null
-  /** ISO 4217, e.g. "USD". Required when `price` is present. */
-  currency?: string | null
-  /** Vendor stock on hand. `null` (or omitted) means UNKNOWN — the vendor gave
-   *  no stock figure, and Nisaba must not treat it as 0. `0` means OUT OF
-   *  STOCK. Getting this wrong marks unknown stock as sold out (or vice
-   *  versa), so when the supplier's API has no stock field, leave it `null`. */
-  quantity?: number | null // vendor stock on hand
-  sku?: string | null
-  /** Every known image URL, most representative first. Replaces the pre-freeze
-   *  single `image_url` — the host still accepts `image_url` from old plugins
-   *  and folds it into `images[0]`, but new plugins must send `images`. */
-  images?: string[]
-  url?: string | null // the item's page on the vendor's site
-  /** UPC / GTIN / EAN. A string so leading zeros survive. */
-  upc?: string | null
-  brand?: string | null
-  /** Manufacturer part number. */
-  mpn?: string | null
-  /** Typed weight, e.g. `{ value: 1.5, unit: "lb" }`. */
-  weight?: { value: number; unit: string } | null
-  /** Typed dimensions; all three share `unit`, e.g. `{ length: 12, width: 9,
-   *  height: 4, unit: "in" }`. */
-  dimensions?: { length: number; width: number; height: number; unit: string } | null
-  /** Free-form strings shown on the vendor card. Nisaba recognises `description`,
-   *  `msrp`, `dealer_price` and `map_price`. UPC/weight/brand/MPN/dimensions are
-   *  typed fields now — do not also put them here. */
-  extras?: Record<string, string>
-  /** Listings sharing a `group_key` are variants of one product… */
-  group_key?: string | null
-  /** …told apart by these, e.g. { Size: 'L', Color: 'Olive' }. */
-  variant_attributes?: Record<string, string>
-}
+import type {
+  FetchListingsFn,
+  PluginMetadata,
+  VendorListing,
+} from './nisaba'
 
 // ── Metadata ────────────────────────────────────────────────────────────────
 //
@@ -156,7 +41,7 @@ export interface VendorListing {
 // plain object literal. Code at the top level of this module runs at that point too,
 // with no network access — keep it to constants.
 
-export const metadata = {
+export const metadata: PluginMetadata = {
   name: 'Example Supplier', // shown in the app; also how re-imports are matched
   version: '1.0.0', // bump it to publish an update
   // The frozen plugin surface this plugin targets. A host whose API major is not
@@ -187,24 +72,12 @@ const API_BASE = 'https://api.example.com/v1'
 const BATCH_SIZE = 200
 const MAX_RETRIES = 5
 
-/** Called on each vendor sync.
- *
- *  The second argument carries the host's incremental state: `options.since`
- *  is the UTC timestamp of the last successful sync (`null` on the first
- *  run), and `options.cursor` the opaque cursor this plugin returned last
- *  time. Two return shapes are accepted:
- *
- *  - a `VendorListing[]` — the whole catalog (full pull). Plugins that
- *    ignore `options` keep working exactly like this.
- *  - a `ListingChanges` — only what changed since `since`/`cursor`, plus
- *    `deleted` ids and the cursor for the next run. The host merges it into
- *    the cached catalog, so a supplier with a delta endpoint (or a `since`
- *    query parameter) no longer pays for a full pull every cycle.
+/** Called on each vendor sync — see `FetchListingsFn` in `nisaba.d.ts`.
  *
  *  This template does a full pull: the Example Supplier API has no delta
  *  endpoint. A supplier that does would look like this:
  *
- *    export async function fetchListings(config, options): Promise<VendorListing[] | ListingChanges> {
+ *    export const fetchListings: FetchListingsFn = async (config, options) => {
  *      const qs = options.since ? `?since=${encodeURIComponent(options.since)}` : ''
  *      const data = await getJson(`${API_BASE}/products/delta${qs}`, apiKey)
  *      return {
@@ -217,10 +90,7 @@ const MAX_RETRIES = 5
  *  Throw an Error when the import cannot succeed (bad credentials, the API is down):
  *  its message is shown to the user and the previous catalog is kept. For a problem
  *  with a single item, log it and carry on instead. */
-export async function fetchListings(
-  config: Record<string, string>,
-  options?: FetchListingsOptions,
-): Promise<VendorListing[] | ListingChanges> {
+export const fetchListings: FetchListingsFn = async (config, options) => {
   const apiKey = config.api_key?.trim()
   if (!apiKey) throw new Error('Set an API key on the plugin before syncing.')
 

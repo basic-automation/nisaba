@@ -2,6 +2,9 @@ pub mod ops;
 pub mod runtime;
 pub mod types;
 
+/// Generates `plugins/template/nisaba.d.ts` from the Rust plugin types.
+pub mod dts;
+
 use deno_core::extension;
 
 extension!(
