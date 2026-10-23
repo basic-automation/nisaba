@@ -88,6 +88,8 @@ impl AmazonAdapter {
                 &token.access_token,
                 token.refresh_token.as_deref(),
                 Some(&expires_str),
+                // N-11.2: LWA does not expose a refresh-token expiry.
+                None,
                 None,
             )
             .await?;
@@ -171,6 +173,8 @@ impl AmazonAdapter {
                 &token.access_token,
                 token.refresh_token.as_deref().or(Some(&refresh)),
                 Some(&expires_str),
+                // N-11.2: LWA does not expose a refresh-token expiry.
+                None,
                 None,
             )
             .await?;
@@ -424,6 +428,7 @@ mod tests {
             seller_id: "SELLER123".to_string(),
             region: "NA".to_string(),
             marketplace_ids: vec!["ATVPDKIKX0DER".to_string()],
+            client_secret_updated_at: None,
         }
     }
 

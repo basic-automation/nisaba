@@ -351,8 +351,21 @@ pub struct AuthToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: Option<String>,
+    /// N-11.2: when the refresh credential itself expires (`YYYY-MM-DD
+    /// HH:MM:SS` UTC, like `expires_at`). `None` when the platform does not
+    /// expose a refresh-credential expiry.
+    pub refresh_token_expires_at: Option<String>,
     pub cookies: Option<String>,
     pub updated_at: String,
+}
+
+/// N-11.2: the expiry timestamps of a stored platform credential, without
+/// the secret token values. Returned by [`Db::get_auth_token_expiry`] for
+/// the credential-health UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthTokenExpiry {
+    pub expires_at: Option<String>,
+    pub refresh_token_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
