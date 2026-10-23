@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use nisaba_core::config::CompanyRegistryEntry;
 use nisaba_core::crypto;
 use nisaba_core::db::Db;
-use nisaba_p2p::types::{CompanyInfo, P2PCommand, P2PEvent, PeerInfo};
+use nisaba_p2p::types::{CompanyInfo, P2PCommand, P2PEvent};
 use nisaba_p2p::P2PManager;
 
 use crate::state::{AppState, CompanyContext};
@@ -568,12 +568,6 @@ pub async fn set_peer_role(
     set_peer_role_inner(&db, &caller_role, &onion_address, &role).await?;
     info!(peer = %onion_address, role = %role, "Peer role updated");
     Ok(())
-}
-
-#[tauri::command]
-pub async fn list_company_peers(state: State<'_, AppState>) -> Result<Vec<PeerInfo>, String> {
-    let info = get_company(state).await?;
-    Ok(info.peers)
 }
 
 #[tauri::command]

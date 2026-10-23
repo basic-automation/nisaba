@@ -364,24 +364,6 @@ pub async fn generate_missing_thumbnails(
     Ok(count)
 }
 
-/// Check which URLs are already cached. Returns (url, filename) for cached ones only.
-#[tauri::command]
-pub async fn get_cached_images(
-    app: AppHandle,
-    _state: State<'_, AppState>,
-    urls: Vec<String>,
-) -> Result<Vec<(String, String)>, String> {
-    let dir = cache_dir(&app)?;
-    let mut results = Vec::new();
-    for url in &urls {
-        let fname = filename_for_url(url);
-        if dir.join(&fname).exists() {
-            results.push((url.clone(), fname));
-        }
-    }
-    Ok(results)
-}
-
 /// Validate that a filename is safe (no path traversal).
 /// Our filenames are SHA256 hex + optional `_thumb` + extension — no slashes or dots-dots.
 fn is_safe_filename(name: &str) -> bool {

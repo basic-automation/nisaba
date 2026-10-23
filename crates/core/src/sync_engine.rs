@@ -22,7 +22,7 @@ pub type SharedAdapters = Arc<RwLock<HashMap<Platform, Arc<dyn PlatformAdapter>>
 // ── Messages between sync engine and TUI ──────────────────────
 
 /// Events sent from the sync engine to the UI (Tauri frontend).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 pub enum SyncEngineEvent {
     /// A full sync cycle completed successfully.
     CycleComplete {

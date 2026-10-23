@@ -2,7 +2,7 @@
 import type { Platform, PlatformListing, PlatformMapping, PricingSnapshot, ProductVariant, ImportPreview } from '~/types'
 import { invoke } from '@tauri-apps/api/core'
 
-const { products, loading, fetchProducts, createProduct, getMappings, createMapping, deleteMapping, listVariants } = useProducts()
+const { products, loading, fetchProducts, createProduct, createMapping, deleteMapping, getMappingsBatch, listVariantsBatch } = useProducts()
 
 // Variants per product (used for images + counts)
 const productVariants = ref<Record<string, ProductVariant[]>>({})
@@ -106,30 +106,29 @@ function cacheAllProductImages() {
   if (urls.length > 0) ensureCached(urls)
 }
 
+// N-11.7: one batch IPC call instead of a sequential per-product loop.
 async function loadMappings() {
-  const entries = await Promise.all(
-    products.value.map(async (p) => {
-      const m = await getMappings(p.id)
-      return [p.id, m] as const
-    })
-  )
+  const ids = products.value.map((p) => p.id)
   const fresh: Record<string, PlatformMapping[]> = {}
-  for (const [id, m] of entries) fresh[id] = m
+  if (ids.length > 0) {
+    const batch = await getMappingsBatch(ids)
+    for (const p of products.value) fresh[p.id] = batch[p.id] ?? []
+  }
   productMappings.value = fresh
 }
 
+// N-11.7: one batch IPC call instead of a sequential per-product loop.
 async function loadVariants() {
-  const entries = await Promise.all(
-    products.value.map(async (p) => {
-      try {
-        return [p.id, await listVariants(p.id)] as const
-      } catch {
-        return [p.id, [] as ProductVariant[]] as const
-      }
-    })
-  )
+  const ids = products.value.map((p) => p.id)
   const all: Record<string, ProductVariant[]> = {}
-  for (const [id, v] of entries) all[id] = v
+  if (ids.length > 0) {
+    try {
+      const batch = await listVariantsBatch(ids)
+      for (const p of products.value) all[p.id] = batch[p.id] ?? []
+    } catch {
+      for (const p of products.value) all[p.id] = []
+    }
+  }
   productVariants.value = all
 }
 

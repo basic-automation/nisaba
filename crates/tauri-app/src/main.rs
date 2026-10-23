@@ -8,6 +8,8 @@ mod events;
 mod log_capture;
 mod startup;
 mod state;
+#[cfg(test)]
+mod ts_bindings;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -289,6 +291,7 @@ fn main() {
             commands::products::update_product,
             commands::products::delete_product,
             commands::products::get_mappings,
+            commands::products::get_mappings_batch,
             commands::products::create_mapping,
             commands::products::delete_mapping,
             // Sync
@@ -325,7 +328,6 @@ fn main() {
             commands::analytics::get_all_analytics,
             // Auth
             commands::auth::start_ebay_auth,
-            commands::auth::get_ebay_auth_url,
             commands::auth::complete_ebay_auth,
             commands::auth::start_amazon_auth,
             commands::auth::complete_amazon_auth,
@@ -367,7 +369,6 @@ fn main() {
             commands::company::approve_company_peer,
             commands::company::reject_company_peer,
             commands::company::set_peer_role,
-            commands::company::list_company_peers,
             commands::company::trigger_p2p_sync,
             // Company Logo
             commands::company::update_company_logo,
@@ -378,13 +379,12 @@ fn main() {
             commands::company::switch_company,
             // Product Variants
             commands::products::list_variants,
+            commands::products::list_variants_batch,
             commands::products::create_variant,
             commands::products::update_variant,
             commands::products::delete_variant,
-            commands::products::update_variant_quantity,
             commands::products::get_all_variant_skus,
             commands::products::get_all_product_first_photos,
-            commands::products::get_product_cache_freshness,
             commands::products::get_all_cache_freshness,
             // Vendor plugins
             commands::vendors::list_registry_plugins,
@@ -410,7 +410,6 @@ fn main() {
             // Image cache
             commands::images::load_image_cache_manifest,
             commands::images::cache_images,
-            commands::images::get_cached_images,
             commands::images::generate_missing_thumbnails,
         ])
         .run(tauri::generate_context!())

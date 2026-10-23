@@ -1,8 +1,15 @@
 use nisaba_core::sync_engine::SyncCommand;
 use nisaba_core::types::SyncEvent;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::state::AppState;
+
+/// Payload of the `sync-status` event emitted when the engine is paused or
+/// resumed, so every frontend surface shares one sync state (N-11.7).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+pub struct SyncStatusPayload {
+    pub running: bool,
+}
 
 #[tauri::command]
 pub async fn trigger_sync(state: State<'_, AppState>) -> Result<(), String> {
@@ -25,22 +32,26 @@ pub async fn preview_sync(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn pause_sync(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn pause_sync(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let tx = state.active_sync_tx().await?;
     tx.send(SyncCommand::Pause)
         .await
         .map_err(|e| e.to_string())?;
     state.set_active_sync_paused(true).await?;
+    app.emit("sync-status", SyncStatusPayload { running: false })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn resume_sync(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn resume_sync(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let tx = state.active_sync_tx().await?;
     tx.send(SyncCommand::Resume)
         .await
         .map_err(|e| e.to_string())?;
     state.set_active_sync_paused(false).await?;
+    app.emit("sync-status", SyncStatusPayload { running: true })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
