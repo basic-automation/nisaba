@@ -134,9 +134,16 @@ are referenced rather than repeated.
       is the difference between a tool its author can use and one a seller can. Amazon's
       step explains the SP-API developer registration (self-authorized private app), the
       roles to request, and that approval is Amazon's decision.
-- [ ] Credential health in the UI: per platform, show when the token or keys expire (eBay's
+- [x] Credential health in the UI: per platform, show when the token or keys expire (eBay's
       refresh token, Amazon's LWA client-secret rotation), warn ahead of time, and link
       straight back to the wizard step that renews them (Phase 2's token-expiry item).
+      [N-11.2: `get_credential_health` command + credential-health panel (dashboard
+      alerts, settings full view, status-bar warnings); eBay persists
+      `refresh_token_expires_in` to `auth_tokens.refresh_token_expires_at` (migration
+      029); Amazon stamps `client_secret_updated_at` on secret change and warns past
+      the 365-day rotation window; mid-sync `refresh_auth` failures surface as a
+      persistent banner via the `AuthExpired` event; warnings deep-link to
+      `/setup?platform=…` (N-11.1 wizard step).]
 - [ ] Empty and error states, confirmation of destructive actions, and the silent-startup
       fix (Phase 7).
 - [ ] **Export diagnostics**: one button that zips recent logs, versions, the platform and
@@ -427,10 +434,15 @@ anything on the platform (see "Writes that report success without writing" below
 - [ ] Rate-limit handling per platform. eBay, Amazon and Squarespace all throttle, and the
       adapters have no backoff distinct from `max_retries`. Squarespace also rescans the
       whole catalog for every per-item read, which multiplies its request count.
-- [ ] Token refresh failure path: what the UI shows when `refresh_auth()` fails mid-sync.
+- [x] Token refresh failure path: what the UI shows when `refresh_auth()` fails mid-sync.
       Also warn *before* expiry. eBay's `refresh_token_expires_in` is parsed but unused
       (`platform-ebay/src/types.rs:11`), and Amazon LWA client secrets have a rotation
-      deadline; check the current window before building this.
+      deadline; check the current window before building this. [N-11.2: a failed
+      `refresh_auth` mid-sync emits `AuthExpired`, which now surfaces as a persistent
+      dashboard banner with a "Renew in setup wizard" deep-link (not a silent
+      tooltip change); advance warnings come from the credential-health panel —
+      eBay's refresh-token expiry is persisted from the token response, Amazon's
+      client-secret rotation is tracked from `client_secret_updated_at`.]
 - [ ] A fifth adapter would prove the trait is actually general. Superseded: the next
       adapter is WooCommerce, then Shopify, built as marketplace plugins (Phase 3,
       *Plugin kinds after 1.0*; *Services and integrations*).

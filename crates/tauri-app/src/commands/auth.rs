@@ -279,6 +279,213 @@ pub struct PlatformHealth {
     pub authenticated: bool,
 }
 
+/// N-11.2: per-platform credential-health state for the UI — when the token
+/// or keys expire, with an advance warning, so the user can renew in the
+/// setup wizard *before* a mid-sync refresh fails.
+///
+/// This command returns expiry timestamps only, never secrets, so it is
+/// allowed on the main window (see `acl_check`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialHealthStatus {
+    /// Credential valid, no action needed.
+    Ok,
+    /// Expiry (or rotation deadline) approaching — warn ahead of time.
+    ExpiringSoon,
+    /// Past expiry — sync will fail until renewed.
+    Expired,
+    /// Needs attention but has no deadline (e.g. never connected, or the
+    /// expiry has not been recorded yet).
+    Attention,
+}
+
+#[derive(serde::Serialize)]
+pub struct CredentialHealth {
+    pub platform: String,
+    pub enabled: bool,
+    pub status: CredentialHealthStatus,
+    pub access_token_expires_at: Option<String>,
+    pub refresh_token_expires_at: Option<String>,
+    /// Human-readable summary for the UI, e.g. "Refresh token expires in
+    /// 12 days (2027-04-18 10:00:00)".
+    pub detail: String,
+}
+
+/// N-11.2: warn this many days before a refresh credential expires.
+const REFRESH_TOKEN_WARN_DAYS: i64 = 30;
+/// N-11.2: Amazon LWA client secrets have no API-exposed expiry; Amazon
+/// expects periodic rotation, so warn once the recorded secret is older
+/// than this.
+const AMAZON_CLIENT_SECRET_ROTATION_DAYS: i64 = 365;
+
+/// Parse the `YYYY-MM-DD HH:MM:SS` UTC timestamps the adapters persist in
+/// `auth_tokens`.
+fn parse_db_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc))
+}
+
+fn days_until(expiry: chrono::DateTime<chrono::Utc>) -> i64 {
+    (expiry - chrono::Utc::now()).num_days()
+}
+
+#[tauri::command]
+pub async fn get_credential_health(
+    state: State<'_, AppState>,
+) -> Result<Vec<CredentialHealth>, String> {
+    let all_platforms = [
+        Platform::Squarespace,
+        Platform::Ebay,
+        Platform::XmrBazaar,
+        Platform::Amazon,
+    ];
+    let adapters = state.active_adapters().await?;
+    let adapters = adapters.read().await;
+    let db = state.active_db().await?;
+
+    // Amazon's client-secret rotation timestamp lives in the (encrypted)
+    // company config. It is read backend-side only; the command returns
+    // derived status text, never the secret.
+    let amazon_secret_updated_at: Option<String> = super::config::load_company_config_value(&state)
+        .await
+        .and_then(|v| {
+            v.pointer("/amazon/client_secret_updated_at")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let mut results = Vec::new();
+    for plat in &all_platforms {
+        let enabled = adapters.contains_key(plat);
+        let token_meta = db
+            .get_auth_token_expiry(plat.as_str())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (status, detail) = match plat {
+            Platform::Ebay => ebay_credential_status(token_meta.as_ref()),
+            Platform::Amazon => {
+                amazon_credential_status(token_meta.as_ref(), amazon_secret_updated_at.as_deref())
+            }
+            Platform::Squarespace => (
+                CredentialHealthStatus::Ok,
+                "API-key auth — the key does not expire.".to_string(),
+            ),
+            Platform::XmrBazaar => (
+                CredentialHealthStatus::Ok,
+                "Username/password auth — no expiry to track.".to_string(),
+            ),
+        };
+
+        results.push(CredentialHealth {
+            platform: plat.as_str().to_string(),
+            enabled,
+            status,
+            access_token_expires_at: token_meta.as_ref().and_then(|m| m.expires_at.clone()),
+            refresh_token_expires_at: token_meta
+                .as_ref()
+                .and_then(|m| m.refresh_token_expires_at.clone()),
+            detail,
+        });
+    }
+
+    Ok(results)
+}
+
+/// N-11.2: eBay credential state. eBay's refresh token is the credential
+/// with a real expiry (18 months, from `refresh_token_expires_in`); the
+/// access token auto-refreshes, so its timestamp is informational only.
+fn ebay_credential_status(
+    meta: Option<&nisaba_core::types::AuthTokenExpiry>,
+) -> (CredentialHealthStatus, String) {
+    let Some(meta) = meta else {
+        return (
+            CredentialHealthStatus::Attention,
+            "Not connected — complete eBay authorization in the setup wizard.".to_string(),
+        );
+    };
+    let Some(refresh_at) = meta.refresh_token_expires_at.as_deref() else {
+        return (
+            CredentialHealthStatus::Attention,
+            "Connected, but the refresh-token expiry has not been recorded yet — \
+             it is tracked from the next authorization or token refresh."
+                .to_string(),
+        );
+    };
+    let Some(expiry) = parse_db_timestamp(refresh_at) else {
+        return (
+            CredentialHealthStatus::Attention,
+            format!("Connected, but the stored refresh-token expiry ({refresh_at}) could not be parsed."),
+        );
+    };
+    let days = days_until(expiry);
+    if days < 0 {
+        (
+            CredentialHealthStatus::Expired,
+            format!(
+                "Refresh token expired on {refresh_at} — re-authorize eBay in the setup \
+                 wizard to keep syncing."
+            ),
+        )
+    } else if days <= REFRESH_TOKEN_WARN_DAYS {
+        (
+            CredentialHealthStatus::ExpiringSoon,
+            format!(
+                "Refresh token expires in {days} day{s} ({refresh_at}) — renew it in the \
+                 setup wizard before it lapses.",
+                s = if days == 1 { "" } else { "s" }
+            ),
+        )
+    } else {
+        (
+            CredentialHealthStatus::Ok,
+            format!("Refresh token valid until {refresh_at}."),
+        )
+    }
+}
+
+/// N-11.2: Amazon credential state. LWA refresh tokens do not expire; the
+/// credential with a deadline is the LWA client secret, which Amazon
+/// expects the developer to rotate periodically. The UI tracks the last
+/// rotation from `amazon.client_secret_updated_at` in the company config.
+fn amazon_credential_status(
+    meta: Option<&nisaba_core::types::AuthTokenExpiry>,
+    secret_updated_at: Option<&str>,
+) -> (CredentialHealthStatus, String) {
+    let connected = meta.is_some();
+    match secret_updated_at {
+        Some(ts) => {
+            let age_days = chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_days());
+            match age_days {
+                Some(age) if age > AMAZON_CLIENT_SECRET_ROTATION_DAYS => (
+                    CredentialHealthStatus::ExpiringSoon,
+                    format!(
+                        "LWA client secret is {age} days old — rotate it in the Amazon \
+                         Developer Console and re-enter it in the setup wizard."
+                    ),
+                ),
+                _ => (
+                    CredentialHealthStatus::Ok,
+                    format!("LWA client secret last updated {ts}."),
+                ),
+            }
+        }
+        None if connected => (
+            CredentialHealthStatus::Ok,
+            "Connected. The client-secret rotation date is not recorded yet — it is \
+             tracked from the next settings save."
+                .to_string(),
+        ),
+        None => (
+            CredentialHealthStatus::Attention,
+            "Not connected — complete Amazon authorization in the setup wizard.".to_string(),
+        ),
+    }
+}
+
 #[tauri::command]
 pub async fn get_platform_health(
     state: State<'_, AppState>,
@@ -325,4 +532,96 @@ fn extract_amazon_code_from_url(url: &url::Url) -> Option<String> {
     url.query_pairs()
         .find(|(key, _)| key == "spapi_oauth_code")
         .map(|(_, value)| value.into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nisaba_core::types::AuthTokenExpiry;
+
+    fn meta(refresh_at: Option<&str>) -> AuthTokenExpiry {
+        AuthTokenExpiry {
+            expires_at: None,
+            refresh_token_expires_at: refresh_at.map(|s| s.to_string()),
+        }
+    }
+
+    fn db_timestamp(days_from_now: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::days(days_from_now))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// N-11.2: a refresh token past its expiry is `expired`.
+    #[test]
+    fn ebay_status_expired_in_the_past() {
+        let m = meta(Some(&db_timestamp(-1)));
+        let (status, detail) = ebay_credential_status(Some(&m));
+        assert!(matches!(status, CredentialHealthStatus::Expired));
+        assert!(detail.contains("expired"), "got: {detail}");
+    }
+
+    /// N-11.2: a refresh token inside the 30-day window is `expiring_soon`.
+    #[test]
+    fn ebay_status_expiring_soon_within_window() {
+        let ts = db_timestamp(12);
+        let m = meta(Some(&ts));
+        let (status, detail) = ebay_credential_status(Some(&m));
+        assert!(matches!(status, CredentialHealthStatus::ExpiringSoon));
+        // Whole-day truncation can render this as 11 or 12 days; the stable
+        // assertions are the warning copy and the expiry timestamp.
+        assert!(detail.contains("expires in"), "got: {detail}");
+        assert!(detail.contains("day"), "got: {detail}");
+        assert!(detail.contains(&ts), "got: {detail}");
+    }
+
+    /// N-11.2: a refresh token far from expiry is `ok`.
+    #[test]
+    fn ebay_status_ok_far_future() {
+        let m = meta(Some(&db_timestamp(300)));
+        let (status, _) = ebay_credential_status(Some(&m));
+        assert!(matches!(status, CredentialHealthStatus::Ok));
+    }
+
+    /// N-11.2: no stored token is `attention`, not silent.
+    #[test]
+    fn ebay_status_attention_without_row() {
+        let (status, detail) = ebay_credential_status(None);
+        assert!(matches!(status, CredentialHealthStatus::Attention));
+        assert!(detail.contains("Not connected"), "got: {detail}");
+    }
+
+    /// N-11.2: an unparseable stored expiry degrades to `attention`.
+    #[test]
+    fn ebay_status_attention_on_unparseable_timestamp() {
+        let m = meta(Some("not-a-timestamp"));
+        let (status, _) = ebay_credential_status(Some(&m));
+        assert!(matches!(status, CredentialHealthStatus::Attention));
+    }
+
+    /// N-11.2: an Amazon client secret older than the rotation window warns.
+    #[test]
+    fn amazon_status_secret_rotation_due() {
+        let old = (chrono::Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let (status, detail) = amazon_credential_status(None, Some(&old));
+        assert!(matches!(status, CredentialHealthStatus::ExpiringSoon));
+        assert!(detail.contains("rotate"), "got: {detail}");
+    }
+
+    /// N-11.2: a recently rotated Amazon secret is `ok`.
+    #[test]
+    fn amazon_status_secret_recently_rotated() {
+        let recent = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let (status, _) = amazon_credential_status(None, Some(&recent));
+        assert!(matches!(status, CredentialHealthStatus::Ok));
+    }
+
+    /// N-11.2: pre-N-11.2 configs without a recorded rotation date do not
+    /// nag — they report `ok` with guidance.
+    #[test]
+    fn amazon_status_ok_when_rotation_date_unknown() {
+        let m = meta(None);
+        let (status, _) = amazon_credential_status(Some(&m), None);
+        assert!(matches!(status, CredentialHealthStatus::Ok));
+    }
 }

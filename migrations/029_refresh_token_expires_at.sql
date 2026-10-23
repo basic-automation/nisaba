@@ -1,0 +1,11 @@
+-- Credential health in the UI (N-11.2).
+--
+-- `auth_tokens.refresh_token_expires_at` records when a platform's refresh
+-- credential itself expires, so the UI can warn ahead of time instead of
+-- discovering it when a mid-sync refresh fails. eBay returns
+-- `refresh_token_expires_in` on the token response (parsed but previously
+-- unused); adapters persist the absolute timestamp here alongside the token,
+-- in the same `YYYY-MM-DD HH:MM:SS` UTC shape as `expires_at`. NULL means
+-- the platform does not expose a refresh-credential expiry (Amazon's LWA
+-- refresh token, API keys, passwords) or no token has been stored yet.
+ALTER TABLE auth_tokens ADD COLUMN refresh_token_expires_at TEXT;

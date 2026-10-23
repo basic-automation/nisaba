@@ -122,6 +122,18 @@ export interface PlatformHealth {
   authenticated: boolean
 }
 
+// N-11.2: per-platform credential health from `get_credential_health`
+export type CredentialHealthStatus = 'ok' | 'expiring_soon' | 'expired' | 'attention'
+
+export interface CredentialHealth {
+  platform: Platform
+  enabled: boolean
+  status: CredentialHealthStatus
+  access_token_expires_at: string | null
+  refresh_token_expires_at: string | null
+  detail: string
+}
+
 export interface PlatformCapabilities {
   can_fetch_full_listing: boolean
   can_fetch_description: boolean

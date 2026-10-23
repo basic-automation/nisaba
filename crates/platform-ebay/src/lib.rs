@@ -96,6 +96,9 @@ impl EbayAdapter {
 
         let expires_at = Utc::now() + chrono::Duration::seconds(token.expires_in);
         let expires_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        // N-11.2: persist when the refresh token itself expires so the UI
+        // can warn ahead of time (previously parsed but unused).
+        let refresh_expires_str = token.refresh_token_expires_at(Utc::now());
 
         self.db
             .upsert_auth_token(
@@ -103,6 +106,7 @@ impl EbayAdapter {
                 &token.access_token,
                 token.refresh_token.as_deref(),
                 Some(&expires_str),
+                refresh_expires_str.as_deref(),
                 None,
             )
             .await?;
@@ -229,12 +233,17 @@ impl EbayAdapter {
         let expires_at = Utc::now() + chrono::Duration::seconds(token.expires_in);
         let expires_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // N-11.2: persist the refresh token's own expiry. `None` when the
+        // response omits it — the upsert preserves the stored value.
+        let refresh_expires_str = token.refresh_token_expires_at(Utc::now());
+
         self.db
             .upsert_auth_token(
                 "ebay",
                 &token.access_token,
                 token.refresh_token.as_deref().or(Some(&refresh)),
                 Some(&expires_str),
+                refresh_expires_str.as_deref(),
                 None,
             )
             .await?;

@@ -125,6 +125,7 @@ pub async fn get_company_platform_config(
             "enabled": false,
             "client_id": "",
             "client_secret": "",
+            "client_secret_updated_at": null,
             "refresh_token": "",
             "seller_id": "",
             "region": "NA",
@@ -157,7 +158,7 @@ pub async fn get_company_platform_config(
 #[tauri::command]
 pub async fn update_company_platform_config(
     state: State<'_, AppState>,
-    config: serde_json::Value,
+    mut config: serde_json::Value,
 ) -> Result<(), String> {
     let company_id = {
         let id = state.active_company_id.read().await;
@@ -165,6 +166,30 @@ pub async fn update_company_platform_config(
             .cloned()
             .ok_or_else(|| "No active company".to_string())?
     };
+
+    // N-11.2: stamp when the Amazon LWA client secret was last changed, so
+    // the credential-health UI can warn once it is due for rotation. The
+    // comparison happens server-side against the stored config — the secret
+    // itself never leaves the backend.
+    let new_secret = config
+        .pointer("/amazon/client_secret")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !new_secret.is_empty() {
+        let old_secret = load_company_config_value(&state).await.and_then(|v| {
+            v.pointer("/amazon/client_secret")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+        });
+        if old_secret.as_deref() != Some(new_secret) {
+            if let Some(obj) = config.get_mut("amazon").and_then(|v| v.as_object_mut()) {
+                obj.insert(
+                    "client_secret_updated_at".to_string(),
+                    serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                );
+            }
+        }
+    }
 
     // Load secret from keyring and encrypt
     let secret = crypto::load_secret_from_keyring(&company_id)
@@ -206,7 +231,11 @@ pub async fn update_company_platform_config(
 
 /// Load the decrypted company config value for the active company.
 /// Returns None if no company is active, no secret in keyring, or no config saved.
-async fn load_company_config_value(state: &AppState) -> Option<serde_json::Value> {
+///
+/// N-11.2: `pub(crate)` so the credential-health command (commands::auth) can
+/// read non-secret metadata (e.g. the Amazon client-secret rotation
+/// timestamp) without returning secrets to the frontend.
+pub(crate) async fn load_company_config_value(state: &AppState) -> Option<serde_json::Value> {
     let company_id = state.active_company_id.read().await.clone()?;
     let secret = crypto::load_secret_from_keyring(&company_id).ok()?;
     let key = crypto::derive_key(&secret);

@@ -9,6 +9,9 @@ const inSettings = isSettingsWindow()
 // Query params for configuring an existing company (skips step 1)
 const existingId = (route.query.companyId as string) || undefined
 const existingName = (route.query.companyName as string) || undefined
+// N-11.2: credential-health warnings deep-link here with ?platform=ebay so
+// the wizard opens straight on the step that renews the credential.
+const initialPlatform = (route.query.platform as string) || undefined
 
 async function onComplete() {
   if (inSettings) {
@@ -39,6 +42,7 @@ async function onCancel() {
       <SetupWizard
         :existing-company-id="existingId"
         :existing-company-name="existingName"
+        :initial-platform="initialPlatform"
         @complete="onComplete"
         @cancel="onCancel"
       />

@@ -87,7 +87,7 @@ async fn seed_peer_a(db: &Db) {
     db.mark_xmr_order_processed("ord-1", Some("p1"), "L-1", 1)
         .await
         .unwrap();
-    db.upsert_auth_token("ebay", "access-a", Some("refresh-a"), None, None)
+    db.upsert_auth_token("ebay", "access-a", Some("refresh-a"), None, None, None)
         .await
         .unwrap();
     db.set_company_config(r#"{"ebay":{"enabled":true}}"#, "2026-09-25 12:00:00")
@@ -603,9 +603,16 @@ async fn auth_tokens_keep_their_timestamp_so_peers_stop_trading_them() {
     );
 
     // A refresh on A now reaches B and is not undone by B's older copy.
-    a.upsert_auth_token("ebay", "access-refreshed", Some("refresh-a"), None, None)
-        .await
-        .unwrap();
+    a.upsert_auth_token(
+        "ebay",
+        "access-refreshed",
+        Some("refresh-a"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     merge_remote_payload(
         &a,
         &over_the_wire(load_full_sync_payload(&b).await.unwrap()),

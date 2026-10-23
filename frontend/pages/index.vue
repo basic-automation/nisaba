@@ -112,6 +112,13 @@ function formatEvent(event: any): string {
       </p>
     </div>
 
+    <!-- N-11.2: credential health — advance expiry warnings and persistent
+         mid-sync auth-failure banners, each linking to the wizard step that
+         renews the credential. Renders nothing when everything is healthy. -->
+    <div class="mb-10">
+      <CredentialHealthPanel mode="alerts" />
+    </div>
+
     <!-- Low stock alerts -->
     <div v-if="lowStockProducts.length > 0" class="mb-16">
       <h3 class="text-xs font-medium tracking-widest uppercase text-warning/80 mb-4">Low stock</h3>

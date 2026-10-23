@@ -12,13 +12,13 @@ use crate::config::CompanyRegistryEntry;
 use crate::crypto::PluginSecretStore;
 use crate::error::SyncError;
 use crate::types::{
-    AuthToken, Dimensions, ExportData, InventoryHistoryEntry, ListingDescription, ListingPhoto,
-    NewSyncEvent, Platform, PlatformMapping, PlatformSnapshot, PluginRunRecord, PricingSnapshot,
-    Product, ProductVariant, StockEvent, StockEventKind, SyncEvent, VendorListingCache,
-    VendorPluginInstall, VendorPluginRow, Weight, XmrProcessedOrder,
+    AuthToken, AuthTokenExpiry, Dimensions, ExportData, InventoryHistoryEntry, ListingDescription,
+    ListingPhoto, NewSyncEvent, Platform, PlatformMapping, PlatformSnapshot, PluginRunRecord,
+    PricingSnapshot, Product, ProductVariant, StockEvent, StockEventKind, SyncEvent,
+    VendorListingCache, VendorPluginInstall, VendorPluginRow, Weight, XmrProcessedOrder,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 28;
+const CURRENT_SCHEMA_VERSION: i64 = 29;
 
 /// Convert any IntoParams value into a cloneable Params.
 /// Panics on conversion failure (should not happen with valid params).
@@ -1344,6 +1344,19 @@ impl Db {
                     .await;
                 debug!("Applied migration 028_plugin_run_history.sql");
             }
+            29 => {
+                // Refresh-credential expiry for the credential-health UI
+                // (N-11.2). The ALTER is the .sql file's single statement;
+                // like steps 018/019/025/028 the step must be idempotent — a
+                // re-run after the column already exists (crash recovery, or
+                // a version-reset re-migration) must not fail the step.
+                let _ = conn
+                    .execute_batch(include_str!(
+                        "../../../migrations/029_refresh_token_expires_at.sql"
+                    ))
+                    .await;
+                debug!("Applied migration 029_refresh_token_expires_at.sql");
+            }
             _ => {}
         }
         Ok(())
@@ -2272,7 +2285,7 @@ impl Db {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT platform, access_token, refresh_token, expires_at, cookies, updated_at
+                "SELECT platform, access_token, refresh_token, expires_at, refresh_token_expires_at, cookies, updated_at
                  FROM auth_tokens WHERE platform = ?1",
                 params![platform],
             )
@@ -2285,8 +2298,34 @@ impl Db {
                 access_token: row.get::<String>(1)?,
                 refresh_token: row.get::<Option<String>>(2)?,
                 expires_at: row.get::<Option<String>>(3)?,
-                cookies: row.get::<Option<String>>(4)?,
-                updated_at: row.get::<String>(5)?,
+                refresh_token_expires_at: row.get::<Option<String>>(4)?,
+                cookies: row.get::<Option<String>>(5)?,
+                updated_at: row.get::<String>(6)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// N-11.2: credential-health metadata for one platform — the two expiry
+    /// timestamps, without the secret token values. The UI health command
+    /// uses this so secrets never enter the response path.
+    pub async fn get_auth_token_expiry(
+        &self,
+        platform: &str,
+    ) -> Result<Option<AuthTokenExpiry>, SyncError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT expires_at, refresh_token_expires_at FROM auth_tokens WHERE platform = ?1",
+                params![platform],
+            )
+            .await?;
+
+        if let Some(row) = rows.next().await? {
+            Ok(Some(AuthTokenExpiry {
+                expires_at: row.get::<Option<String>>(0)?,
+                refresh_token_expires_at: row.get::<Option<String>>(1)?,
             }))
         } else {
             Ok(None)
@@ -2299,14 +2338,28 @@ impl Db {
         access_token: &str,
         refresh_token: Option<&str>,
         expires_at: Option<&str>,
+        // N-11.2: when the refresh credential itself expires (absolute
+        // `YYYY-MM-DD HH:MM:SS` UTC timestamp). `None` preserves the stored
+        // value — a token response that does not expose a refresh expiry
+        // must not erase a previously recorded one.
+        refresh_token_expires_at: Option<&str>,
         cookies: Option<&str>,
     ) -> Result<(), SyncError> {
         self.execute_write(
-            "INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at, cookies, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+            "INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at, refresh_token_expires_at, cookies, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
              ON CONFLICT(platform) DO UPDATE
-             SET access_token = ?2, refresh_token = ?3, expires_at = ?4, cookies = ?5, updated_at = datetime('now')",
-            params![platform, access_token, refresh_token, expires_at, cookies],
+             SET access_token=?2, refresh_token=?3, expires_at=?4,
+                 refresh_token_expires_at=COALESCE(?5, refresh_token_expires_at), cookies=?6,
+                 updated_at=datetime('now')",
+            params![
+                platform,
+                access_token,
+                refresh_token,
+                expires_at,
+                refresh_token_expires_at,
+                cookies
+            ],
         )
         .await?;
         Ok(())
@@ -8582,6 +8635,121 @@ mod tests {
             pvd[0].2.quantity, None,
             "NULL stays NULL (unknown), not coerced to 0"
         );
+    }
+
+    /// N-11.2: migration 029 adds `auth_tokens.refresh_token_expires_at`,
+    /// preserving existing rows (their expiry reads back as NULL = unknown).
+    #[tokio::test]
+    async fn migration_029_adds_refresh_token_expires_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-tokens.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        let conn = db.connect().await.unwrap();
+        // Pre-29 shape of auth_tokens.
+        conn.execute_batch(
+            "CREATE TABLE auth_tokens (
+                platform TEXT PRIMARY KEY, access_token TEXT NOT NULL,
+                refresh_token TEXT, expires_at TEXT, cookies TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+             INSERT INTO auth_tokens (platform, access_token, refresh_token, expires_at)
+                VALUES ('ebay', 'a1', 'r1', '2026-01-01 00:00:00');",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        db.migrate_step(29).await.unwrap();
+
+        let conn = db.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM pragma_table_info('auth_tokens') WHERE name = 'refresh_token_expires_at'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            row.get::<i64>(0).unwrap(),
+            1,
+            "refresh_token_expires_at should exist after migration 029"
+        );
+        drop(conn);
+
+        // Legacy row survives with NULL expiry.
+        let token = db
+            .get_auth_token("ebay")
+            .await
+            .unwrap()
+            .expect("legacy row survives");
+        assert_eq!(token.access_token, "a1");
+        assert_eq!(token.refresh_token_expires_at, None);
+
+        // Re-running the step is idempotent.
+        db.migrate_step(29).await.unwrap();
+    }
+
+    /// N-11.2: `upsert_auth_token` round-trips `refresh_token_expires_at`,
+    /// and a later upsert that omits it preserves the stored value (the
+    /// COALESCE in the upsert must not erase a known expiry when a token
+    /// response does not expose one).
+    #[tokio::test]
+    async fn upsert_auth_token_round_trips_refresh_token_expires_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokens.db");
+        let db = Db::open(path.to_str().unwrap()).await.unwrap();
+        db.migrate().await.unwrap();
+
+        db.upsert_auth_token(
+            "ebay",
+            "a1",
+            Some("r1"),
+            Some("2026-01-01 00:00:00"),
+            Some("2027-06-01 00:00:00"),
+            None,
+        )
+        .await
+        .unwrap();
+        let meta = db
+            .get_auth_token_expiry("ebay")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(
+            meta.refresh_token_expires_at.as_deref(),
+            Some("2027-06-01 00:00:00")
+        );
+
+        // A refresh whose response omits the refresh expiry must not erase it.
+        db.upsert_auth_token(
+            "ebay",
+            "a2",
+            Some("r1"),
+            Some("2026-01-01 01:00:00"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let token = db
+            .get_auth_token("ebay")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(token.access_token, "a2");
+        assert_eq!(
+            token.refresh_token_expires_at.as_deref(),
+            Some("2027-06-01 00:00:00"),
+            "omitted expiry must preserve the stored value"
+        );
+
+        let meta = db
+            .get_auth_token_expiry("ebay")
+            .await
+            .unwrap()
+            .expect("row present");
+        assert_eq!(meta.expires_at.as_deref(), Some("2026-01-01 01:00:00"));
+        assert!(db.get_auth_token_expiry("amazon").await.unwrap().is_none());
     }
 
     /// N-6.1: migration 024 converts legacy REAL price columns to TEXT

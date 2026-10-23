@@ -314,6 +314,7 @@ fn main() {
             commands::auth::complete_amazon_auth,
             commands::auth::check_platform_auth,
             commands::auth::get_platform_health,
+            commands::auth::get_credential_health,
             commands::auth::test_platform_connection,
             // Photos
             commands::photos::get_product_photos,
