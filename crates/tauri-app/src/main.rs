@@ -331,6 +331,9 @@ fn main() {
             // N-11.3: import is preview-then-apply so nothing is replaced blindly
             commands::export_import::preview_import_data,
             commands::export_import::apply_import_data,
+            // Diagnostics (N-11.4)
+            commands::diagnostics::get_app_version,
+            commands::diagnostics::export_diagnostics,
             // Backups (N-8.1)
             commands::backup::list_backups,
             commands::backup::backup_now,

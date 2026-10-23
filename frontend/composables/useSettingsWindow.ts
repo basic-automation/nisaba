@@ -8,12 +8,13 @@ import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewW
  */
 export const SETTINGS_WINDOW_LABEL = 'nisaba-settings'
 
-export type SettingsView = 'config' | 'company' | 'setup'
+export type SettingsView = 'config' | 'company' | 'setup' | 'about'
 
 const VIEW_TITLES: Record<SettingsView, string> = {
   config: 'Nisaba — Configuration',
   company: 'Nisaba — Company',
   setup: 'Nisaba — Platform Setup',
+  about: 'Nisaba — About',
 }
 
 /**
@@ -65,7 +66,7 @@ export function isSettingsWindow(): boolean {
 export function parseSettingsHash(): { view: SettingsView; query: Record<string, string> } {
   const fallback = { view: 'config' as SettingsView, query: {} as Record<string, string> }
   if (typeof window === 'undefined') return fallback
-  const m = window.location.hash.match(/^#settings:(config|company|setup)(?:\?(.*))?$/)
+  const m = window.location.hash.match(/^#settings:(config|company|setup|about)(?:\?(.*))?$/)
   if (!m) return fallback
   return {
     view: m[1] as SettingsView,

@@ -146,9 +146,16 @@ are referenced rather than repeated.
       `/setup?platform=…` (N-11.1 wizard step).]
 - [ ] Empty and error states, confirmation of destructive actions, and the silent-startup
       fix (Phase 7).
-- [ ] **Export diagnostics**: one button that zips recent logs, versions, the platform and
+- [x] **Export diagnostics**: one button that zips recent logs, versions, the platform and
       the redacted config for a bug report. This replaces any telemetry or crash-reporting
       service (see *Services*).
+      [N-11.4: `export_diagnostics` command builds `nisaba-diagnostics.zip`
+      (`versions.json`, `logs.txt`, `config.redacted.json`) via a save dialog;
+      every secret value is replaced with `[REDACTED]` by key *and* scrubbed
+      from the log text; unit tests assert five known secret values appear
+      nowhere in the bundle. Button lives on the new Settings → About view
+      (`frontend/pages/about.vue`, also openable from the main nav), next to
+      the app version from `get_app_version`.]
 - [ ] An accessibility pass on the core flows (Phase 7).
 
 ### Gate: documentation
