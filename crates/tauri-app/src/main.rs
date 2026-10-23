@@ -6,6 +6,7 @@ mod acl_check;
 mod commands;
 mod events;
 mod log_capture;
+mod startup;
 mod state;
 
 use std::collections::HashMap;
@@ -80,9 +81,18 @@ fn main() {
     // Install rustls crypto provider before any TLS usage.
     // Both `ring` and `aws-lc-rs` features are enabled (from different deps),
     // so rustls cannot auto-detect — we pick ring explicitly.
-    rustls::crypto::ring::default_provider()
+    // N-11.5: a failed install is fatal, but it must be visible (dialog + log
+    // file), not a silent panic on a console-less Windows release build.
+    // (The error is the already-installed provider, so it is named here.)
+    if rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .is_err()
+    {
+        startup::fatal_startup_error(
+            "TLS crypto provider",
+            "a TLS crypto provider was already installed before startup",
+        );
+    }
 
     // Shared log buffer (keeps last 2000 lines)
     let log_buffer = LogBuffer::new(2000);
@@ -116,8 +126,12 @@ fn main() {
             let log_buffer = log_buffer.clone();
             let (config, config_path, config_dir, app_db, active_id) =
                 tauri::async_runtime::block_on(async {
+                    // N-11.5: startup failures must show a native error dialog
+                    // naming the failure and write a log file, instead of
+                    // panicking via expect() — a Windows release build has no
+                    // console, so the app would just exit silently.
                     let (config, config_path) = AppConfig::resolve_and_load(None)
-                        .expect("Failed to load config");
+                        .unwrap_or_else(|e| startup::fatal_startup_error("configuration", e));
 
                     info!("Loaded config from {}", config_path.display());
 
@@ -129,12 +143,14 @@ fn main() {
                     let app_db = Arc::new(
                         Db::open(&config.database.path)
                             .await
-                            .expect("Failed to open database"),
+                            .unwrap_or_else(|e| startup::fatal_startup_error("database", e)),
                     );
                     app_db
                         .migrate_with_backup(&BackupConfig::from_database_config(&config.database))
                         .await
-                        .expect("Failed to run migrations");
+                        .unwrap_or_else(|e| {
+                            startup::fatal_startup_error("database migrations", e)
+                        });
                     info!("App database ready at {}", config.database.path);
 
                     let active_id = app_db
@@ -397,7 +413,7 @@ fn main() {
             commands::images::generate_missing_thumbnails,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Nisaba");
+        .unwrap_or_else(|e| startup::fatal_startup_error("application runtime", e));
 }
 
 /// Initialize a single company's runtime context.
