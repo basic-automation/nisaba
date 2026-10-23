@@ -806,7 +806,15 @@ six operations (`fetch`, `sleep`, `log`, `emitBatch`, `store`, `setResult`) and 
       `catalog` today, and `orders`, `marketplace` and `notify` later. The install card
       shows the capabilities, the host refuses calls outside them, and a capability change
       triggers re-approval like a code change.
-- [ ] **Author tooling.**
+- [x] **Author tooling.**
+      → Done (N-12.2): the `Nisaba` API and the `VendorListing` schema ship as
+      `nisaba.d.ts` in `plugins/template`, generated from the Rust types via
+      ts-rs (`crates/vendor-runtime/src/dts.rs`), so they cannot drift — a
+      sync test fails if the checked-in file differs from the generator's
+      output. The template plugin typechecks against it
+      (`plugins/template/tsconfig.json`). The remaining two sub-bullets (the
+      `nisaba-plugin` dev command, the fake-supplier author test kit) are not
+      1.0 queue items.
       - Publish the `Nisaba` API and the `VendorListing` schema as TypeScript types,
         generated from the Rust types so they cannot drift, in an npm package or as a
         `nisaba.d.ts` in the template.
