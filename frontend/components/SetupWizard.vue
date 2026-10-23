@@ -7,6 +7,11 @@ const props = defineProps<{
   /** When provided, skip step 1 and jump straight to platform selection for this existing company. */
   existingCompanyId?: string
   existingCompanyName?: string
+  /**
+   * N-11.2: when re-entering for an existing company, jump straight to this
+   * platform's step (deep-linked from credential-health warnings).
+   */
+  initialPlatform?: string
 }>()
 
 const emit = defineEmits<{
@@ -384,6 +389,17 @@ onMounted(async () => {
     amazonAuthLoading.value = false
     amazonAuthMessage.value = `Error: ${event.payload}`
   }))
+
+  // N-11.2: deep-link from a credential-health warning straight to the
+  // platform step that renews the credential (existing company only). The
+  // saved config was pre-filled above, so jumping here loses nothing.
+  if (isExisting && props.initialPlatform && (allPlatforms as string[]).includes(props.initialPlatform)) {
+    const p = props.initialPlatform as Platform
+    selectedPlatforms.value = new Set([p])
+    platformConfig.value[p].enabled = true
+    platformIndex.value = 0
+    step.value = 3
+  }
 })
 
 onUnmounted(() => {
