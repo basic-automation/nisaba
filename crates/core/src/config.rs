@@ -235,6 +235,12 @@ pub struct AmazonConfig {
     pub region: String,
     #[serde(default)]
     pub marketplace_ids: Vec<String>,
+    /// N-11.2: RFC3339 timestamp of the last time the LWA client secret
+    /// was changed. Amazon rotates client secrets on the user’s schedule; the
+    /// credential-health UI warns once the secret is older than the rotation
+    /// window. `None` for configs saved before this field existed.
+    #[serde(default)]
+    pub client_secret_updated_at: Option<String>,
 }
 
 fn default_amazon_region() -> String {
