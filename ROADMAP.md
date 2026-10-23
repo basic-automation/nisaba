@@ -144,8 +144,16 @@ are referenced rather than repeated.
       the 365-day rotation window; mid-sync `refresh_auth` failures surface as a
       persistent banner via the `AuthExpired` event; warnings deep-link to
       `/setup?platform=…` (N-11.1 wizard step).]
-- [ ] Empty and error states, confirmation of destructive actions, and the silent-startup
+- [x] Empty and error states, confirmation of destructive actions, and the silent-startup
       fix (Phase 7).
+      [N-11.5: `main.rs` no longer `expect()`s on config load, DB open, migrations,
+      the rustls provider install, or `Builder::run` — failures go through
+      `startup::fatal_startup_error`, which writes a timestamped log to
+      `<data dir>/logs/startup-errors/` (`%APPDATA%\nisaba\…` on Windows,
+      `~/.config/nisaba/…` on Unix), shows a native OS error dialog
+      (MessageBoxW / osascript / zenity-kdialog) naming the failing stage,
+      and exits non-zero. Unit tests cover the report text and log-file
+      writing.]
 - [x] **Export diagnostics**: one button that zips recent logs, versions, the platform and
       the redacted config for a bug report. This replaces any telemetry or crash-reporting
       service (see *Services*).
