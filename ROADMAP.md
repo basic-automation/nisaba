@@ -168,9 +168,12 @@ are referenced rather than repeated.
 
 ### Gate: documentation
 
-- [ ] A user guide: setup, each platform's credentials, mappings and variants, what sync
+- [x] A user guide: setup, each platform's credentials, mappings and variants, what sync
       does and does not do, backups, and troubleshooting. Either ship it in the empty
-      `frontend/public/guide/` or host it.
+      `frontend/public/guide/` or host it. [N-12.1: shipped as static HTML in
+      `frontend/public/guide/` (index + setup/credentials/mappings/sync/backups/
+      troubleshooting/ebay-deletion pages), opened from the app in a dedicated
+      help window via the sidebar "User guide" item and Settings → About.]
 - [ ] The plugin author reference and published types (Phase 3, *Plugin API v1*).
 - [ ] README screenshots (Phase 0).
 - [ ] Release notes on every GitHub release, generated from PR titles. (This file stays the
@@ -185,12 +188,15 @@ are referenced rather than repeated.
       Agreement, Amazon SP-API's Acceptable Use and Data Protection policies (relevant as
       soon as order data with buyer details is read), Squarespace's API terms, and XMR
       Bazaar's terms on automated access, since that adapter scrapes HTML.
-- [ ] eBay **Marketplace Account Deletion** notifications. Every production keyset must
+- [x] eBay **Marketplace Account Deletion** notifications. Every production keyset must
       either subscribe an HTTPS endpoint or be granted an exemption for not storing eBay
       user data. With customers bringing their own keys, each customer does this for their
       own keyset, so the setup guide must walk through the exemption. (It would become a
       hosted service only if Nisaba ever ships a shared keyset.) Confirm the current rule
-      with eBay before writing the guide.
+      with eBay before writing the guide. [N-12.1: rule confirmed against eBay's current
+      developer docs (subscribe or opt out before the first production call; keyset
+      activated only after); the walkthrough ships in the in-app guide as
+      `frontend/public/guide/ebay-deletion.html`.]
 - [ ] A short privacy statement: what leaves the machine (update checks, marketplace API
       calls, P2P relays if enabled) and what never does.
 
@@ -1437,8 +1443,9 @@ any peer can record a sale.
       app just exits. Show a native error dialog and write a log file.
 - [ ] Accessibility pass: keyboard navigation, focus rings, and contrast against the
       Palenight surfaces
-- [ ] `frontend/public/guide/` is an empty directory with a `.gitkeep` — either ship the
-      in-app guide it was made for or remove it
+- [x] `frontend/public/guide/` is an empty directory with a `.gitkeep` — either ship the
+      in-app guide it was made for or remove it [N-12.1: shipped the in-app guide;
+      `.gitkeep` removed.]
 - [ ] The window is `"decorations": false`; confirm the custom chrome behaves on Linux/Wayland
       and macOS, not just Windows
 - [x] A WebDriver harness that drives the real app: `scripts/ui-smoke.py` plus the

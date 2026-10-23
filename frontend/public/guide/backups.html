@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backups and restore — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>Backups and restore</h1>
+<p>
+  Your catalog, mappings, credentials, and sync history all live in one SQLite
+  database file. Nisaba backs it up automatically — and lets you take manual
+  snapshots and restore any of them from the UI.
+</p>
+
+<h2>Automatic backups</h2>
+<ul>
+  <li><strong>Before every migration.</strong> Whenever an app update changes the database schema, Nisaba writes a backup first, so a failed or unwanted upgrade can always be undone.</li>
+  <li><strong>On a schedule.</strong> Enabled by default: a backup every 24 hours, keeping the newest 7. Both the interval and the retention count are configurable under <code>[database]</code> in <code>config.toml</code> (<code>interval_secs</code>, <code>keep_last</code>).</li>
+  <li><strong>Before a restore.</strong> Restoring a backup first takes a safety snapshot of the current database, so a restore is itself reversible.</li>
+</ul>
+<p>
+  Backups land in <code>&lt;database-folder&gt;/backups</code> unless you set a
+  different <code>dir</code> in the config. Pruning always keeps at least the
+  newest backup, even if you set <code>keep_last</code> to 0.
+</p>
+
+<h2>Manual backups</h2>
+<p>
+  Use <strong>Back up now</strong> (Settings → About → Backups, or the backup
+  control in your database settings) before doing anything risky: bulk edits,
+  remapping a platform, or upgrading. The snapshot is written immediately and
+  appears in the backup list.
+</p>
+
+<h2>Restoring</h2>
+<ol class="steps">
+  <li>Open the backup list and pick the snapshot to return to. Check its timestamp — pick the newest one from <em>before</em> the problem started.</li>
+  <li>Choose <strong>Restore</strong>. Nisaba first writes a safety snapshot of the current database, then replaces it with the backup.</li>
+  <li>The app restarts to reopen the database cleanly. Verify the data, then re-run a sync cycle to bring the platforms back in line with the restored catalog.</li>
+</ol>
+
+<div class="callout warning">
+  <p class="title">Restore is a rewind, not a merge</p>
+  <p>
+    Restoring replaces the <em>entire</em> database with the backup: catalog,
+    mappings, credentials, and history all go back to that moment. Anything
+    changed since — new products, new mappings, credential updates — is gone
+    unless it exists in a newer backup. Export anything important before you
+    restore.
+  </p>
+</div>
+
+<div class="callout tip">
+  <p class="title">Keep an off-machine copy</p>
+  <p>
+    Automatic backups protect you from app bugs and bad edits, but they live on
+    the same disk as the database. Copy the <code>backups</code> folder (or at
+    least the newest snapshot) to external storage or a cloud drive
+    periodically — disk failure is the one thing local backups can't survive.
+  </p>
+</div>
+
+<footer class="guide-footer">
+  <a href="index.html">← Guide home</a>
+  <a href="troubleshooting.html">Next: Troubleshooting →</a>
+</footer>
+
+</div>
+</body>
+</html>

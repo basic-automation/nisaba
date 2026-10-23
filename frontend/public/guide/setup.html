@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>Setup</h1>
+
+<h2>Install</h2>
+<p>
+  Install Nisaba from the release for your OS (Windows installer, macOS disk
+  image, or Linux package). Launch it — the first run opens a setup wizard that
+  walks you through creating your first company and connecting a platform.
+</p>
+
+<h2>Companies</h2>
+<p>
+  A <strong>company</strong> is a self-contained workspace: its own catalog,
+  listings, platform credentials, and sync schedule. Use separate companies for
+  separate businesses. Switching companies (the switcher in the top bar) loads
+  that company's database and credentials; the other company's data is untouched.
+</p>
+
+<h2>Connecting a platform</h2>
+<ol class="steps">
+  <li>
+    <strong>Open the platform setup.</strong> From the sidebar choose
+    <em>Config</em> (or run the first-run wizard), pick the platform, and flip
+    its <em>Enabled</em> switch on.
+  </li>
+  <li>
+    <strong>Gather the credentials.</strong> Each platform needs different
+    keys — see <a href="credentials.html">Platform credentials</a> for exactly
+    what to copy from each developer portal.
+  </li>
+  <li>
+    <strong>Save, then verify.</strong> After saving, check the credential-health
+    panel: Nisaba validates what it can (for example, that an Amazon client
+    secret is not past its rotation window) without touching the live network
+    more than necessary.
+  </li>
+  <li>
+    <strong>Import your catalog.</strong> The first sync pulls your existing
+    listings into the local catalog as a baseline. Nothing is pushed to a
+    platform until you approve a sync cycle — use a dry run first (see
+    <a href="sync.html">What sync does</a>).
+  </li>
+</ol>
+
+<h2>Where your data lives</h2>
+<p>Nisaba keeps everything on your machine:</p>
+<ul>
+  <li><strong>Configuration</strong> — <code>config.toml</code> in the Nisaba data directory:
+    <code>%APPDATA%\nisaba\config.toml</code> on Windows,
+    <code>~/.config/nisaba/config.toml</code> on macOS/Linux. If a
+    <code>config.toml</code> exists in the folder you launch Nisaba from, that
+    one wins (useful for portable installs and testing).</li>
+  <li><strong>Database</strong> — the path in <code>[database] path</code>, by default
+    <code>./nisaba.db</code> next to the config. This is the file backups protect
+    (see <a href="backups.html">Backups and restore</a>).</li>
+  <li><strong>Secrets</strong> — platform tokens are stored encrypted in the
+    database under a company secret; they are never written to logs and are
+    redacted from the diagnostics bundle.</li>
+</ul>
+
+<div class="callout tip">
+  <p class="title">Test with sandbox first</p>
+  <p>
+    eBay credentials default to the <strong>sandbox</strong> environment. Keep it
+    that way while you learn the sync flow — flip to production only after a dry
+    run looks right. eBay also requires your production keyset to handle the
+    <a href="ebay-deletion.html">Marketplace Account Deletion</a> requirement
+    before your first production API call.
+  </p>
+</div>
+
+<footer class="guide-footer">
+  <a href="index.html">← Guide home</a>
+  <a href="credentials.html">Next: Platform credentials →</a>
+</footer>
+
+</div>
+</body>
+</html>

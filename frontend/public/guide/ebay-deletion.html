@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eBay account-deletion exemption — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>eBay Marketplace Account Deletion exemption</h1>
+
+<h2>Why this exists</h2>
+<p>
+  eBay lets its users request deletion of their personal data and closure of
+  their accounts. When that happens, eBay notifies every third-party developer
+  application so partners can delete that user's data from their own systems
+  too.
+</p>
+<p>
+  Because of this, eBay requires <strong>every production keyset</strong> to do
+  one of two things:
+</p>
+<ol>
+  <li>subscribe an HTTPS endpoint to the <strong>Marketplace Account
+    Deletion</strong> notification topic, <em>or</em></li>
+  <li><strong>opt out</strong> (apply for an exemption) if the application does
+    not store any eBay user data.</li>
+</ol>
+<p>
+  Nisaba is a local desktop app: it stores <strong>your</strong> listings and
+  inventory on <strong>your</strong> machine. It does not store eBay buyer or
+  user personal data, so you qualify for the exemption. You must complete this
+  <strong>before your first production API call</strong> — eBay activates the
+  keyset only after you subscribe or opt out, and non-compliant keysets can be
+  terminated or have API access reduced.
+</p>
+<div class="callout warning">
+  <p class="title">Per keyset, by you</p>
+  <p>
+    Nisaba uses <em>your own</em> eBay keyset, not a shared one — so this is
+    something <em>you</em> do once in the eBay developer portal for each
+    production keyset. Nisaba cannot do it for you, and sandbox keysets don't
+    need it.
+  </p>
+</div>
+
+<h2>Walkthrough: opting out</h2>
+<ol class="steps">
+  <li>
+    <strong>Open the eBay developer portal</strong> at
+    <a href="https://developer.ebay.com/my/keys">developer.ebay.com → Application keys</a>
+    and sign in with the account that owns the keyset.
+  </li>
+  <li>
+    <strong>Select your production keyset.</strong> Make sure you're looking at
+    the <em>Production</em> keyset, not Sandbox — the requirement (and the
+    opt-out) applies per production keyset.
+  </li>
+  <li>
+    <strong>Find the Marketplace Account Deletion section.</strong> In the
+    keyset settings, look for the <em>Marketplace Account Deletion /
+    Closure Notifications</em> compliance section.
+  </li>
+  <li>
+    <strong>Choose to opt out.</strong> Select the opt-out / exemption option
+    for not storing eBay user data, and confirm the declaration that your
+    application does not retain eBay user personal data.
+  </li>
+  <li>
+    <strong>Save and verify.</strong> Save the keyset settings and reload the
+    page — the compliance status should show the keyset as opted out /
+    compliant. If the save silently fails, check that the keyset has a proper
+    application name set (a blank or placeholder name has been known to block
+    compliance saves), then try again or contact eBay developer support.
+  </li>
+  <li>
+    <strong>Connect in Nisaba.</strong> With the keyset compliant, enter your
+    production credentials in Nisaba's eBay platform setup and authorize as
+    normal.
+  </li>
+</ol>
+
+<h2>If your situation changes</h2>
+<p>
+  The exemption rests on "we don't store eBay user data". If you ever extend
+  Nisaba's use (via plugins or exports) to retain buyer personal data — names,
+  addresses, messages — from eBay, the exemption no longer applies: you must
+  instead subscribe an HTTPS endpoint to the deletion notifications and honor
+  them. When in doubt, re-read eBay's current
+  <a href="https://developer.ebay.com/develop/guides-v2/marketplace-user-account-deletion#overview">Marketplace
+  Account Deletion guide</a> before your first production call — eBay updates
+  the rules, and the portal page is authoritative.
+</p>
+
+<footer class="guide-footer">
+  <a href="index.html">← Guide home</a>
+  <span>End of guide</span>
+</footer>
+
+</div>
+</body>
+</html>
