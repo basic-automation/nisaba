@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>Troubleshooting</h1>
+
+<h2>Where to look first</h2>
+<ul>
+  <li><strong>Logs view</strong> (sidebar → Logs) — every sync cycle, adapter call, and error lands here with timestamps. Filter by company or platform.</li>
+  <li><strong>Notifications</strong> (sidebar → Notifications) — failed cycles, credential warnings, and backup failures surface here.</li>
+  <li><strong>Credential health</strong> — the panel on each platform's setup flags expired tokens, secrets past their rotation window, and unreachable endpoints before you run a sync.</li>
+  <li><strong>Plugin run history</strong> (Vendors view) — per-plugin schedules and recent runs; start here when vendor data looks stale.</li>
+</ul>
+
+<h2>Common problems</h2>
+
+<h3>eBay OAuth fails or loops back to the login page</h3>
+<p>
+  The <code>redirect_uri</code> in Nisaba must match the Redirect URI registered
+  on the eBay keyset <strong>exactly</strong> (scheme, host, port, path). The
+  default is <code>https://localhost:8443/ebay/callback</code>. Also confirm
+  you're using the right keyset for the environment — sandbox credentials never
+  work against production and vice versa.
+</p>
+
+<h3>Amazon calls fail with auth errors</h3>
+<p>
+  The usual cause is a rotated LWA client secret: generate a new one in the
+  developer console and paste it into Nisaba. If the refresh token itself was
+  revoked (account password change, app permissions changed), re-run the OAuth
+  authorization to get a fresh refresh token.
+</p>
+
+<h3>Squarespace sync reports "store page not found"</h3>
+<p>
+  The <code>store_page_id</code> is wrong or the API key lost its Inventory
+  permission. Re-check the page ID in the page URL and regenerate the key with
+  Inventory + Orders scopes if needed.
+</p>
+
+<h3>XMR Bazaar sync returns garbage or nothing</h3>
+<p>
+  The site's HTML layout probably changed — the adapter reads pages directly.
+  Check the <code>endpoints</code> overrides in the platform setup, lower the
+  sync frequency for a day (you may be rate-limited), and re-read their terms
+  on automated access.
+</p>
+
+<h3>Quantities changed somewhere I didn't expect</h3>
+<p>
+  Run a <strong>dry run</strong> and read it line by line: it shows exactly
+  which listing pushed which change to which product. Nine times out of ten
+  this reveals a wrong <a href="mappings.html">mapping</a> — fix the link, not
+  the number.
+</p>
+
+<h3>"Database is locked" or the app won't start</h3>
+<p>
+  Another Nisaba process (or a crashed one) still holds the database. Close all
+  Nisaba windows, wait a few seconds, and relaunch. If it persists, check for a
+  stray process in your task manager. Your data is safe — and there's a
+  pre-migration backup in the <code>backups</code> folder if you need to
+  <a href="backups.html">restore</a>.
+</p>
+
+<h3>Config errors on startup</h3>
+<p>
+  If you hand-edited <code>config.toml</code>, validate the TOML syntax (a
+  missing quote or bracket is the classic). Nisaba falls back to defaults for
+  unknown keys but fails loudly on malformed files — the Logs view shows the
+  exact line.
+</p>
+
+<h2>Reporting a bug</h2>
+<p>
+  Go to <strong>Settings → About → Export diagnostics</strong>. This writes a
+  zip containing recent logs, app/OS/platform versions, and your configuration
+  with <strong>all secrets redacted</strong> — secret values are replaced with
+  <code>[REDACTED]</code> before the zip is written. Attach it to your bug
+  report. Five known secret values are asserted absent from every bundle by
+  automated tests, so you can trust the redaction.
+</p>
+
+<footer class="guide-footer">
+  <a href="index.html">← Guide home</a>
+  <a href="ebay-deletion.html">Next: eBay account-deletion exemption →</a>
+</footer>
+
+</div>
+</body>
+</html>

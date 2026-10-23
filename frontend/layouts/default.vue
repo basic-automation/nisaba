@@ -2,7 +2,7 @@
 const { fetchCompanies } = useCompanyContext()
 const { unreadCount } = useNotifications()
 
-const navItems: { label: string; path: string; icon: string; settingsView?: SettingsView }[] = [
+const navItems: { label: string; path: string; icon: string; settingsView?: SettingsView; guideWindow?: boolean }[] = [
   { label: 'Dashboard', path: '/', icon: 'dashboard' },
   { label: 'Products', path: '/products', icon: 'package' },
   { label: 'Listings', path: '/listings', icon: 'listings' },
@@ -15,6 +15,9 @@ const navItems: { label: string; path: string; icon: string; settingsView?: Sett
   // in-app routing.
   { label: 'Config', path: '/config', icon: 'gear', settingsView: 'config' as const },
   { label: 'About', path: '/about', icon: 'info', settingsView: 'about' as const },
+  // N-12.1: the in-app user guide (frontend/public/guide/) opens in a
+  // dedicated help window instead of in-app routing.
+  { label: 'User guide', path: '/guide', icon: 'guide', guideWindow: true },
   { label: 'Notifications', path: '/notifications', icon: 'bell' },
   { label: 'Logs', path: '/logs', icon: 'document' },
 ]
@@ -26,7 +29,12 @@ function isActive(item: { path: string }) {
 }
 
 /** Settings views open in the dedicated settings window, not in-app. */
-function onNavClick(e: Event, item: { settingsView?: SettingsView }) {
+function onNavClick(e: Event, item: { settingsView?: SettingsView; guideWindow?: boolean }) {
+  if (item.guideWindow) {
+    e.preventDefault()
+    void openGuideWindow()
+    return
+  }
   if (item.settingsView) {
     e.preventDefault()
     void openSettingsWindow(item.settingsView)
@@ -129,6 +137,12 @@ onMounted(() => {
             <circle cx="10" cy="10" r="8" />
             <path d="M10 9v5" />
             <circle cx="10" cy="6" r="0.75" fill="currentColor" stroke="none" />
+          </svg>
+
+          <!-- User guide: Open book -->
+          <svg v-else-if="item.icon === 'guide'" class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M10 4C7.5 2.6 4.5 2.6 2.5 3.5v11.8c2-.9 5-.9 7.5.5 2.5-1.4 5.5-1.4 7.5-.5V3.5C15.5 2.6 12.5 2.6 10 4z" />
+            <path d="M10 4v11.8" />
           </svg>
 
           <!-- Notifications: Bell -->

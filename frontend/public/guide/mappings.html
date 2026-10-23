@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mappings and variants — Nisaba user guide</title>
+<link rel="stylesheet" href="guide.css">
+</head>
+<body>
+<div class="guide-shell">
+
+<nav class="guide-topnav" aria-label="Guide navigation">
+  <a class="home" href="index.html">Nisaba user guide</a>
+  <span class="sep">›</span><a href="setup.html">Setup</a>
+  <span class="sep">›</span><a href="credentials.html">Credentials</a>
+  <span class="sep">›</span><a href="mappings.html">Mappings</a>
+  <span class="sep">›</span><a href="sync.html">Sync</a>
+  <span class="sep">›</span><a href="backups.html">Backups</a>
+  <span class="sep">›</span><a href="troubleshooting.html">Troubleshooting</a>
+</nav>
+
+<h1>Mappings and variants</h1>
+
+<h2>The catalog model</h2>
+<p>Nisaba keeps one canonical catalog per company:</p>
+<ul>
+  <li><strong>Products</strong> — your master records: SKU, title, description, images, and the canonical quantity.</li>
+  <li><strong>Listings</strong> — the per-platform copies of a product (an eBay listing, an Amazon offer, a Squarespace product, an XMR Bazaar post). A listing points back to its product.</li>
+  <li><strong>Variants</strong> — size/color/style children of a product (e.g. "T-shirt / Red / L"). Each variant has its own attributes and quantity, and each variant can have its own listings per platform.</li>
+</ul>
+
+<h2>How mapping works</h2>
+<ol class="steps">
+  <li>
+    <strong>Automatic matching on import.</strong> When a platform's listings are
+    first pulled in, Nisaba tries to match each listing to an existing product —
+    by SKU first, then by title similarity. Matches become links; anything
+    unmatched becomes a new product (or a new variant under an existing product
+    when the platform reports parent/child relationships).
+  </li>
+  <li>
+    <strong>Review the links.</strong> Open a product and check its
+    <em>Listings</em> tab. If a listing landed on the wrong product, unlink it
+    and link the right one — the link is what tells sync "these two are the
+    same thing".
+  </li>
+  <li>
+    <strong>Keep one link per platform per variant.</strong> A variant should
+    have at most one listing on each platform. Two eBay listings linked to the
+    same variant will fight over the quantity on every sync.
+  </li>
+</ol>
+
+<h2>Variants across platforms</h2>
+<p>
+  Platforms describe variants differently — eBay uses item specifics, Amazon
+  uses variation themes, Squarespace uses product variants. Nisaba normalizes
+  these into <strong>variant attributes</strong> (key/value pairs like
+  <code>color=Red</code>, <code>size=L</code>) on its own variant records.
+</p>
+<ul>
+  <li>Sync snapshots are tracked per <strong>(product, platform, variant)</strong>,
+    so a sale of "Red / L" on eBay changes only that variant's quantity, not the
+    whole product family.</li>
+  <li>If a platform's variant structure doesn't line up with yours (e.g. the
+    platform merged two sizes into one listing), fix the mapping on the product
+    rather than editing quantities — quantity edits get overwritten by the next
+    sync.</li>
+  <li>Adding a brand-new variant on one platform and linking it into the family
+    propagates it as a new listing to the other enabled platforms on the next
+    sync that creates listings.</li>
+</ul>
+
+<div class="callout tip">
+  <p class="title">Map first, sync second</p>
+  <p>
+    The single most common source of "sync did something weird" is a wrong or
+    missing mapping. Before your first real sync cycle, run a
+    <a href="sync.html">dry run</a> and scan it for listings pushing changes to
+    products you didn't expect — that's a mapping to fix, not a sync bug.
+  </p>
+</div>
+
+<footer class="guide-footer">
+  <a href="index.html">← Guide home</a>
+  <a href="sync.html">Next: What sync does (and doesn't do) →</a>
+</footer>
+
+</div>
+</body>
+</html>

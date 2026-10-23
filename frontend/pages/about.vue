@@ -18,6 +18,16 @@ onMounted(async () => {
   }
 })
 
+// N-12.1: the in-app user guide ships as static HTML in
+// frontend/public/guide/ and opens in a dedicated help window.
+async function handleOpenGuide() {
+  try {
+    await openGuideWindow()
+  } catch (e: any) {
+    notify({ type: 'error', title: 'Could not open the user guide', message: String(e), source: 'about' })
+  }
+}
+
 async function handleExportDiagnostics() {
   exporting.value = true
   lastResult.value = ''
@@ -46,6 +56,22 @@ async function handleExportDiagnostics() {
           <dd class="text-foreground font-mono">{{ appVersion || '…' }}</dd>
         </div>
       </dl>
+    </section>
+
+    <section class="rounded-xl border border-white/10 bg-white/[0.03] p-6">
+      <h2 class="text-lg font-semibold text-foreground">User guide</h2>
+      <p class="mt-2 text-sm text-muted/70 leading-relaxed">
+        The in-app guide covers setup, each platform's credentials, mappings
+        and variants, what sync does and does not do, backups, troubleshooting,
+        and the eBay account-deletion exemption walkthrough. It opens in its
+        own window so you can keep working.
+      </p>
+      <button
+        class="mt-5 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 transition-colors"
+        @click="handleOpenGuide"
+      >
+        Open user guide
+      </button>
     </section>
 
     <section class="rounded-xl border border-white/10 bg-white/[0.03] p-6">
