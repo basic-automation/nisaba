@@ -6,6 +6,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod export_import;
 pub mod images;
+pub mod licenses;
 pub mod listings;
 pub mod logs;
 pub mod photos;

@@ -5,6 +5,8 @@ edition.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# N-12.3: build.rs slims cargo-about's raw JSON into the bundled notices file.
+serde_json = { workspace = true }
 
 [dependencies]
 nisaba-core = { workspace = true }

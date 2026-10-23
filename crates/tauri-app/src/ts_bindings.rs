@@ -40,6 +40,7 @@ fn build_bindings() -> String {
          //   SyncEngineEvent          — crates/core/src/sync_engine.rs\n\
          //   MergeSummary             — crates/p2p/src/types.rs\n\
          //   SyncStatusPayload        — crates/tauri-app/src/commands/sync.rs\n\
+         //   ThirdPartyLicenses et al — crates/tauri-app/src/commands/licenses.rs\n\
          \n",
     );
     for section in [
@@ -48,6 +49,14 @@ fn build_bindings() -> String {
         render::<nisaba_core::sync_engine::SyncEngineEvent>(),
         render::<nisaba_p2p::types::MergeSummary>(),
         render::<crate::commands::sync::SyncStatusPayload>(),
+        render::<crate::commands::licenses::ThirdPartyLicenses>(),
+        render::<crate::commands::licenses::RustLicenses>(),
+        render::<crate::commands::licenses::NpmLicenses>(),
+        render::<crate::commands::licenses::ThirdPartyDependency>(),
+        render::<crate::commands::licenses::DependencyRef>(),
+        render::<crate::commands::licenses::ThirdPartyLicenseText>(),
+        render::<crate::commands::licenses::NpmPackage>(),
+        render::<crate::commands::licenses::NpmLicenseText>(),
     ] {
         out.push_str(&section);
         out.push('\n');

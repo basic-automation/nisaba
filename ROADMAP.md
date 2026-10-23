@@ -181,7 +181,7 @@ are referenced rather than repeated.
 
 ### Gate: legal and platform terms
 
-- [ ] Third-party license notices bundled in the app: an *About → Licenses* view generated
+- [x] Third-party license notices bundled in the app: an *About → Licenses* view generated
       by `cargo-about` (Rust) and a license checker (npm). Most dependencies are MIT or
       Apache-2.0, and both require shipping their notices with binaries.
 - [ ] Each platform's API terms reviewed against what Nisaba does: eBay's API License

@@ -7,6 +7,14 @@ import type {
   SyncEngineEvent,
   MergeSummary,
   SyncStatusPayload,
+  ThirdPartyLicenses,
+  RustLicenses,
+  NpmLicenses,
+  ThirdPartyDependency,
+  DependencyRef,
+  ThirdPartyLicenseText,
+  NpmPackage,
+  NpmLicenseText,
 } from './generated'
 
 export type {
@@ -15,6 +23,14 @@ export type {
   SyncEngineEvent,
   MergeSummary,
   SyncStatusPayload,
+  ThirdPartyLicenses,
+  RustLicenses,
+  NpmLicenses,
+  ThirdPartyDependency,
+  DependencyRef,
+  ThirdPartyLicenseText,
+  NpmPackage,
+  NpmLicenseText,
 }
 
 export interface Product {

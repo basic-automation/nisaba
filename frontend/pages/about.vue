@@ -75,6 +75,23 @@ async function handleExportDiagnostics() {
     </section>
 
     <section class="rounded-xl border border-white/10 bg-white/[0.03] p-6">
+      <h2 class="text-lg font-semibold text-foreground">Third-party licenses</h2>
+      <p class="mt-2 text-sm text-muted/70 leading-relaxed">
+        Nisaba is built on open-source software. The full list of Rust and npm
+        dependencies and their license notices — generated at build time by
+        <span class="font-mono">cargo-about</span> and
+        <span class="font-mono">license-checker</span>, and bundled with the
+        app — lives in the Licenses view.
+      </p>
+      <button
+        class="mt-5 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 transition-colors"
+        @click="navigateTo('/about/licenses')"
+      >
+        View licenses
+      </button>
+    </section>
+
+    <section class="rounded-xl border border-white/10 bg-white/[0.03] p-6">
       <h2 class="text-lg font-semibold text-foreground">Diagnostics</h2>
       <p class="mt-2 text-sm text-muted/70 leading-relaxed">
         Nisaba sends no telemetry and has no crash-reporting service. If you hit

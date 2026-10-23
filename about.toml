@@ -1,0 +1,40 @@
+# N-12.3: cargo-about configuration for the About -> Licenses view.
+#
+# `scripts/generate-licenses.mjs` runs
+#     cargo-about generate --format json --config about.toml
+# at the workspace root and slims the raw JSON into
+# `crates/tauri-app/resources/licenses/rust-licenses.json`, which is bundled in
+# the app resources and served to the frontend by the `get_third_party_licenses`
+# Tauri command.
+#
+# The list below is the set of SPDX license ids present in the workspace
+# dependency closure (Cargo.lock), enumerated 2026-10-23. `cargo-about
+# generate` does not fail on licenses missing from this list; the list
+# documents what the legal gate reviewed. Note the copyleft entries:
+#   - LGPL-3.0-only: equix, hashx (RandomX proof-of-work, via nisaba-xmrbazaar)
+#   - MPL-2.0: cssparser/selectors/dynasm stacks (HTML scraping, via nisaba-xmrbazaar)
+#   - LGPL-3.0-or-later OR MPL-2.0: priority-queue (MPL-2.0 alternative applies)
+# They are disclosed verbatim in the Licenses view; keep this list in sync when
+# dependencies change (the generate step warns on stderr about unknown ones).
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Apache-2.0 WITH LLVM-exception",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "Zlib",
+]
