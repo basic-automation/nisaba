@@ -84,6 +84,7 @@ commands.allow = [
   "get_vendor_sync_status",
   "get_xmrbazaar_monero_address",
   "preview_import_data",
+  "preview_sync",
   "import_vendor_listings",
   "import_vendor_plugin",
   "install_vendor_plugin",

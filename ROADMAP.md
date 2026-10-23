@@ -915,9 +915,12 @@ is used only when no platform reports.
       quantity, history, sync events, the XMR order-dedup table and the vendor-sync
       callback), so a preview cannot make the following real cycle skip the change it
       previewed, and reports each planned change as `SyncEngineEvent::DryRunChange`.
-- [ ] Surface dry-run in the UI and the headless daemon — the engine supports it but nothing
+- [x] Surface dry-run in the UI and the headless daemon — the engine supports it but nothing
       offers it to a user yet. A "preview this sync" button is the safest possible way to
-      exercise the adapters against a real account.
+      exercise the adapters against a real account. (N-11.6, 2026-10-23: the dashboard has a
+      "Preview sync" button that runs a one-shot dry-run cycle via `SyncCommand::PreviewSync`
+      and shows each planned `DryRunChange`; the headless-daemon half was retired by N-10.3
+      when `crates/service` was deleted.)
 - [x] Partial-failure semantics — one platform down must not abort the cycle or corrupt
       `PlatformSnapshot` state. Policy chosen: **never push to a platform that could not
       be read this cycle** — numeric pushes require a successful poll returning that
@@ -927,7 +930,10 @@ is used only when no platform reports.
       no-push behaviour, with stock-mode and per-listing successors alongside it; the
       policy is documented on `SyncEngine::run_cycle` and in README's Sync cycle
       section.
-- [ ] Surface a per-cycle reconciliation report in the UI, not just `SyncEvent` rows
+- [x] Surface a per-cycle reconciliation report in the UI, not just `SyncEvent` rows
+      (N-11.6, 2026-10-23: the dashboard shows a "Last sync cycle" card built from the live
+      event stream — products synced, changes pushed, per-platform change counts, platform
+      errors and unmapped-listing detections.)
 - [ ] Oversell protection: a configurable reserve buffer so concurrent sales across platforms
       cannot drive true stock negative. Moved to Phase 5, Sync v2 Step 3 (escrow), where a
       reserve is a share of stock rights held back from every peer.

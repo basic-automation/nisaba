@@ -52,6 +52,16 @@ pub enum SyncEngineEvent {
         current_quantity: i64,
         planned_quantity: i64,
     },
+    /// A dry-run preview cycle started (triggered by the "Preview sync" UI
+    /// action via [`SyncCommand::PreviewSync`]). Brackets the
+    /// [`SyncEngineEvent::DryRunChange`] events that follow, so the UI can
+    /// collect exactly this preview's planned changes.
+    DryRunStarted { cycle_id: String },
+    /// A dry-run preview cycle finished.
+    DryRunComplete {
+        cycle_id: String,
+        planned_changes: usize,
+    },
 }
 
 /// Commands sent from the TUI to the sync engine.
@@ -59,6 +69,13 @@ pub enum SyncEngineEvent {
 pub enum SyncCommand {
     /// Trigger an immediate sync cycle.
     SyncNow,
+    /// Run one dry-run cycle (`SyncEngine::dry_run()`): resolve everything
+    /// as normal but change nothing, reporting each planned change as
+    /// [`SyncEngineEvent::DryRunChange`] bracketed by
+    /// [`SyncEngineEvent::DryRunStarted`] /
+    /// [`SyncEngineEvent::DryRunComplete`]. This is the "Preview sync" UI
+    /// action — the safest way to exercise adapters against a real account.
+    PreviewSync,
     /// Pause the sync scheduler.
     Pause,
     /// Resume the sync scheduler.
@@ -149,6 +166,23 @@ impl SyncEngine {
         self.dry_run
     }
 
+    /// Build a one-shot dry-run engine sharing this engine's database,
+    /// adapter handles and event channel. Used to serve
+    /// [`SyncCommand::PreviewSync`]: the preview resolves a full cycle and
+    /// reports [`SyncEngineEvent::DryRunChange`] events without writing to
+    /// any platform or the local database. No vendor-sync callback is
+    /// attached — a preview never triggers plugin runs.
+    fn preview_engine(&self) -> SyncEngine {
+        SyncEngine {
+            db: Arc::clone(&self.db),
+            adapters: Arc::clone(&self.adapters),
+            event_tx: self.event_tx.clone(),
+            max_retries: self.max_retries,
+            vendor_sync_fn: None,
+            dry_run: true,
+        }
+    }
+
     /// Attach a callback to run vendor plugin syncs after each platform cycle.
     /// The callback is spawned as an independent task, never awaited inline.
     pub fn with_vendor_sync(mut self, f: VendorSyncFn) -> Self {
@@ -211,8 +245,29 @@ impl SyncEngine {
         let adapters: HashMap<Platform, Arc<dyn PlatformAdapter>> =
             self.adapters.read().await.clone();
 
+        if self.dry_run {
+            let _ = self
+                .event_tx
+                .send(SyncEngineEvent::DryRunStarted {
+                    cycle_id: cycle_id.clone(),
+                })
+                .await;
+        }
+
         if adapters.is_empty() {
             info!("No platforms enabled, skipping sync cycle");
+            if self.dry_run {
+                // Keep the preview bracket balanced even when there is
+                // nothing to resolve, so the UI always sees DryRunComplete
+                // after DryRunStarted.
+                let _ = self
+                    .event_tx
+                    .send(SyncEngineEvent::DryRunComplete {
+                        cycle_id,
+                        planned_changes: 0,
+                    })
+                    .await;
+            }
             return Ok((0, 0));
         }
 
@@ -958,11 +1013,23 @@ impl SyncEngine {
         let _ = self
             .event_tx
             .send(SyncEngineEvent::CycleComplete {
-                cycle_id,
+                cycle_id: cycle_id.clone(),
                 products_synced,
                 changes_pushed,
             })
             .await;
+
+        if self.dry_run {
+            // Close the preview bracket opened by DryRunStarted: for a dry
+            // run, `changes_pushed` counts the changes it would have made.
+            let _ = self
+                .event_tx
+                .send(SyncEngineEvent::DryRunComplete {
+                    cycle_id,
+                    planned_changes: changes_pushed,
+                })
+                .await;
+        }
 
         Ok((products_synced, changes_pushed))
     }
@@ -1123,6 +1190,18 @@ impl SyncEngine {
                                 error!(error = %e, "Manual sync cycle failed");
                             }
                             self.spawn_vendor_sync(&mut vendor_task);
+                        }
+                        Some(SyncCommand::PreviewSync) => {
+                            // The command loop is strictly serial: a preview
+                            // never overlaps a real cycle, and the real cycle
+                            // never overlaps a preview. No vendor sync is
+                            // spawned for a preview (spawn_vendor_sync is a
+                            // no-op for dry-run engines anyway).
+                            info!("Sync preview requested");
+                            let preview = self.preview_engine();
+                            if let Err(e) = preview.run_cycle().await {
+                                error!(error = %e, "Sync preview cycle failed");
+                            }
                         }
                         Some(SyncCommand::Pause) => {
                             info!("Sync paused");
@@ -2625,6 +2704,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dry_run_brackets_its_events_with_start_and_complete() {
+        // The UI collects a preview's planned changes from the live event
+        // stream, so the dry-run cycle must open with DryRunStarted and
+        // close with DryRunComplete carrying the same cycle id — even when
+        // the cycle plans nothing.
+        let harness = Harness::new(
+            vec![
+                FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)]),
+                FakeAdapter::new(Platform::Squarespace).with_quantities(&[("S-1", 7)]),
+            ],
+            0,
+        )
+        .await;
+        harness
+            .add_product(
+                "p1",
+                10,
+                &[(Platform::Ebay, "E-1"), (Platform::Squarespace, "S-1")],
+            )
+            .await;
+
+        let mut harness = harness.into_dry_run();
+        harness.engine.run_cycle().await.unwrap();
+
+        let events = harness.drain_events();
+        let (Some(first), Some(last)) = (events.first(), events.last()) else {
+            panic!("a dry-run cycle must emit at least the bracket events");
+        };
+        let (start_id, end_id, planned) = match (first, last) {
+            (
+                SyncEngineEvent::DryRunStarted { cycle_id: s },
+                SyncEngineEvent::DryRunComplete {
+                    cycle_id: e,
+                    planned_changes,
+                },
+            ) => (s, e, *planned_changes),
+            _ => panic!("dry-run events must be bracketed, got {first:?} .. {last:?}"),
+        };
+        assert_eq!(start_id, end_id, "bracket events must share the cycle id");
+        // The dry-run cycle still emits CycleComplete (it closes the shared
+        // cycle lifecycle) just before DryRunComplete closes the bracket.
+        let (Some(second_last), middle) =
+            (events.get(events.len() - 2), &events[1..events.len() - 2])
+        else {
+            panic!("a dry-run cycle must emit changes between the bracket events");
+        };
+        assert!(
+            matches!(second_last, SyncEngineEvent::CycleComplete { .. }),
+            "expected the dry-run cycle's CycleComplete before DryRunComplete, got {second_last:?}"
+        );
+        assert_eq!(
+            planned,
+            middle.len(),
+            "DryRunComplete must report the number of planned changes"
+        );
+        assert_eq!(
+            planned, 2,
+            "both platforms are out of step with the resolved 0"
+        );
+        assert!(
+            middle
+                .iter()
+                .all(|e| matches!(e, SyncEngineEvent::DryRunChange { .. })),
+            "only DryRunChange events may appear inside the bracket"
+        );
+    }
+
+    #[tokio::test]
     async fn a_dry_run_leaves_the_local_database_untouched() {
         // Just as important as not writing to a platform: if a dry run moved
         // the canonical quantity or the snapshots, the real cycle that follows
@@ -3137,6 +3284,82 @@ mod tests {
             .await
             .expect("reload did not apply the new 1s interval");
         assert!(matches!(next, Some(SyncEngineEvent::CycleComplete { .. })));
+
+        run_task.abort();
+    }
+
+    #[tokio::test]
+    async fn preview_sync_runs_a_dry_run_cycle_and_changes_nothing() {
+        // `SyncCommand::PreviewSync` is the "Preview sync" UI action: the
+        // engine must resolve a full dry-run cycle (bracketed
+        // DryRunStarted/DryRunComplete events with the planned changes in
+        // between) without pushing to any platform or writing locally.
+        let harness = Harness::new(
+            vec![FakeAdapter::new(Platform::Ebay).with_quantities(&[("E-1", 3)])],
+            0,
+        )
+        .await;
+        harness
+            .add_product("p1", 10, &[(Platform::Ebay, "E-1")])
+            .await;
+        let Harness {
+            engine,
+            mut events,
+            adapters,
+            ..
+        } = harness;
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let run_task = tokio::spawn(engine.run(cmd_rx, 3600));
+
+        // Drain the startup tick's real cycle, whatever it resolved to, so
+        // the preview below is the only cycle left in the event stream.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no CycleComplete from the startup cycle");
+        let mut event = first;
+        while !matches!(event, Some(SyncEngineEvent::CycleComplete { .. })) {
+            event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("startup cycle never completed");
+        }
+        let pushes_before = adapters.iter().map(|a| a.pushes().len()).sum::<usize>();
+
+        cmd_tx.send(SyncCommand::PreviewSync).await.unwrap();
+
+        // Collect the preview's bracketed events.
+        let mut planned = Vec::new();
+        let complete = loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("preview cycle never finished");
+            match event {
+                Some(SyncEngineEvent::DryRunStarted { .. }) => {}
+                Some(SyncEngineEvent::DryRunChange {
+                    platform,
+                    current_quantity,
+                    planned_quantity,
+                    ..
+                }) => planned.push((platform, current_quantity, planned_quantity)),
+                Some(SyncEngineEvent::DryRunComplete {
+                    planned_changes, ..
+                }) => break planned_changes,
+                // The dry-run cycle still emits CycleComplete (it closes
+                // the shared cycle lifecycle); it is not part of the
+                // preview bracket.
+                Some(SyncEngineEvent::CycleComplete { .. }) => {}
+                other => panic!("unexpected event during preview: {other:?}"),
+            }
+        };
+        assert_eq!(
+            complete,
+            planned.len(),
+            "DryRunComplete must report the number of planned changes"
+        );
+        assert_eq!(
+            adapters.iter().map(|a| a.pushes().len()).sum::<usize>(),
+            pushes_before,
+            "the preview must not push to any platform"
+        );
 
         run_task.abort();
     }

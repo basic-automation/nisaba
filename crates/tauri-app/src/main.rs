@@ -293,6 +293,7 @@ fn main() {
             commands::products::delete_mapping,
             // Sync
             commands::sync::trigger_sync,
+            commands::sync::preview_sync,
             commands::sync::pause_sync,
             commands::sync::resume_sync,
             commands::sync::get_sync_status,
