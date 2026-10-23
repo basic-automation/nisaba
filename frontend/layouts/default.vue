@@ -14,6 +14,7 @@ const navItems: { label: string; path: string; icon: string; settingsView?: Sett
   // allowed to invoke secret-returning commands) — opens on click instead of
   // in-app routing.
   { label: 'Config', path: '/config', icon: 'gear', settingsView: 'config' as const },
+  { label: 'About', path: '/about', icon: 'info', settingsView: 'about' as const },
   { label: 'Notifications', path: '/notifications', icon: 'bell' },
   { label: 'Logs', path: '/logs', icon: 'document' },
 ]
@@ -121,6 +122,13 @@ onMounted(() => {
           <svg v-else-if="item.icon === 'gear'" class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="10" cy="10" r="3" />
             <path d="M10 1.5v2M10 16.5v2M18.5 10h-2M3.5 10h-2M16 4l-1.4 1.4M5.4 14.6L4 16M16 16l-1.4-1.4M5.4 5.4L4 4" />
+          </svg>
+
+          <!-- About: Info circle -->
+          <svg v-else-if="item.icon === 'info'" class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="10" cy="10" r="8" />
+            <path d="M10 9v5" />
+            <circle cx="10" cy="6" r="0.75" fill="currentColor" stroke="none" />
           </svg>
 
           <!-- Notifications: Bell -->

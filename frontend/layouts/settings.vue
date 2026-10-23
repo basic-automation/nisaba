@@ -7,6 +7,7 @@ const route = useRoute()
 const tabs = [
   { label: 'Configuration', path: '/config' },
   { label: 'Company', path: '/company' },
+  { label: 'About', path: '/about' },
 ]
 
 // The platform-setup wizard is hosted here for existing companies; it gets no
