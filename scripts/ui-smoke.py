@@ -68,32 +68,6 @@ def run_js(session, script):
     return webdriver("POST", f"/session/{session}/execute/sync", {"script": script, "args": []})
 
 
-def pin_main_window(session):
-    """Pin the WebDriver session to the main app window.
-
-    N-11.1 moved the setup wizard into a dedicated settings window ("Nisaba —
-    Platform Setup"), so the main window ("Nisaba - Inventory Sync") no longer
-    navigates to /setup on launch and the session can no longer assume which
-    window it drives. Re-pin before each drive section in case the session
-    followed focus elsewhere.
-    """
-
-    def pinned():
-        try:
-            handles = webdriver("GET", f"/session/{session}/window/handles")
-        except RuntimeError:
-            # Driver doesn't expose window handles; trust the current window
-            # when its title already identifies the main window.
-            return "Inventory Sync" in run_js(session, "return document.title || ''")
-        for handle in handles:
-            webdriver("POST", f"/session/{session}/window", {"handle": handle})
-            if "Inventory Sync" in run_js(session, "return document.title || ''"):
-                return True
-        return False
-
-    wait_for("the main window", pinned)
-
-
 def wait_for(what, predicate, timeout=60):
     deadline = time.monotonic() + timeout
     last = None
@@ -139,10 +113,10 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
             timeout=120,
         )["sessionId"]
 
-        # The main window no longer navigates to /setup on launch (the wizard lives
-        # in the dedicated settings window since N-11.1). Pin the session to the
-        # main window, wait for the Nuxt app to mount, then drive its router.
-        pin_main_window(session)
+        # The main window no longer navigates to /setup on launch (the setup wizard
+        # moved to the dedicated settings window). The WebDriver session stays on
+        # the main window, so wait for the Nuxt app to mount there, then drive
+        # its router directly.
         wait_for(
             "the app to mount",
             lambda: run_js(
@@ -210,7 +184,6 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
         # out-listings.png, out-vendors.png and out-inventory.png next to the
         # per-marketplace-tab shots.
         if screenshot:
-            pin_main_window(session)
             stem, ext = os.path.splitext(screenshot)
             router = (
                 "document.querySelector('#__nuxt').__vue_app__"
