@@ -20,9 +20,9 @@ Wayland or X11 session, and unprivileged user namespaces. Stdlib only.
 """
 
 import argparse
-import base64
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -86,10 +86,32 @@ def wait_for_port(port, timeout=30):
     wait_for(f"port {port}", lambda: socket.socket().connect_ex(("127.0.0.1", port)) == 0, timeout)
 
 
-def smoke(app, fixture, workdir, screenshot):
+def x11_screenshot(path):
+    """Capture the main app window via X11, bypassing WebDriver screenshots.
+
+    WebKitWebDriver's screenshot endpoint hangs in this environment, and its
+    window-switch call drops the connection outright, so capture pixels
+    directly: find the main window in the X tree by its exact native title
+    ("Nisaba - Inventory Sync"; the settings window is "Nisaba — Platform
+    Setup"), raise it above the wizard window (which opens centered on top
+    at startup), and grab it with ImageMagick. Fails loudly (never hangs)
+    when the window or the tools are missing.
+    """
+    tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
+    m = re.search(r'(0x[0-9a-f]+)\s+"Nisaba - Inventory Sync"', tree.stdout)
+    if not m:
+        raise RuntimeError(f"could not find main Nisaba window in:\n{tree.stdout}\n{tree.stderr}")
+    win_id = m.group(1)
+    subprocess.run(["xdotool", "windowraise", win_id], check=True)
+    time.sleep(0.5)  # let the restack take effect before grabbing pixels
+    subprocess.run(["import", "-window", win_id, path], check=True)
+
+
+def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
     # Loopback is down in a fresh namespace.
     subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
-    out = subprocess.run([fixture, workdir], check=True, capture_output=True, text=True)
+    fixture_args = [fixture, workdir] + (["--with-sample-catalog"] if seed_catalog else [])
+    out = subprocess.run(fixture_args, check=True, capture_output=True, text=True)
     print(f"fixture: {out.stdout.strip()}")
 
     # WebKitGTK's DMA-BUF renderer dies with "Error 71 (Protocol error) dispatching to
@@ -112,9 +134,18 @@ def smoke(app, fixture, workdir, screenshot):
             timeout=120,
         )["sessionId"]
 
-        # With no platforms configured the app redirects to /setup once the company is
-        # ready; after that, route through Nuxt's own router.
-        wait_for("the setup redirect", lambda: "/setup" in run_js(session, "return location.pathname"))
+        # The main window no longer navigates to /setup on launch (the setup wizard
+        # moved to the dedicated settings window). The WebDriver session stays on
+        # the main window, so wait for the Nuxt app to mount there, then drive
+        # its router directly.
+        wait_for(
+            "the app to mount",
+            lambda: run_js(
+                session,
+                "return !!(document.querySelector('#__nuxt') && "
+                "document.querySelector('#__nuxt').__vue_app__)",
+            ),
+        )
         run_js(
             session,
             "document.querySelector('#__nuxt').__vue_app__"
@@ -163,10 +194,51 @@ def smoke(app, fixture, workdir, screenshot):
             if screenshot:
                 stem, ext = os.path.splitext(screenshot)
                 path = f"{stem}-{tab.lower()}{ext or '.png'}"
-                png = webdriver("GET", f"/session/{session}/screenshot")
-                with open(path, "wb") as f:
-                    f.write(base64.b64decode(png))
+                x11_screenshot(path)
                 print(f"screenshot: {path}")
+
+        # N-12.5: README screenshots of the main views, captured from the real app
+        # running on the fixture install (so they never show real customer data).
+        # With --screenshot out.png this saves out-dashboard.png, out-products.png,
+        # out-listings.png, out-vendors.png and out-inventory.png next to the
+        # per-marketplace-tab shots.
+        if screenshot:
+            stem, ext = os.path.splitext(screenshot)
+            router = (
+                "document.querySelector('#__nuxt').__vue_app__"
+                ".config.globalProperties.$router"
+            )
+            for route, shot in [
+                ("/", "dashboard"),
+                ("/products", "products"),
+                ("/listings", "listings"),
+                ("/vendors", "vendors"),
+                ("/inventory", "inventory"),
+            ]:
+                run_js(session, f"{router}.push({json.dumps(route)})")
+                wait_for(
+                    f"the {shot} view",
+                    lambda route=route: run_js(session, "return location.pathname") == route,
+                )
+                time.sleep(2)  # let the view finish rendering
+                path = f"{stem}-{shot}{ext or '.png'}"
+                x11_screenshot(path)
+                print(f"screenshot: {path}")
+
+        # The views loop above left the app on /inventory; the time-limit check
+        # needs the marketplace Installed tab, so navigate back first. (Without
+        # --screenshot the app is already there; the push and click are no-ops.)
+        back_router = (
+            "document.querySelector('#__nuxt').__vue_app__"
+            ".config.globalProperties.$router"
+        )
+        run_js(session, f"{back_router}.push('/marketplace')")
+        wait_for("the marketplace again", lambda: "Installed" in run_js(session, "return document.body.innerText"))
+        run_js(
+            session,
+            "const b = [...document.querySelectorAll('button')]"
+            ".find(e => e.textContent.trim() === 'Installed'); if (b) b.click();",
+        )
 
         # The installed plugin's time limit: the fixture's 2 h renders, and changing it
         # through the <select> round-trips through set_vendor_plugin_timeout.
@@ -221,7 +293,12 @@ def main():
     p.add_argument("--target-dir", required=True, help="cargo target directory")
     p.add_argument("--profile", default="debug")
     p.add_argument("--workdir", help="where to seed the throwaway install (default: a temp dir)")
-    p.add_argument("--screenshot", help="save a PNG per marketplace tab, e.g. out.png -> out-available.png")
+    p.add_argument("--screenshot", help="save a PNG per marketplace tab plus one per main view "
+                     "(dashboard, products, listings, vendors, inventory), e.g. out.png -> "
+                     "out-available.png, out-dashboard.png, ...")
+    p.add_argument("--seed-sample-catalog", action="store_true",
+                   help="seed the fixture install with a small fictional product catalog "
+                        "(for README screenshots; never real customer data)")
     args = p.parse_args()
 
     if os.environ.get(IN_NETNS) != "1":
@@ -242,7 +319,8 @@ def main():
     workdir = args.workdir or tempfile.mkdtemp(prefix="nisaba-ui-smoke-")
     if args.screenshot:
         os.makedirs(os.path.dirname(os.path.abspath(args.screenshot)), exist_ok=True)
-    smoke(app, fixture, workdir, args.screenshot and os.path.abspath(args.screenshot))
+    smoke(app, fixture, workdir, args.screenshot and os.path.abspath(args.screenshot),
+          seed_catalog=args.seed_sample_catalog)
 
 
 if __name__ == "__main__":

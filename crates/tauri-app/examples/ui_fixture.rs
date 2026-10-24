@@ -7,19 +7,25 @@
 //! The app picks up `./config.toml` from its working directory before anything else, so
 //! launching it from `<dir>` never touches a real install. `scripts/ui-smoke.py` does
 //! that inside a network namespace, so nothing it starts can reach the network either.
+//!
+//! `--with-sample-catalog` additionally seeds a small fictional product catalog (used
+//! for README screenshots; never real customer data).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use nisaba_core::db::Db;
-use nisaba_core::types::VendorPluginRow;
+use nisaba_core::types::{Product, ProductVariant, VendorPluginRow};
 
 const COMPANY_ID: &str = "ui-fixture-company";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let dir = std::env::args()
-        .nth(1)
-        .expect("usage: ui_fixture <empty-dir>");
+    let mut args = std::env::args().skip(1);
+    let dir = args
+        .next()
+        .expect("usage: ui_fixture <empty-dir> [--with-sample-catalog]");
+    let with_catalog = args.any(|a| a == "--with-sample-catalog");
     let dir = Path::new(&dir);
     std::fs::create_dir_all(dir.join("companies")).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -131,5 +137,104 @@ enabled = false
     db.install_plugin("offline").await.unwrap();
     db.set_plugin_timeout("offline", Some(120)).await.unwrap();
 
+    if with_catalog {
+        seed_sample_catalog(&db).await;
+    }
+
     println!("{}", dir.display());
+}
+
+/// A small fictional catalog so README screenshots show a populated app.
+/// Fictional sample data only — never real customer data.
+async fn seed_sample_catalog(db: &Db) {
+    const CTS: &str = "2026-10-01 12:00:00";
+    let products = [
+        (
+            "p-mug",
+            "MUG-AURORA-2PK",
+            "Aurora Ceramic Mug — Set of 2",
+            34,
+            Some(5),
+            false,
+        ),
+        (
+            "p-bottle",
+            "BTL-TRAIL-750",
+            "Trailhead Insulated Bottle 750ml",
+            58,
+            Some(10),
+            false,
+        ),
+        (
+            "p-tote",
+            "TOTE-HERITAGE",
+            "Heritage Canvas Tote",
+            3,
+            Some(5),
+            false,
+        ),
+        (
+            "p-organizer",
+            "DESK-WALNUT-ORG",
+            "Walnut Desk Organizer",
+            21,
+            Some(5),
+            false,
+        ),
+        (
+            "p-candle",
+            "CNDL-BEESWAX-AMB",
+            "Beeswax Candle — Amber",
+            0,
+            Some(4),
+            false,
+        ),
+        (
+            "p-pillow",
+            "PLW-LINEN",
+            "Linen Throw Pillow Cover",
+            26,
+            Some(5),
+            true,
+        ),
+    ];
+    for (id, sku, name, qty, threshold, variants) in products {
+        db.insert_product(&Product {
+            id: id.to_string(),
+            canonical_sku: sku.to_string(),
+            name: name.to_string(),
+            quantity: qty,
+            low_stock_threshold: threshold,
+            is_tracked: true,
+            has_variants: variants,
+            created_at: CTS.to_string(),
+            updated_at: CTS.to_string(),
+        })
+        .await
+        .unwrap();
+    }
+    for (i, (color, qty)) in [("Ivory", 12), ("Sage", 9), ("Terracotta", 5)]
+        .iter()
+        .enumerate()
+    {
+        let mut attributes = HashMap::new();
+        attributes.insert("Color".to_string(), color.to_string());
+        db.insert_variant(&ProductVariant {
+            id: format!("v-pillow-{i}"),
+            product_id: "p-pillow".to_string(),
+            sku: format!("PLW-LINEN-{}", color.to_uppercase()),
+            name: color.to_string(),
+            attributes,
+            quantity: *qty,
+            on_hand_quantity: *qty,
+            image_url: None,
+            sort_order: i as i32,
+            source_plugin_id: None,
+            source_vendor_item_id: None,
+            created_at: CTS.to_string(),
+            updated_at: CTS.to_string(),
+        })
+        .await
+        .unwrap();
+    }
 }

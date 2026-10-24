@@ -175,7 +175,9 @@ are referenced rather than repeated.
       troubleshooting/ebay-deletion pages), opened from the app in a dedicated
       help window via the sidebar "User guide" item and Settings → About.]
 - [ ] The plugin author reference and published types (Phase 3, *Plugin API v1*).
-- [ ] README screenshots (Phase 0).
+- [x] README screenshots (Phase 0). [N-12.5: captured from the real app via the UI
+      smoke harness (`scripts/ui-smoke.py --screenshot ... --seed-sample-catalog`, which
+      also drives the 5 main views); CI commits the PNGs to `docs/images/` on the PR.]
 - [ ] Release notes on every GitHub release, generated from PR titles. (This file stays the
       plan; the release notes are the user-facing record.)
 
@@ -277,7 +279,7 @@ are referenced rather than repeated.
       `beforeBuildCommand` (only `cargo tauri build` does), so `tauri::generate_context!()`
       panicked on the missing `frontendDist` (`frontend/.output/public`, which is
       gitignored). The Rust job now runs `npm ci && npm run generate` before cargo.
-- [ ] Screenshots in the README — the UI is the product and there is currently nothing to look at
+- [x] Screenshots in the README — the UI is the product and there is currently nothing to look at [N-12.5: `README.md` embeds 5 view screenshots captured from the real app on a fixture install, committed to `docs/images/` by the CI UI smoke job.]
 - [x] README accuracy. It said "Node.js 18+" (`README.md:63`), but Nuxt 3.21 and Vite 7
       need `^20.19.0 || >=22.12.0`; add an `engines` field to `frontend/package.json` so npm
       enforces the requirement. It says analytics are "charted in the UI", but there are no
