@@ -171,6 +171,18 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
                     failures.append(name)
 
             if screenshot:
+                # DEBUG (temporary): capture window state at the moment the
+                # screenshot endpoint hangs, to diagnose CI screenshot timeouts.
+                print(
+                    "DEBUG current window:",
+                    run_js(session, "return document.title + ' | ' + location.href"),
+                    flush=True,
+                )
+                try:
+                    hs = webdriver("GET", f"/session/{session}/window/handles")
+                    print(f"DEBUG window handles: {len(hs)}", flush=True)
+                except Exception as e:
+                    print(f"DEBUG handles error: {e!r}", flush=True)
                 stem, ext = os.path.splitext(screenshot)
                 path = f"{stem}-{tab.lower()}{ext or '.png'}"
                 png = webdriver("GET", f"/session/{session}/screenshot")
