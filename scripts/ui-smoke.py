@@ -20,9 +20,9 @@ Wayland or X11 session, and unprivileged user namespaces. Stdlib only.
 """
 
 import argparse
-import base64
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -84,6 +84,21 @@ def wait_for(what, predicate, timeout=60):
 
 def wait_for_port(port, timeout=30):
     wait_for(f"port {port}", lambda: socket.socket().connect_ex(("127.0.0.1", port)) == 0, timeout)
+
+
+def x11_screenshot(path):
+    """Capture the app window via X11, bypassing WebDriver screenshots.
+
+    WebKitWebDriver's screenshot endpoint hangs in this environment even with
+    a single window open, so capture the window's pixels directly: find the
+    window titled "Nisaba" and grab it with ImageMagick. Fails loudly (never
+    hangs) when the window or the tools are missing.
+    """
+    info = subprocess.run(["xwininfo", "-name", "Nisaba"], capture_output=True, text=True)
+    m = re.search(r"Window id: (0x[0-9a-f]+)", info.stdout)
+    if not m:
+        raise RuntimeError(f"could not find Nisaba window:\n{info.stdout}\n{info.stderr}")
+    subprocess.run(["import", "-window", m.group(1), path], check=True)
 
 
 def close_extra_windows(session):
@@ -206,9 +221,7 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
             if screenshot:
                 stem, ext = os.path.splitext(screenshot)
                 path = f"{stem}-{tab.lower()}{ext or '.png'}"
-                png = webdriver("GET", f"/session/{session}/screenshot")
-                with open(path, "wb") as f:
-                    f.write(base64.b64decode(png))
+                x11_screenshot(path)
                 print(f"screenshot: {path}")
 
         # N-12.5: README screenshots of the main views, captured from the real app
@@ -235,10 +248,8 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
                     lambda route=route: run_js(session, "return location.pathname") == route,
                 )
                 time.sleep(2)  # let the view finish rendering
-                png = webdriver("GET", f"/session/{session}/screenshot")
                 path = f"{stem}-{shot}{ext or '.png'}"
-                with open(path, "wb") as f:
-                    f.write(base64.b64decode(png))
+                x11_screenshot(path)
                 print(f"screenshot: {path}")
 
         # The installed plugin's time limit: the fixture's 2 h renders, and changing it
