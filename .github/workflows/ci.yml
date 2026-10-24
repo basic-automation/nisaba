@@ -112,7 +112,9 @@ jobs:
             build-essential \
             libssl-dev \
             webkit2gtk-driver \
-            xvfb
+            xvfb \
+            imagemagick \
+            x11-utils
 
       - uses: dtolnay/rust-toolchain@stable
 
