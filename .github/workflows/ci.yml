@@ -114,7 +114,8 @@ jobs:
             webkit2gtk-driver \
             xvfb \
             imagemagick \
-            x11-utils
+            x11-utils \
+            xdotool
 
       - uses: dtolnay/rust-toolchain@stable
 
