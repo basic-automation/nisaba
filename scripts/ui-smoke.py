@@ -86,6 +86,36 @@ def wait_for_port(port, timeout=30):
     wait_for(f"port {port}", lambda: socket.socket().connect_ex(("127.0.0.1", port)) == 0, timeout)
 
 
+def close_extra_windows(session):
+    """Close every window except the main app window.
+
+    The setup wizard opens a dedicated settings window at startup, and
+    WebKitWebDriver's screenshot endpoint hangs while more than one webview
+    is open. The wizard window is UI-only, so closing it does not affect the
+    app state the screenshots capture. The main window is the one that is not
+    on the setup view; if it cannot be identified, close nothing.
+    """
+    handles = webdriver("GET", f"/session/{session}/window/handles")
+    hrefs = {}
+    for h in handles:
+        webdriver("POST", f"/session/{session}/window", {"handle": h})
+        hrefs[h] = run_js(session, "return location.href")
+    print(f"windows: {hrefs}", flush=True)
+    main = None
+    for h, href in hrefs.items():
+        if "/setup" not in href and "settings:" not in href:
+            main = h
+            break
+    if main is None:
+        print("windows: could not identify the main window; leaving all open", flush=True)
+        return
+    for h in handles:
+        if h != main:
+            webdriver("POST", f"/session/{session}/window", {"handle": h})
+            webdriver("DELETE", f"/session/{session}/window")
+    webdriver("POST", f"/session/{session}/window", {"handle": main})
+
+
 def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
     # Loopback is down in a fresh namespace.
     subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
@@ -130,6 +160,9 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
             "document.querySelector('#__nuxt').__vue_app__"
             ".config.globalProperties.$router.push('/marketplace')",
         )
+        # Screenshots hang while the wizard window is open; close it (and any
+        # duplicate) so only the main window remains before capturing.
+        close_extra_windows(session)
         failures = []
         checks = 0
         for tab, cards in EXPECTED.items():
