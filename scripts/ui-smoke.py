@@ -87,50 +87,24 @@ def wait_for_port(port, timeout=30):
 
 
 def x11_screenshot(path):
-    """Capture the app window via X11, bypassing WebDriver screenshots.
+    """Capture the main app window via X11, bypassing WebDriver screenshots.
 
-    WebKitWebDriver's screenshot endpoint hangs in this environment even with
-    a single window open, so capture the window's pixels directly: find the
-    app window in the X tree by title substring (the native title is
-    "Nisaba - Inventory Sync", not the page title "Nisaba") and grab it
-    with ImageMagick. Fails loudly (never hangs) when the window or the
-    tools are missing.
+    WebKitWebDriver's screenshot endpoint hangs in this environment, and its
+    window-switch call drops the connection outright, so capture pixels
+    directly: find the main window in the X tree by its exact native title
+    ("Nisaba - Inventory Sync"; the settings window is "Nisaba — Platform
+    Setup"), raise it above the wizard window (which opens centered on top
+    at startup), and grab it with ImageMagick. Fails loudly (never hangs)
+    when the window or the tools are missing.
     """
     tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
-    m = re.search(r'(0x[0-9a-f]+)\s+"[^"]*Nisaba[^"]*"', tree.stdout)
+    m = re.search(r'(0x[0-9a-f]+)\s+"Nisaba - Inventory Sync"', tree.stdout)
     if not m:
-        raise RuntimeError(f"could not find Nisaba window in:\n{tree.stdout}\n{tree.stderr}")
-    subprocess.run(["import", "-window", m.group(1), path], check=True)
-
-
-def close_extra_windows(session):
-    """Close every window except the main app window.
-
-    The setup wizard opens a dedicated settings window at startup, and
-    WebKitWebDriver's screenshot endpoint hangs while more than one webview
-    is open. The wizard window is UI-only, so closing it does not affect the
-    app state the screenshots capture. The main window is the one that is not
-    on the setup view; if it cannot be identified, close nothing.
-    """
-    handles = webdriver("GET", f"/session/{session}/window/handles")
-    hrefs = {}
-    for h in handles:
-        webdriver("POST", f"/session/{session}/window", {"handle": h})
-        hrefs[h] = run_js(session, "return location.href")
-    print(f"windows: {hrefs}", flush=True)
-    main = None
-    for h, href in hrefs.items():
-        if "/setup" not in href and "settings:" not in href:
-            main = h
-            break
-    if main is None:
-        print("windows: could not identify the main window; leaving all open", flush=True)
-        return
-    for h in handles:
-        if h != main:
-            webdriver("POST", f"/session/{session}/window", {"handle": h})
-            webdriver("DELETE", f"/session/{session}/window")
-    webdriver("POST", f"/session/{session}/window", {"handle": main})
+        raise RuntimeError(f"could not find main Nisaba window in:\n{tree.stdout}\n{tree.stderr}")
+    win_id = m.group(1)
+    subprocess.run(["xdotool", "windowraise", win_id], check=True)
+    time.sleep(0.5)  # let the restack take effect before grabbing pixels
+    subprocess.run(["import", "-window", win_id, path], check=True)
 
 
 def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
@@ -177,9 +151,6 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
             "document.querySelector('#__nuxt').__vue_app__"
             ".config.globalProperties.$router.push('/marketplace')",
         )
-        # Screenshots hang while the wizard window is open; close it (and any
-        # duplicate) so only the main window remains before capturing.
-        close_extra_windows(session)
         failures = []
         checks = 0
         for tab, cards in EXPECTED.items():
