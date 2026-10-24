@@ -254,6 +254,21 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
                 x11_screenshot(path)
                 print(f"screenshot: {path}")
 
+        # The views loop above left the app on /inventory; the time-limit check
+        # needs the marketplace Installed tab, so navigate back first. (Without
+        # --screenshot the app is already there; the push and click are no-ops.)
+        back_router = (
+            "document.querySelector('#__nuxt').__vue_app__"
+            ".config.globalProperties.$router"
+        )
+        run_js(session, f"{back_router}.push('/marketplace')")
+        wait_for("the marketplace again", lambda: "Installed" in run_js(session, "return document.body.innerText"))
+        run_js(
+            session,
+            "const b = [...document.querySelectorAll('button')]"
+            ".find(e => e.textContent.trim() === 'Installed'); if (b) b.click();",
+        )
+
         # The installed plugin's time limit: the fixture's 2 h renders, and changing it
         # through the <select> round-trips through set_vendor_plugin_timeout.
         selected = "const s = document.querySelector('#timeout-offline'); return s ? s.selectedOptions[0].textContent.trim() : null;"
