@@ -91,13 +91,15 @@ def x11_screenshot(path):
 
     WebKitWebDriver's screenshot endpoint hangs in this environment even with
     a single window open, so capture the window's pixels directly: find the
-    window titled "Nisaba" and grab it with ImageMagick. Fails loudly (never
-    hangs) when the window or the tools are missing.
+    app window in the X tree by title substring (the native title is
+    "Nisaba - Inventory Sync", not the page title "Nisaba") and grab it
+    with ImageMagick. Fails loudly (never hangs) when the window or the
+    tools are missing.
     """
-    info = subprocess.run(["xwininfo", "-name", "Nisaba"], capture_output=True, text=True)
-    m = re.search(r"Window id: (0x[0-9a-f]+)", info.stdout)
+    tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
+    m = re.search(r'(0x[0-9a-f]+)\s+"[^"]*Nisaba[^"]*"', tree.stdout)
     if not m:
-        raise RuntimeError(f"could not find Nisaba window:\n{info.stdout}\n{info.stderr}")
+        raise RuntimeError(f"could not find Nisaba window in:\n{tree.stdout}\n{tree.stderr}")
     subprocess.run(["import", "-window", m.group(1), path], check=True)
 
 
