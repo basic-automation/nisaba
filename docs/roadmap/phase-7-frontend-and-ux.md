@@ -64,6 +64,11 @@ Wire up or remove each one.
 
 `main.rs` (~72, ~84–86) calls `expect()` on loading the config and opening the database, and a Windows release build has no console, so the app just exits. Show a native error dialog and write a log file.
 
+Closed 2026-10-25 after checking the code: fixed by N-11.5 (*Gate: product*). `main.rs`
+sends failures in config loading, the database open, migrations and `Builder::run` through
+`startup::fatal_startup_error`, which writes a timestamped log and shows a native error
+dialog naming the failing stage.
+
 ## Accessibility pass
 
 Keyboard navigation, focus rings, and contrast against the Palenight surfaces

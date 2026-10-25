@@ -35,9 +35,11 @@ a version, and every later release imports every earlier 1.x export.
 ### [Gate: security](docs/roadmap/1.0-release.md#gate-security)
 
 Done: a strict CSP with sanitised `v-html` (Cross-cutting), and `cargo audit` plus
-`npm audit` running clean in CI on a schedule.
+`npm audit` running clean in CI on a schedule. Plugin re-approval on code change and
+plugin secrets in the keyring are done too (Phase 3): a changed code hash or allowlist
+resets a plugin to pending, and `secret: true` values live in the OS keyring, never in
+`config_json` or the P2P payload.
 
-- [ ] Plugin re-approval on code change, and plugin secrets in the keyring (Phase 3)
 - [ ] Secret-handling audit closed
 - [ ] Tauri capabilities narrowed so the main window can invoke only the commands it uses, and secret-returning commands are reachable only from the settings views that display them
 - [ ] GitHub private vulnerability reporting enabled (Phase 0)
@@ -50,13 +52,13 @@ change. CI is green with no `continue-on-error`. It covers the typecheck, the UI
 test and a macOS leg, on runners moved off the deprecated Node 20 actions.
 `crates/service` and `crates/tui` were deleted rather than shipped (N-10.3, 2026-10-22). A
 headless daemon can return after 1.0, designed against the per-company encrypted config
-model.
+model. The version-consistency check across `Cargo.toml`, `tauri.conf.json` and
+`frontend/package.json` runs as its own CI job (N-10.2).
 
 - [ ] **Update-path test.**
 - [ ] The tag-push release path proven on a `v0.x` tag before it is trusted with `v1.0.0` (Phase 6)
 - [ ] Windows code signing, with an Authenticode certificate or a cloud signing service
 - [ ] macOS Developer ID signing and notarization, or a documented decision to ship unsigned with the right-click-Open workaround (Phase 6)
-- [ ] A version-consistency check across `Cargo.toml`, `tauri.conf.json` and `frontend/package.json` (Phase 6)
 
 ### [Gate: product](docs/roadmap/1.0-release.md#gate-product)
 
@@ -309,7 +311,8 @@ every platform. A failed push is retried, and a new mapping corrected, on the ne
 Stock is keyed per variant (N-4.3). Re-mapping an unmapped listing works again: the unique
 indexes are partial, and the mapping is recorded in the same transaction as the created
 listing (N-4.5). The partial-failure policy is decided: never push to a platform that
-could not be read this cycle.
+could not be read this cycle. XMR orders are consumed in the same transaction as the stock
+write that applies them, and a sale on an untracked product is left unconsumed (N-4.4).
 
 `SyncEngine::dry_run()` reports planned changes without writing anything, locally or to
 any platform. The dashboard offers it as *Preview sync*, next to a *Last sync cycle*
@@ -321,7 +324,6 @@ runs as its own task, and the adapters' lock is no longer held for a whole cycle
 schedule is an interval picker that rejects zero and applies on reload. Stock history is
 charted (N-11.8).
 
-- [ ] **An XMR order is marked processed before its sale is applied**
 - [ ] Oversell protection
 
 ## [Phase 5 — P2P and multi-company](docs/roadmap/phase-5-p2p-and-multi-company.md)
@@ -462,10 +464,10 @@ composables, commands and npm dependencies are dealt with. A WebDriver harness,
 `scripts/ui-smoke.py` with a `ui_fixture` install, drives the real app with no network,
 inside `unshare -rn`. Its first green run was on Hyprland on 2026-09-26; there, WebKitGTK
 needs `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Its CI job was fixed by resolving `--target-dir`
-to an absolute path.
+to an absolute path. Startup failures are no longer silent: they show a native error
+dialog naming the failing stage and write a log (N-11.5).
 
 - [ ] The publish flow (`products/[id]/publish.vue`) should show, per platform, exactly which fields will be written and which are unsupported, driven by `PlatformCapabilities`
-- [ ] Startup failures are silent
 - [ ] Accessibility pass
 - [ ] The window is `"decorations": false`
 - [ ] Grow the UI smoke test beyond the marketplace

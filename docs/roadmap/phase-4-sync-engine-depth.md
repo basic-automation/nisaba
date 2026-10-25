@@ -41,6 +41,13 @@ Mappings carry `variant_id`, but the engine pushes the product's total to every 
 
 (`sync_engine.rs` ~245). Any `?` exit in between, or an untracked product (~272), loses the sale for good. Mark it in the same transaction as the stock write.
 
+Closed 2026-10-25 after checking the code: fixed by N-4.4 (Phase 2,
+*Adapter correctness*). The engine consumes XMR orders in the same transaction as the
+stock write that applies them (`Db::apply_stock_and_consume_xmr_sales` and its per-variant
+twin), and a sale on an untracked product is neither applied nor consumed.
+`a_sale_on_an_untracked_product_is_neither_applied_nor_consumed` and
+`a_sale_on_an_unmapped_listing_is_skipped` pin it.
+
 ### Re-base the engine on a stock ledger
 
 Record every change as a uniquely keyed event: a sale by platform + order id, a restock, a manual adjustment, a vendor update. Canonical stock is the sum, and a push is the difference between canonical and each platform's reading, per variant. This fixes every item above. It is also the exact data model Sync v2 replicates (Phase 5, Step 2), so build it here first, on one machine, and replicate it later.
