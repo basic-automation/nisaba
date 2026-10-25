@@ -6,7 +6,7 @@ Nisaba syncs the operator's own catalog to marketplaces through **the
 operator's own developer credentials** (no shared Nisaba keyset, no hosted
 service). Each platform below was reviewed against what Nisaba actually does
 today: listings/inventory/pricing sync only — no order APIs with buyer
-details are read (see [`PRIVACY.md`](../PRIVACY.md)). Each note lists the
+details are read (see [`PRIVACY.md`](../../PRIVACY.md)). Each note lists the
 terms checked, where Nisaba stands, and any required behaviour changes filed
 as follow-ups.
 
@@ -91,7 +91,7 @@ Follow-ups (recorded requirements):
 1. **If the Orders API (or any buyer-PII endpoint) is ever added:** a full
    DPP re-review is required *before* merge — retention caps (30 days),
    deletion-on-request, encryption, and data attribution must be designed
-   in, and [`PRIVACY.md`](../PRIVACY.md) must be updated. This is the
+   in, and [`PRIVACY.md`](../../PRIVACY.md) must be updated. This is the
    "relevant as soon as order data with buyer details is read" condition
    from the roadmap gate.
 2. **Rate-limit handling audit for the Amazon adapter:** verify the sync

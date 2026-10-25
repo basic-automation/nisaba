@@ -306,7 +306,7 @@ handling of untrusted marketplace responses) and what does not.
 
 [`PRIVACY.md`](PRIVACY.md) states what leaves the machine (update checks,
 marketplace API calls, P2P relays) and what never does; the per-platform API
-terms review lives in [`docs/platform-terms-review.md`](docs/platform-terms-review.md).
+terms review lives in [`docs/roadmap/platform-terms-review.md`](docs/roadmap/platform-terms-review.md).
 
 ## License
 

@@ -8,7 +8,7 @@ service.** This page says exactly what leaves your machine, and what never
 does.
 
 > Shipped with the app (in-app user guide → Privacy) and reviewed per
-> platform in [`docs/platform-terms-review.md`](docs/platform-terms-review.md).
+> platform in [`docs/roadmap/platform-terms-review.md`](docs/roadmap/platform-terms-review.md).
 > Reviewed 2026-10-23 (N-12.4). If the app changes what it sends or stores,
 > this statement changes with it.
 
@@ -87,14 +87,14 @@ it declared.
   buyer PII is collected, none is stored, transmitted, or shared anywhere.
   If a future version ever reads order data, this statement and the
   platform-terms review must be updated first — that is a recorded
-  requirement in [`docs/platform-terms-review.md`](docs/platform-terms-review.md).
+  requirement in [`docs/roadmap/platform-terms-review.md`](docs/roadmap/platform-terms-review.md).
 
 ## Your obligations (because your keys are yours)
 
 Nisaba runs on your own developer credentials, not a shared keyset. That
 means **you** accept each platform's developer terms when you create the
 keys (see the per-platform review in
-[`docs/platform-terms-review.md`](docs/platform-terms-review.md)), and you
+[`docs/roadmap/platform-terms-review.md`](docs/roadmap/platform-terms-review.md)), and you
 are responsible for keeping your machine's keyring and backups safe.
 
 ## Questions
