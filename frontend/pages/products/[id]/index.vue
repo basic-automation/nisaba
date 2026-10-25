@@ -100,8 +100,15 @@ watch(selectedVariantId, (vid) => {
 // N-11.3: confirmations go through the single shared <ConfirmDialog> component.
 const { dialog, confirming, requestConfirm, confirmDialogAction, cancelDialog } = useConfirmDialog()
 
-// Platform accordion state + grouped mappings
-const openPlatforms = ref(new Set<Platform>())
+// Mappings accordion state + search
+const mappingSearch = ref('')
+const openSources = ref(new Set<string>())
+
+function toggleSource(key: string) {
+  const s = new Set(openSources.value)
+  if (s.has(key)) s.delete(key); else s.add(key)
+  openSources.value = s
+}
 
 const mappingsByPlatform = computed(() => {
   const grouped = new Map<Platform, PlatformMapping[]>()
@@ -112,13 +119,6 @@ const mappingsByPlatform = computed(() => {
   }
   return grouped
 })
-
-function togglePlatform(platform: Platform) {
-  const s = new Set(openPlatforms.value)
-  if (s.has(platform)) s.delete(platform)
-  else s.add(platform)
-  openPlatforms.value = s
-}
 
 /** Look up variant for a mapping so we can show attributes instead of raw IDs. */
 function variantForMapping(m: PlatformMapping): ProductVariant | undefined {
@@ -136,6 +136,110 @@ function mappingLabel(m: PlatformMapping): string {
   }
   return 'Product-level'
 }
+
+/** Human label for a vendor listing row. */
+function vendorListingLabel(vl: VendorListingForProduct): string {
+  const attrs = Object.entries(vl.variant_attributes)
+  if (attrs.length > 0) return attrs.map(([k, v]) => `${k}: ${v}`).join(', ')
+  return vl.title
+}
+
+// ── Unified Mappings data (platforms + vendors) ──
+
+interface MappingRow {
+  label: string
+  sku: string | null
+  itemId: string
+  variantId: string | null
+  platformMapping?: PlatformMapping
+  vendorListing?: VendorListingForProduct
+}
+
+interface MappingSource {
+  key: string
+  type: 'platform' | 'vendor'
+  platform?: Platform
+  vendorName?: string
+  rows: MappingRow[]
+  missingVariants: ProductVariant[]
+  totalCount: number
+}
+
+function matchesMappingSearch(row: MappingRow, q: string): boolean {
+  if (row.label.toLowerCase().includes(q)) return true
+  if (row.sku?.toLowerCase().includes(q)) return true
+  if (row.itemId.toLowerCase().includes(q)) return true
+  if (row.vendorListing?.title.toLowerCase().includes(q)) return true
+  return false
+}
+
+const totalMappingCount = computed(() => mappings.value.length + vendorListings.value.length)
+
+const unifiedMappingSources = computed<MappingSource[]>(() => {
+  const q = mappingSearch.value.toLowerCase().trim()
+  const sources: MappingSource[] = []
+
+  // Platform sources
+  for (const [platform, pMappings] of mappingsByPlatform.value) {
+    const allRows: MappingRow[] = pMappings.map(m => ({
+      label: mappingLabel(m),
+      sku: m.platform_sku,
+      itemId: m.platform_item_id,
+      variantId: m.variant_id,
+      platformMapping: m,
+    }))
+
+    const mappedVariantIds = new Set(
+      pMappings.map(m => m.variant_id).filter((id): id is string => id != null),
+    )
+    const missing = variants.value.filter(v => !mappedVariantIds.has(v.id))
+    const filteredRows = q ? allRows.filter(r => matchesMappingSearch(r, q)) : allRows
+
+    sources.push({
+      key: platform,
+      type: 'platform',
+      platform,
+      rows: filteredRows,
+      missingVariants: q ? [] : missing, // hide missing when searching
+      totalCount: allRows.length,
+    })
+  }
+
+  // Vendor sources (grouped by plugin_name)
+  const vendorsByPlugin = new Map<string, VendorListingForProduct[]>()
+  for (const vl of vendorListings.value) {
+    const list = vendorsByPlugin.get(vl.plugin_name) ?? []
+    list.push(vl)
+    vendorsByPlugin.set(vl.plugin_name, list)
+  }
+
+  for (const [pluginName, vls] of vendorsByPlugin) {
+    const allRows: MappingRow[] = vls.map(vl => ({
+      label: vendorListingLabel(vl),
+      sku: vl.sku,
+      itemId: vl.vendor_item_id,
+      variantId: vl.variant_id,
+      vendorListing: vl,
+    }))
+
+    const linkedVariantIds = new Set(
+      vls.map(vl => vl.variant_id).filter((id): id is string => id != null),
+    )
+    const missing = variants.value.filter(v => !linkedVariantIds.has(v.id))
+    const filteredRows = q ? allRows.filter(r => matchesMappingSearch(r, q)) : allRows
+
+    sources.push({
+      key: `vendor:${pluginName}`,
+      type: 'vendor',
+      vendorName: pluginName,
+      rows: filteredRows,
+      missingVariants: q ? [] : missing,
+      totalCount: allRows.length,
+    })
+  }
+
+  return sources
+})
 
 // Add mapping state
 const showAddMapping = ref(false)
@@ -868,10 +972,10 @@ function formatTimeAgo(isoTimestamp: string): string {
 
             </div>
 
-            <!-- Platform Mappings (accordion per platform) -->
+            <!-- Mappings (platforms + vendors accordion) -->
             <div class="border-t border-border/20 pt-6 mb-8">
               <div class="flex items-center justify-between mb-3">
-                <span class="label-sm">Platforms <span class="text-muted/30 font-normal">({{ mappings.length }})</span></span>
+                <span class="label-sm">Mappings <span class="text-muted/30 font-normal">({{ totalMappingCount }})</span></span>
                 <div class="flex gap-2">
                   <Button
                     variant="solid"
@@ -888,50 +992,97 @@ function formatTimeAgo(isoTimestamp: string): string {
                 </div>
               </div>
 
-              <div v-if="mappingsByPlatform.size > 0" class="space-y-1.5">
-                <div
-                  v-for="[platform, pMappings] in mappingsByPlatform"
-                  :key="platform"
-                  class="platform-accordion"
+              <!-- Search filter -->
+              <div v-if="totalMappingCount > 0" class="mb-3">
+                <input
+                  v-model="mappingSearch"
+                  type="text"
+                  placeholder="Filter mappings... (e.g. Khaki XL)"
+                  class="input-field w-full"
                 >
-                  <!-- Accordion header -->
-                  <button
-                    class="platform-accordion-header"
-                    @click="togglePlatform(platform)"
-                  >
-                    <div class="flex items-center gap-2.5">
-                      <svg
-                        class="w-3 h-3 text-muted/40 transition-transform duration-200"
-                        :class="{ 'rotate-90': openPlatforms.has(platform) }"
-                        fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"
-                      ><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
-                      <PlatformBadge :platform="platform" />
-                      <span class="text-[11px] text-muted/40">{{ pMappings.length }} mapping{{ pMappings.length > 1 ? 's' : '' }}</span>
-                    </div>
-                  </button>
-
-                  <!-- Accordion body -->
-                  <Transition name="accordion">
-                    <div v-if="openPlatforms.has(platform)" class="platform-accordion-body">
-                      <div
-                        v-for="m in pMappings"
-                        :key="m.id"
-                        class="mapping-row group"
-                      >
-                        <div class="flex items-center gap-2 flex-1 min-w-0">
-                          <span class="text-xs text-foreground">{{ mappingLabel(m) }}</span>
-                          <span v-if="m.platform_sku" class="text-[10px] text-muted/40 font-mono">{{ m.platform_sku }}</span>
-                        </div>
-                        <button
-                          class="text-[11px] text-red-400/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0"
-                          @click="handleDeleteMapping(m.id, mappingLabel(m))"
-                        >Unlink</button>
-                      </div>
-                    </div>
-                  </Transition>
-                </div>
               </div>
-              <p v-else class="text-xs text-muted/40 py-3">No platform mappings yet.</p>
+
+              <div v-if="unifiedMappingSources.length > 0" class="space-y-1.5">
+                <template v-for="source in unifiedMappingSources" :key="source.key">
+                  <!-- Hide source entirely when search is active and no matching rows -->
+                  <div
+                    v-if="!mappingSearch || source.rows.length > 0"
+                    class="platform-accordion"
+                  >
+                    <!-- Accordion header -->
+                    <button
+                      class="platform-accordion-header"
+                      @click="toggleSource(source.key)"
+                    >
+                      <div class="flex items-center gap-2.5 flex-1">
+                        <svg
+                          class="w-3 h-3 text-muted/40 transition-transform duration-200"
+                          :class="{ 'rotate-90': openSources.has(source.key) }"
+                          fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"
+                        ><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
+                        <PlatformBadge v-if="source.type === 'platform' && source.platform" :platform="source.platform" />
+                        <VendorBadge v-else-if="source.vendorName" :name="source.vendorName" />
+                        <span class="text-[11px] text-muted/40">
+                          {{ source.totalCount }} {{ source.type === 'platform' ? 'mapping' : 'listing' }}{{ source.totalCount !== 1 ? 's' : '' }}
+                        </span>
+                        <span
+                          v-if="source.missingVariants.length > 0"
+                          class="text-[10px] text-yellow-400/70"
+                        >{{ source.missingVariants.length }} missing</span>
+                      </div>
+                    </button>
+
+                    <!-- Accordion body -->
+                    <Transition name="accordion">
+                      <div v-if="openSources.has(source.key)" class="platform-accordion-body">
+                        <!-- Mapping/listing rows -->
+                        <div
+                          v-for="row in source.rows"
+                          :key="row.itemId"
+                          class="mapping-row group"
+                        >
+                          <div class="flex items-center gap-2 flex-1 min-w-0">
+                            <span class="text-xs text-foreground">{{ row.label }}</span>
+                            <span v-if="row.sku" class="text-[10px] text-muted/40 font-mono">{{ row.sku }}</span>
+                          </div>
+                          <button
+                            v-if="row.platformMapping"
+                            class="text-[11px] text-red-400/40 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                            @click="handleDeleteMapping(row.platformMapping!.id, row.label)"
+                          >Unlink</button>
+                        </div>
+
+                        <!-- Search no results -->
+                        <p
+                          v-if="mappingSearch && source.rows.length === 0"
+                          class="text-[11px] text-muted/30 py-3"
+                        >No matches for "{{ mappingSearch }}"</p>
+
+                        <!-- Missing variants -->
+                        <div v-if="source.missingVariants.length > 0" class="missing-section">
+                          <p class="text-[10px] text-yellow-400/50 uppercase tracking-wider mb-1.5">Missing ({{ source.missingVariants.length }})</p>
+                          <div
+                            v-for="v in source.missingVariants"
+                            :key="v.id"
+                            class="missing-row"
+                          >
+                            <div class="flex items-center gap-2 flex-1 min-w-0">
+                              <span class="text-xs text-muted/40">
+                                {{ Object.entries(v.attributes).length > 0
+                                  ? Object.entries(v.attributes).map(([k, val]) => `${k}: ${val}`).join(', ')
+                                  : v.name || v.sku
+                                }}
+                              </span>
+                              <span v-if="v.sku" class="text-[10px] text-muted/30 font-mono">{{ v.sku }}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </Transition>
+                  </div>
+                </template>
+              </div>
+              <p v-else class="text-xs text-muted/40 py-3">No mappings yet.</p>
             </div>
 
             <!-- Actions -->
@@ -1011,7 +1162,8 @@ function formatTimeAgo(isoTimestamp: string): string {
               <div v-if="vl.extras?.description">
                 <p class="label-sm mb-1">Description</p>
                 <div class="desc-box">
-                  <p class="whitespace-pre-wrap">{{ vl.extras.description }}</p>
+                  <div v-if="/<[a-z][\s\S]*>/i.test(vl.extras.description)" class="prose-listing" v-html="vl.extras.description" />
+                  <p v-else class="whitespace-pre-wrap">{{ vl.extras.description }}</p>
                 </div>
               </div>
 
@@ -1436,6 +1588,22 @@ function formatTimeAgo(isoTimestamp: string): string {
   border-bottom: 1px solid rgba(71, 85, 105, 0.15);
 }
 
+/* ════ Missing variants section ════ */
+.missing-section {
+  border-top: 1px solid rgba(234, 179, 8, 0.1);
+  padding-top: 0.5rem;
+  margin-top: 0.25rem;
+}
+.missing-row {
+  display: flex;
+  align-items: center;
+  padding: 0.375rem 0;
+  border-bottom: 1px dashed rgba(71, 85, 105, 0.1);
+}
+.missing-row:last-child {
+  border-bottom: none;
+}
+
 
 /* ════ Platform accordion ════ */
 .platform-accordion {
@@ -1511,6 +1679,7 @@ function formatTimeAgo(isoTimestamp: string): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 0.5rem;
 }
 
 .edit-listing-btn {
