@@ -93,6 +93,10 @@ jobs:
   ui-smoke:
     name: UI smoke (WebDriver)
     runs-on: ubuntu-22.04
+    # N-12.5: the job commits the captured README screenshots back to the PR
+    # branch so they land in docs/images/ with the PR.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -108,7 +112,10 @@ jobs:
             build-essential \
             libssl-dev \
             webkit2gtk-driver \
-            xvfb
+            xvfb \
+            imagemagick \
+            x11-utils \
+            xdotool
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -135,7 +142,9 @@ jobs:
         run: cargo install tauri-driver --locked
 
       - name: Run the UI smoke test
-        run: xvfb-run -a python3 scripts/ui-smoke.py --target-dir target --screenshot ui-smoke/marketplace.png
+        # N-12.5: --seed-sample-catalog populates a fictional catalog and --screenshot
+        # captures the five main views alongside the per-marketplace-tab shots.
+        run: xvfb-run -a python3 scripts/ui-smoke.py --target-dir target --screenshot ui-smoke/marketplace.png --seed-sample-catalog
 
       - name: Upload screenshots
         if: always()
@@ -144,6 +153,25 @@ jobs:
           name: ui-smoke-screenshots
           path: ui-smoke/
           if-no-files-found: ignore
+
+      - name: Commit README screenshots to the PR branch
+        # N-12.5: the README embeds these PNGs; they are captured from the real app
+        # running the fixture install above, then committed back so they land with
+        # the PR. Regenerating identical PNGs produces no commit, so this step is
+        # self-terminating on the re-triggered run.
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p docs/images
+          for v in dashboard products listings vendors inventory; do
+            cp "ui-smoke/marketplace-$v.png" "docs/images/readme-$v.png"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin "${{ github.head_ref }}"
+          git checkout "${{ github.head_ref }}"
+          git add docs/images/readme-*.png
+          git diff --cached --quiet || git commit -m "docs: README screenshots captured from the real app on a fixture install (N-12.5)"
+          git push origin "HEAD:${{ github.head_ref }}"
 
   frontend:
     name: Frontend

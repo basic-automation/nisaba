@@ -42,6 +42,13 @@ async function checkPlatformConfig() {
   if (dismissedSetupIds.has(id)) return
   // Don't redirect if already on the setup page
   if (route.path === '/setup') return
+  // Claim this company synchronously, BEFORE the async capability check
+  // below: the two startup watchers (activeCompanyId, companiesInitialized)
+  // can both fire in one tick, and without this the await lets both calls
+  // through to open a duplicate settings window (which also breaks
+  // WebDriver screenshots in CI). If capabilities turn out non-empty no
+  // wizard is needed anyway, so claiming early changes nothing.
+  dismissedSetupIds.add(id)
   try {
     const caps = await invoke<Record<string, PlatformCapabilities>>('get_platform_capabilities')
     if (Object.keys(caps).length === 0) {
@@ -52,7 +59,6 @@ async function checkPlatformConfig() {
       } catch {
         // ignore; fall through to opening the wizard
       }
-      dismissedSetupIds.add(id)
       // Platform credentials are secrets: configuring them happens in the
       // dedicated settings window, the only context allowed to read them.
       await openSettingsWindow('setup', { companyId: id, companyName: company.name })

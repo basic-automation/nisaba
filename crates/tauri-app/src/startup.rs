@@ -138,8 +138,8 @@ unsafe fn windows_message_box(title: &str, message: &str) {
 
     let title_w = wide(title);
     let message_w = wide(message);
-    // MB_OK | MB_ICONERROR | MB_SYSTEMMODAL
-    const FLAGS: u32 = 0x0000_0000 | 0x0000_0010 | 0x0000_1000;
+    // MB_OK (0) | MB_ICONERROR | MB_SYSTEMMODAL
+    const FLAGS: u32 = 0x0000_0010 | 0x0000_1000;
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
