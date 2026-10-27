@@ -1,6 +1,6 @@
 {
   "productName": "Nisaba",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.nisaba.app",
   "build": {
     "frontendDist": "../../frontend/.output/public",
