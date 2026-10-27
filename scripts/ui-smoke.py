@@ -85,6 +85,24 @@ def run_js(session, script):
     return webdriver("POST", f"/session/{session}/execute/sync", {"script": script, "args": []})
 
 
+def run_js_idempotent(session, script, attempts=8):
+    """run_js for scripts that are safe to repeat (same-tab clicks, same-route pushes).
+
+    WebKitWebDriver sometimes answers an execute/sync with an empty-message
+    500 ("unknown error") right after the wizard window is closed, and a
+    retry a moment later succeeds. webdriver() deliberately does not retry
+    HTTP errors, so retry them here, and only here, where repeating is safe.
+    """
+    for attempt in range(attempts):
+        try:
+            return run_js(session, script)
+        except RuntimeError as e:
+            if attempt == attempts - 1:
+                raise
+            print(f"execute/sync retry {attempt + 1}/{attempts - 1} after: {str(e)[:200]}", file=sys.stderr)
+            time.sleep(1.5)
+
+
 def wait_for(what, predicate, timeout=60):
     deadline = time.monotonic() + timeout
     last = None
@@ -182,7 +200,7 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
                 "document.querySelector('#__nuxt').__vue_app__)",
             ),
         )
-        run_js(
+        run_js_idempotent(
             session,
             "document.querySelector('#__nuxt').__vue_app__"
             ".config.globalProperties.$router.push('/marketplace')",
@@ -193,7 +211,7 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
         failures = []
         checks = 0
         for tab, cards in EXPECTED.items():
-            run_js(
+            run_js_idempotent(
                 session,
                 "const b = [...document.querySelectorAll('button')]"
                 f".find(e => e.textContent.trim() === {json.dumps(tab)}); if (b) b.click();",
