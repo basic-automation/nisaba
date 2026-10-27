@@ -60,7 +60,7 @@
       "open": true
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERDRDQ4MDFCQkVGNzc4QjUKUldTMWVQZStHNERVM01WM3ZWV2RQK1BZeTE0Umkvd2ZZZk5Wb0NYUXpBeVZvMDN4eDYrOWR2YVoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2MTVGRDg5NTAxOTU2ODcKUldTSFZobFFpZjBWeGd2QVJsSE85bVhPTkpNTXFXd1pEWkJhSUk1WFVmUUZMVnIyRG1VazNzK28K",
       "endpoints": [
         "https://github.com/basic-automation/nisaba/releases/latest/download/latest.json"
       ],
