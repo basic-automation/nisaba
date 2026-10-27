@@ -155,7 +155,9 @@ jobs:
               $prerelease --title "Nisaba $tag" --generate-notes \
               || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
-          mapfile -t files < <(find "${{ matrix.bundle-dir }}" -maxdepth 2 -type f \
+          # Not mapfile: the macOS runner's bash is 3.2, which lacks it.
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(find "${{ matrix.bundle-dir }}" -maxdepth 2 -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
                -o -name '*.dmg' -o -name '*.app.tar.gz' \
                -o -name '*.msi' -o -name '*.exe' -o -name '*.sig' \))
