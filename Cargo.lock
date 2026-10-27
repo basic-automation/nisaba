@@ -5091,7 +5091,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nisaba-amazon"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5109,7 +5109,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5135,7 +5135,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-ebay"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5155,7 +5155,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-p2p"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "artiqwest",
@@ -5177,7 +5177,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-squarespace"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5195,7 +5195,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-tauri"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5232,7 +5232,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-vendor-runtime"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "deno_ast",
@@ -5251,7 +5251,7 @@ dependencies = [
 
 [[package]]
 name = "nisaba-xmrbazaar"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
