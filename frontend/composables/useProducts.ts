@@ -18,9 +18,9 @@ export function useProducts() {
     return invoke<Product | null>('get_product', { id })
   }
 
-  async function createProduct(name: string, sku: string, quantity: number, lowStockThreshold?: number): Promise<Product> {
+  async function createProduct(name: string, sku: string, quantity: number, lowStockThreshold?: number, withDefaultVariant = true): Promise<Product> {
     const product = await invoke<Product>('create_product', {
-      name, sku, quantity, lowStockThreshold: lowStockThreshold ?? null,
+      name, sku, quantity, lowStockThreshold: lowStockThreshold ?? null, withDefaultVariant,
     })
     await fetchProducts()
     return product
