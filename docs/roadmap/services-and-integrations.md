@@ -10,13 +10,26 @@ cost.
 
 ## Hosted infrastructure
 
-### No OAuth broker
+### No OAuth broker, except for eBay
 
-Customers bring their own API keys (see *1.0 release*, owner decision 2026-10-19, after Nisaba's own Amazon SP-API application was denied).
+Customers bring their own API keys for Amazon, Squarespace and XMR Bazaar (see *1.0 release*, owner decision 2026-10-19, after Nisaba's own Amazon SP-API application was denied). eBay is the exception: see the next section (owner decision 2026-10-28).
 
-### Post-1.0, revisit a **shared eBay keyset** only
+### **Shared eBay keyset and hosted OAuth broker** (1.0)
 
-eBay is the platform where bring-your-own costs the most: developer program signup, a production keyset, a RuName, and the account-deletion exemption. Sharing a keyset would need a small stateless broker that does the code-for-token exchange and every refresh with Nisaba's client secret, plus an account-deletion endpoint. Weigh that against the setup wizard's real-world drop-off before building it. Amazon stays bring-your-own unless a new Nisaba application is approved.
+Owner decision 2026-10-28: ship one-click eBay sign-in in 1.0. Nothing here is built yet.
+
+**Why a broker.** eBay's authorize URL needs the app's client ID, and the code-for-token exchange and every refresh authenticate with the client secret. Nisaba is open source and a desktop app, so a secret inside it would leak and eBay could revoke the keyset for every user. A small stateless service holds the secret instead. There is no password login option: eBay's API accepts no username and password.
+
+**Design.** The app opens eBay's login. eBay redirects to the broker, which exchanges the code with Nisaba's secret and hands the tokens to the app; refreshes go through it too. The broker stores nothing and logs no tokens. It issues and checks a `state` per attempt, allows only the app's redirect, and the tokens live in the user's own keyring as they do today. The "Authorize with eBay" button becomes the default and the client ID, client secret and RuName fields move behind "Use my own keys".
+
+**Prerequisites only the owner can do.**
+1. Register Nisaba in the eBay Developers Program and obtain a production keyset and a RuName.
+2. Choose where the broker runs and under which domain.
+3. Subscribe to eBay's account deletion notifications, or obtain the exemption for not storing eBay user data (a stateless broker likely qualifies; confirm with eBay).
+
+**Open questions.** (a) Whether eBay's token endpoint accepts PKCE without a client secret; searches found no confirmation and the working assumption is that it does not, which is why the design uses a broker. (b) How long production keyset approval takes. (c) Whether eBay's terms allow one keyset to serve many unrelated sellers, which the platform terms review must confirm before launch.
+
+**Not in scope.** Amazon stays bring-your-own, because Nisaba's own SP-API application was denied.
 
 ### iroh relay
 
