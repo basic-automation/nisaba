@@ -42,14 +42,19 @@ pub struct EbayAdapter {
 
 impl EbayAdapter {
     pub async fn new(config: &EbayConfig, db: Arc<Db>) -> Result<Self, SyncError> {
+        let broker = config.broker().map_err(|message| SyncError::AuthError {
+            platform: Platform::Ebay,
+            message,
+        })?;
         let auth = EbayAuth::new(
             config.client_id.clone(),
             config.client_secret.clone(),
             config.redirect_uri.clone(),
             &config.environment,
-        );
+        )
+        .with_broker(broker);
 
-        let client = EbayClient::new(config.environment != "production");
+        let client = EbayClient::new(config.is_sandbox());
 
         // Try to load existing tokens from DB
         let (access, refresh, expires_at) = if let Some(token) = db.get_auth_token("ebay").await? {
@@ -768,6 +773,7 @@ mod tests {
             client_secret: "test-client-secret".to_string(),
             redirect_uri: "https://localhost/callback".to_string(),
             environment: "sandbox".to_string(),
+            broker_url: String::new(),
         }
     }
 
