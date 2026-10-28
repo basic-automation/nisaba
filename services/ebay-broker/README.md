@@ -32,6 +32,7 @@ limited per client (default 30 per minute).
 | `EBAY_ENV` | `production` (default) or `sandbox`. |
 | `PORT` | Default `8080`. |
 | `TRUST_PROXY` | Set to `1` behind exactly one reverse proxy, so the rate limiter uses `X-Forwarded-For`. |
+| `CLIENT_IP_HEADER` | Header carrying the real client IP behind a CDN or tunnel, e.g. `Cf-Connecting-Ip` for a Cloudflare tunnel. Without it every user behind the tunnel shares one rate-limit bucket. Set it only when the broker is reachable solely through that path, because any caller could forge the header. |
 | `RATE_LIMIT_PER_MIN` | Default `30`. |
 
 ## Run it
