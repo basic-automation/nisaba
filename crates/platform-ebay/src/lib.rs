@@ -78,6 +78,18 @@ impl EbayAdapter {
         })
     }
 
+    /// Whether sign-in goes through the Nisaba broker, which allows it to run in the
+    /// user's own browser.
+    pub fn uses_broker(&self) -> bool {
+        self.auth.uses_broker()
+    }
+
+    /// The URL to open in the user's own browser, with the app's loopback `port` encoded in
+    /// the state. `None` unless sign-in goes through the broker.
+    pub fn authorization_url_for_loopback(&self, port: u16) -> Option<String> {
+        self.auth.authorization_url_for_loopback(port)
+    }
+
     /// Whether `returned` is the state issued for the sign-in in progress, without
     /// consuming it. Lets the auth window ignore callbacks that are not eBay's.
     pub fn callback_state_matches(&self, returned: Option<&str>) -> bool {
