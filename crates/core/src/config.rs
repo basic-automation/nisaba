@@ -204,8 +204,9 @@ fn is_acceptable_broker_url(url: &str) -> bool {
     ["http://localhost", "http://127.0.0.1", "http://[::1]"]
         .iter()
         .any(|prefix| {
-            url.strip_prefix(prefix)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+            url.strip_prefix(prefix).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')
+            })
         })
 }
 
@@ -904,10 +905,21 @@ mod ebay_broker_tests {
 
     #[test]
     fn a_plain_http_broker_is_rejected_except_on_this_machine() {
-        assert!(cfg("", "http://broker.example", "production").broker().is_err());
-        assert!(cfg("", "http://localhost.evil.example", "production").broker().is_err());
-        assert!(cfg("", "ftp://broker.example", "production").broker().is_err());
-        for local in ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080/", "http://localhost"] {
+        assert!(cfg("", "http://broker.example", "production")
+            .broker()
+            .is_err());
+        assert!(cfg("", "http://localhost.evil.example", "production")
+            .broker()
+            .is_err());
+        assert!(cfg("", "ftp://broker.example", "production")
+            .broker()
+            .is_err());
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080/",
+            "http://localhost",
+        ] {
             assert!(cfg("", local, "production").broker().is_ok(), "{local}");
         }
     }
