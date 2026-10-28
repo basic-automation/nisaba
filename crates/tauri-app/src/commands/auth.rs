@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use nisaba_amazon::AmazonAdapter;
@@ -15,6 +15,10 @@ use crate::state::AppState;
 pub fn get_ebay_broker_url() -> String {
     nisaba_core::config::default_ebay_broker_url().to_string()
 }
+
+/// Which eBay sign-in attempt owns the auth window. A window closed by a newer attempt
+/// must not report "closed before sign-in finished" against that newer attempt.
+static EBAY_AUTH_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 #[tauri::command]
 pub async fn start_ebay_auth(
@@ -45,63 +49,98 @@ pub async fn start_ebay_auth(
         .parse()
         .map_err(|e: url::ParseError| format!("Invalid URL: {e}"))?;
 
+    let attempt = EBAY_AUTH_ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
     let handled = Arc::new(AtomicBool::new(false));
     let handled_nav = handled.clone();
     let app_nav = app.clone();
 
-    let _auth_window =
-        WebviewWindowBuilder::new(&app, "ebay-auth", WebviewUrl::External(url_parsed))
-            .title("eBay Authorization")
-            .inner_size(900.0, 700.0)
-            .center()
-            .on_navigation(move |url| {
-                if handled_nav.load(Ordering::SeqCst) {
-                    return false;
-                }
+    let auth_window = WebviewWindowBuilder::new(
+        &app,
+        "ebay-auth",
+        WebviewUrl::External(url_parsed),
+    )
+    .title("eBay Authorization")
+    .inner_size(900.0, 700.0)
+    .center()
+    .on_navigation(move |url| {
+        // Where the sign-in is, without the values: the query carries the
+        // authorization code and state, which must not reach a log.
+        tracing::debug!(
+            host = url.host_str().unwrap_or(""),
+            path = url.path(),
+            query_keys = ?url.query_pairs().map(|(k, _)| k.into_owned()).collect::<Vec<_>>(),
+            "eBay auth window navigation"
+        );
 
-                if let Some(code) = extract_code_from_url(url) {
-                    handled_nav.store(true, Ordering::SeqCst);
-                    // Bind this code to the authorization attempt we issued:
-                    // eBay must echo the `state` we put in the authorize URL.
-                    let returned_state = extract_state_from_url(url);
-                    let adapter = adapter_clone.clone();
-                    let app = app_nav.clone();
+        if handled_nav.load(Ordering::SeqCst) {
+            return false;
+        }
 
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(ebay) = adapter.as_any().downcast_ref::<EbayAdapter>() {
-                            match ebay.complete_auth(&code, returned_state.as_deref()).await {
-                                Ok(()) => {
-                                    info!("eBay OAuth completed via auth window");
-                                    let _ = app.emit("ebay-auth-complete", true);
-                                }
-                                Err(e) => {
-                                    error!("eBay OAuth failed: {e}");
-                                    let _ = app.emit("ebay-auth-error", e.to_string());
-                                }
-                            }
+        if let Some(code) = extract_code_from_url(url) {
+            handled_nav.store(true, Ordering::SeqCst);
+            // Bind this code to the authorization attempt we issued:
+            // eBay must echo the `state` we put in the authorize URL.
+            let returned_state = extract_state_from_url(url);
+            tracing::debug!(
+                state_returned = returned_state.is_some(),
+                state_len = returned_state.as_deref().map_or(0, str::len),
+                "eBay callback carried an authorization code"
+            );
+            let adapter = adapter_clone.clone();
+            let app = app_nav.clone();
+
+            tauri::async_runtime::spawn(async move {
+                if let Some(ebay) = adapter.as_any().downcast_ref::<EbayAdapter>() {
+                    match ebay.complete_auth(&code, returned_state.as_deref()).await {
+                        Ok(()) => {
+                            info!("eBay OAuth completed via auth window");
+                            let _ = app.emit("ebay-auth-complete", true);
                         }
-                        if let Some(w) = app.get_webview_window("ebay-auth") {
-                            let _ = w.close();
+                        Err(e) => {
+                            error!("eBay OAuth failed: {e}");
+                            let _ = app.emit("ebay-auth-error", e.to_string());
                         }
-                    });
-
-                    return false;
-                }
-
-                if url.as_str().contains("isAuthSuccessful=false") {
-                    handled_nav.store(true, Ordering::SeqCst);
-                    let app = app_nav.clone();
-                    let _ = app.emit("ebay-auth-error", "Authorization was declined");
-                    if let Some(w) = app.get_webview_window("ebay-auth") {
-                        let _ = w.close();
                     }
-                    return false;
                 }
+                if let Some(w) = app.get_webview_window("ebay-auth") {
+                    let _ = w.close();
+                }
+            });
 
-                true
-            })
-            .build()
-            .map_err(|e| format!("Failed to create auth window: {e}"))?;
+            return false;
+        }
+
+        if url.as_str().contains("isAuthSuccessful=false") {
+            handled_nav.store(true, Ordering::SeqCst);
+            let app = app_nav.clone();
+            let _ = app.emit("ebay-auth-error", "Authorization was declined");
+            if let Some(w) = app.get_webview_window("ebay-auth") {
+                let _ = w.close();
+            }
+            return false;
+        }
+
+        true
+    })
+    .build()
+    .map_err(|e| format!("Failed to create auth window: {e}"))?;
+
+    // Closing the window (or eBay showing an error page the user gives up on) ends the
+    // attempt without any callback. Tell the wizard, or it waits forever with the
+    // Authorize button disabled.
+    let handled_close = handled.clone();
+    let app_close = app.clone();
+    auth_window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed)
+            && !handled_close.load(Ordering::SeqCst)
+            && EBAY_AUTH_ATTEMPT.load(Ordering::SeqCst) == attempt
+        {
+            let _ = app_close.emit(
+                "ebay-auth-error",
+                "The eBay window was closed before sign-in finished",
+            );
+        }
+    });
 
     Ok(())
 }
