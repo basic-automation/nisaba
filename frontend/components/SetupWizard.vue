@@ -78,6 +78,22 @@ const platformConfig = ref<Record<string, any>>({
   },
 })
 
+// One-click eBay sign-in: offered when this build ships a hosted broker. The user's
+// own developer keys stay available behind "Use my own keys".
+const ebayBrokerUrl = ref('')
+const brokerAvailable = computed(() => ebayBrokerUrl.value !== '')
+const useOwnEbayKeys = ref(true)
+
+function switchToEbayBroker() {
+  // Broker mode is the absence of own keys, so they are cleared, not just hidden.
+  const ebay = platformConfig.value.ebay
+  ebay.client_id = ''
+  ebay.client_secret = ''
+  ebay.redirect_uri = ''
+  ebay.environment = 'production'
+  useOwnEbayKeys.value = false
+}
+
 // eBay auth state
 const ebayAuthLoading = ref(false)
 const ebayAuthMessage = ref('')
@@ -141,17 +157,20 @@ async function copyText(text: string) {
 // N-11.1: stage the platform's current fields (adapters are built from the
 // saved company config, so the backend must see what the user typed), then
 // probe the platform with a read-only request and report the result.
+async function stagePlatformConfig(platform: Platform) {
+  const existing = (await fetchCompanyConfig()) ?? {}
+  await saveCompanyConfig({
+    ...existing,
+    [platform]: { ...platformConfig.value[platform], enabled: true },
+  })
+}
+
 async function handleTestConnection(platform: Platform) {
   const t = testConnection.value[platform]
   t.state = 'testing'
   t.message = ''
   try {
-    const existing = (await fetchCompanyConfig()) ?? {}
-    const merged = {
-      ...existing,
-      [platform]: { ...platformConfig.value[platform], enabled: true },
-    }
-    await saveCompanyConfig(merged)
+    await stagePlatformConfig(platform)
     const summary = await invoke<string>('test_platform_connection', { platform })
     t.state = 'ok'
     t.message = summary
@@ -265,13 +284,28 @@ async function handleFinish() {
 }
 
 // eBay OAuth
+async function handleEbayCancel() {
+  try {
+    await invoke('cancel_ebay_auth')
+  } finally {
+    ebayAuthLoading.value = false
+    ebayAuthMessage.value = ''
+  }
+}
+
 async function handleEbayAuth() {
   ebayAuthLoading.value = true
   ebayAuthMessage.value = ''
   showManualCode.value = false
   try {
+    // The auth window is driven by the adapter built from the *saved* config, so what
+    // is on screen (broker mode, or the typed keys) must be saved first.
+    await stagePlatformConfig('ebay')
     await invoke('start_ebay_auth')
-    ebayAuthMessage.value = 'Sign in on the eBay window...'
+    // One-click sign-in opens your own browser; your own keys use an eBay window here.
+    ebayAuthMessage.value = useOwnEbayKeys.value
+      ? 'Sign in on the eBay window...'
+      : 'Finish signing in in your browser, then come back here.'
   } catch (e: any) {
     ebayAuthMessage.value = `Error: ${e}`
     ebayAuthLoading.value = false
@@ -361,6 +395,15 @@ onMounted(async () => {
       // still works with blank fields there.
     }
   }
+
+  try {
+    ebayBrokerUrl.value = await invoke<string>('get_ebay_broker_url')
+  } catch {
+    ebayBrokerUrl.value = ''
+  }
+  // Saved own keys keep the manual form; otherwise one-click is the default when offered.
+  useOwnEbayKeys.value = !brokerAvailable.value || !!platformConfig.value.ebay.client_id
+  if (!useOwnEbayKeys.value) switchToEbayBroker()
 
   unlisteners.push(await listen<boolean>('ebay-auth-complete', () => {
     ebayAuthLoading.value = false
@@ -525,6 +568,7 @@ onUnmounted(() => {
 
       <!-- eBay Configuration -->
       <template v-if="currentPlatform === 'ebay'">
+        <template v-if="useOwnEbayKeys">
         <!-- Instructions toggle -->
         <div>
           <button
@@ -591,6 +635,27 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <button
+          v-if="brokerAvailable"
+          class="text-[11px] text-accent/70 hover:text-accent transition-colors"
+          @click="switchToEbayBroker"
+        >
+          Use one-click sign-in instead (clears these keys)
+        </button>
+        </template>
+
+        <div v-else class="space-y-1.5">
+          <p class="text-xs text-muted/50 leading-relaxed">
+            Sign in with your eBay account. No developer account or keys needed.
+          </p>
+          <button
+            class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors"
+            @click="useOwnEbayKeys = true"
+          >
+            Use my own eBay developer keys instead
+          </button>
+        </div>
+
         <!-- eBay OAuth -->
         <div class="border-t border-border/20 pt-5">
           <div class="flex items-center gap-3 mb-4">
@@ -608,6 +673,13 @@ onUnmounted(() => {
               @click="handleEbayAuth"
             >
               {{ ebayAuthLoading ? 'Waiting for authorization...' : 'Authorize with eBay' }}
+            </button>
+            <button
+              v-if="ebayAuthLoading"
+              class="ml-4 text-[11px] text-muted/40 hover:text-muted/60 transition-colors"
+              @click="handleEbayCancel"
+            >
+              Cancel
             </button>
 
             <!-- Manual code fallback -->
