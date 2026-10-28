@@ -147,6 +147,16 @@ test('with TRUST_PROXY the rightmost X-Forwarded-For entry is the client', () =>
     assert.equal((await get('1.1.1.1, 8.8.8.8')).status, 200) // different client
   }))
 
+test('CLIENT_IP_HEADER keys the limiter on the header, falling back to the socket when absent', () =>
+  withBroker({ rateLimitPerMinute: 1, clientIpHeader: 'cf-connecting-ip' }, async (base) => {
+    const get = (ip) => fetch(`${base}/ebay/callback`, { headers: ip ? { 'Cf-Connecting-Ip': ip } : {} })
+    assert.equal((await get('1.1.1.1')).status, 200)
+    assert.equal((await get('1.1.1.1')).status, 429)
+    assert.equal((await get('2.2.2.2')).status, 200) // a different real client is not limited
+    assert.equal((await get()).status, 200)          // no header: the socket address
+    assert.equal((await get()).status, 429)
+  }))
+
 test('logs method, path and status only: never a query string, code or token', () =>
   withBroker({}, async (base, logs) => {
     await fetch(`${base}/ebay/callback?code=LEAKME&state=${STATE}`)
