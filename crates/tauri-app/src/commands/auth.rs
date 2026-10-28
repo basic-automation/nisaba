@@ -9,6 +9,13 @@ use tracing::{error, info};
 
 use crate::state::AppState;
 
+/// The eBay broker compiled into this build, so the setup wizard can offer one-click
+/// sign-in. Empty when this build has none. The URL is public, not a secret.
+#[tauri::command]
+pub fn get_ebay_broker_url() -> String {
+    nisaba_core::config::default_ebay_broker_url().to_string()
+}
+
 #[tauri::command]
 pub async fn start_ebay_auth(
     state: State<'_, AppState>,
