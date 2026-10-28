@@ -173,6 +173,26 @@ jobs:
           git diff --cached --quiet || git commit -m "docs: README screenshots captured from the real app on a fixture install (N-12.5)"
           git push origin "HEAD:${{ github.head_ref }}"
 
+  # The eBay OAuth broker (services/ebay-broker) has no dependencies, so its tests
+  # need no install step.
+  ebay-broker:
+    name: eBay broker
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: services/ebay-broker
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - run: node --test
+
+      - name: Build image
+        run: docker build -t nisaba-ebay-broker .
+
   frontend:
     name: Frontend
     # Pinned rather than -latest: -latest moves to Ubuntu 26 from 2026-10-19.
