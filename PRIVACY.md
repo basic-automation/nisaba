@@ -48,6 +48,11 @@ You can turn automatic checks off in **Settings** (the `update_check_enabled`
 preference). A manual "Check for updates" is your own explicit action and is
 not gated by the setting.
 
+By default an update found at launch is also installed automatically (the
+installer is the signed release from the same GitHub feed, and the app checks
+its signature before installing). You can turn that off separately in
+**Settings**, in which case Nisaba only shows an "update available" banner.
+
 ### 3. P2P company sync — only if you enable it, over Tor
 
 Peer-to-peer sync between your own installs is **off by default**. When you

@@ -23,9 +23,11 @@ export function useUpdater() {
         updateBody.value = update.body ?? ''
         updateObj = update
       }
+      return !!update
     } catch (e: any) {
       // Silently ignore check errors (offline, no endpoint configured, etc.)
       console.warn('Update check failed:', e)
+      return false
     }
   }
 
@@ -71,8 +73,18 @@ export function useUpdater() {
       // If the preference cannot be read, fall back to the default (on).
     }
     if (!enabled) return
-    // Check on mount
-    checkForUpdate()
+    // Check on mount. Installing by itself happens only here, at launch, when there is no
+    // unsaved work to lose; the later checks below just show the banner.
+    checkForUpdate().then(async (found) => {
+      if (!found) return
+      let auto = false
+      try {
+        auto = await invoke<boolean>('get_auto_install_updates')
+      } catch {
+        // Unreadable preference: do not install unattended.
+      }
+      if (auto) await downloadAndInstall()
+    })
     // Check every 6 hours
     checkInterval = setInterval(checkForUpdate, 6 * 60 * 60 * 1000)
   }

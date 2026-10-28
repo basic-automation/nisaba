@@ -450,6 +450,7 @@ export interface AppConfig {
   }
   updates: {
     check_for_updates: boolean
+    auto_install: boolean
   }
   company: CompanyConfig
 }

@@ -42,6 +42,14 @@ pub async fn get_update_check_enabled(state: State<'_, AppState>) -> Result<bool
     Ok(state.config.read().await.updates.check_for_updates)
 }
 
+/// Whether to install an available update by itself at launch. Its own narrow accessor,
+/// like `get_update_check_enabled`: a single boolean cannot leak anything.
+#[tauri::command]
+pub async fn get_auto_install_updates(state: State<'_, AppState>) -> Result<bool, String> {
+    let config = state.config.read().await;
+    Ok(config.updates.check_for_updates && config.updates.auto_install)
+}
+
 #[tauri::command]
 pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
     // Reject a sync schedule the engine does not support (including a zero

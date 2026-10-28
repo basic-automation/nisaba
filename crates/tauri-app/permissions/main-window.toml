@@ -80,6 +80,7 @@ commands.allow = [
   "get_sync_status",
   "get_third_party_licenses",
   "get_update_check_enabled",
+  "get_auto_install_updates",
   "get_vendor_listings_for_product",
   "get_vendor_plugin_config",
   "get_vendor_sync_status",
