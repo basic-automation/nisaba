@@ -28,6 +28,7 @@ commands.allow = [
   "backup_now",
   "cache_images",
   "cache_listing_detail",
+  "cancel_ebay_auth",
   "check_platform_auth",
   "complete_amazon_auth",
   "complete_ebay_auth",
