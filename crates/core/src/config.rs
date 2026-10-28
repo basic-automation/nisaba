@@ -178,6 +178,66 @@ pub struct EbayConfig {
     pub redirect_uri: String,
     #[serde(default = "default_ebay_env")]
     pub environment: String,
+    /// Base URL of a hosted OAuth broker that holds the eBay client secret, so the user
+    /// signs in with one click and needs no developer keys. Empty means the build-time
+    /// default ([`default_ebay_broker_url`]). Ignored when `client_id` is set: a user's
+    /// own keys always sign in directly.
+    #[serde(default)]
+    pub broker_url: String,
+}
+
+/// The eBay broker compiled into this build (`NISABA_EBAY_BROKER_URL` at build time),
+/// or an empty string when the build has none.
+pub fn default_ebay_broker_url() -> &'static str {
+    match option_env!("NISABA_EBAY_BROKER_URL") {
+        Some(url) => url,
+        None => "",
+    }
+}
+
+/// A broker receives the user's authorization code and refresh token, so it must be
+/// reached over HTTPS. Plain HTTP is allowed only for a broker on this machine.
+fn is_acceptable_broker_url(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|prefix| {
+            url.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':') || rest.starts_with('/'))
+        })
+}
+
+impl EbayConfig {
+    /// The broker to sign in through, or `None` to sign in directly with this config's
+    /// own keys. `Err` when a broker URL is set but unsafe to send credentials to.
+    pub fn broker(&self) -> Result<Option<String>, String> {
+        if !self.client_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let configured = self.broker_url.trim();
+        let url = if configured.is_empty() {
+            default_ebay_broker_url().trim()
+        } else {
+            configured
+        };
+        if url.is_empty() {
+            return Ok(None);
+        }
+        if !is_acceptable_broker_url(url) {
+            return Err(format!(
+                "eBay broker URL must use https (http is allowed only for localhost): {url}"
+            ));
+        }
+        Ok(Some(url.trim_end_matches('/').to_string()))
+    }
+
+    /// Whether to talk to eBay's sandbox. The Nisaba broker holds a production keyset,
+    /// so broker mode is always production whatever `environment` says.
+    pub fn is_sandbox(&self) -> bool {
+        !matches!(self.broker(), Ok(Some(_))) && self.environment != "production"
+    }
 }
 
 fn default_ebay_redirect() -> String {
@@ -799,6 +859,56 @@ mod tests {
                 !path.exists(),
                 "an invalid config must not be written to disk"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ebay_broker_tests {
+    use super::*;
+
+    fn cfg(client_id: &str, broker_url: &str, environment: &str) -> EbayConfig {
+        EbayConfig {
+            client_id: client_id.to_string(),
+            broker_url: broker_url.to_string(),
+            environment: environment.to_string(),
+            ..EbayConfig::default()
+        }
+    }
+
+    #[test]
+    fn own_keys_always_sign_in_directly() {
+        let c = cfg("my-client-id", "https://broker.example", "sandbox");
+        assert_eq!(c.broker(), Ok(None));
+        assert!(c.is_sandbox());
+    }
+
+    #[test]
+    fn a_configured_broker_is_used_when_there_are_no_own_keys() {
+        let c = cfg("", "https://broker.example/", "sandbox");
+        assert_eq!(c.broker(), Ok(Some("https://broker.example".to_string())));
+        // Broker mode is production whatever the stored environment says.
+        assert!(!c.is_sandbox());
+    }
+
+    #[test]
+    fn no_keys_and_no_broker_means_direct_mode_with_the_stored_environment() {
+        if !default_ebay_broker_url().is_empty() {
+            return; // this build bakes in a broker, which is covered above
+        }
+        let c = cfg("", "", "sandbox");
+        assert_eq!(c.broker(), Ok(None));
+        assert!(c.is_sandbox());
+        assert!(!cfg("", "", "production").is_sandbox());
+    }
+
+    #[test]
+    fn a_plain_http_broker_is_rejected_except_on_this_machine() {
+        assert!(cfg("", "http://broker.example", "production").broker().is_err());
+        assert!(cfg("", "http://localhost.evil.example", "production").broker().is_err());
+        assert!(cfg("", "ftp://broker.example", "production").broker().is_err());
+        for local in ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080/", "http://localhost"] {
+            assert!(cfg("", local, "production").broker().is_ok(), "{local}");
         }
     }
 }
