@@ -5,8 +5,11 @@
 // authorization code, the state and the tokens only ever pass through memory.
 //
 //   GET  /ebay/authorize?state=...   302 to eBay's consent page
-//   GET  /ebay/callback              static page eBay redirects to (the RuName accept URL);
-//                                    the app reads `code` and `state` from this URL
+//   GET  /ebay/callback              page eBay redirects to (the RuName accept URL). When the
+//                                    state starts with `<port>.` (a sign-in in the user's own
+//                                    browser) it forwards code and state to the app's one-shot
+//                                    listener on 127.0.0.1:<port>; otherwise it shows a page and
+//                                    the app reads `code` and `state` from the URL
 //   POST /ebay/token    {code}           exchange the code for tokens
 //   POST /ebay/refresh  {refresh_token}  refresh an access token
 //   GET  /healthz
@@ -31,6 +34,11 @@ const MAX_BODY_BYTES = 4096
 const UPSTREAM_TIMEOUT_MS = 10_000
 const MAX_TRACKED_CLIENTS = 10_000
 const STATE_PATTERN = /^[A-Za-z0-9._~-]{16,256}$/
+// A sign-in in the user's own browser returns to the app on a loopback port, which the app
+// encodes as the state's prefix. The broker only ever redirects to 127.0.0.1.
+const LOOPBACK_STATE = /^(\d{4,5})\.[A-Za-z0-9._~-]{15,}$/
+// The only eBay answer parameters worth forwarding to the app.
+const FORWARDED_PARAMS = ['code', 'state', 'error', 'error_description']
 // Only these fields of eBay's token response are handed back to the app.
 const TOKEN_FIELDS = ['access_token', 'expires_in', 'token_type', 'refresh_token', 'refresh_token_expires_in']
 
@@ -103,6 +111,20 @@ function sendJson(res, status, body) {
 
 const CALLBACK_PAGE = `<!doctype html><meta charset="utf-8"><title>Nisaba</title>
 <p>Authorization received. You can return to Nisaba and close this window.</p>`
+
+/** The app's loopback URL for a callback whose state carries a port, or null. */
+function loopbackTarget(url) {
+  const match = LOOPBACK_STATE.exec(url.searchParams.get('state') || '')
+  if (!match) return null
+  const port = Number(match[1])
+  if (port < 1024 || port > 65535) return null
+  const forwarded = new URLSearchParams()
+  for (const key of FORWARDED_PARAMS) {
+    const value = url.searchParams.get(key)
+    if (value !== null && value.length <= 2048) forwarded.set(key, value)
+  }
+  return `http://127.0.0.1:${port}/ebay/callback?${forwarded.toString()}`
+}
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -207,6 +229,11 @@ export function createServer(config, { fetchImpl = fetch, log = (line) => consol
     }
 
     if (req.method === 'GET' && pathname === '/ebay/callback') {
+      const loopback = loopbackTarget(url)
+      if (loopback) {
+        res.writeHead(302, { ...SECURITY_HEADERS, Location: loopback })
+        return res.end()
+      }
       res.writeHead(200, {
         ...SECURITY_HEADERS,
         'Content-Type': 'text/html; charset=utf-8',
