@@ -7,7 +7,7 @@ use nisaba_ebay::EbayAdapter;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tracing::{error, info};
 
-use super::ebay_loopback;
+use super::browser_signin::{self, Marketplace};
 use crate::state::AppState;
 
 /// The eBay broker compiled into this build, so the setup wizard can offer one-click
@@ -16,6 +16,17 @@ use crate::state::AppState;
 pub fn get_ebay_broker_url() -> String {
     nisaba_core::config::default_ebay_broker_url().to_string()
 }
+
+/// The Amazon broker compiled into this build, so the setup wizard can offer one-click
+/// sign-in. Empty when this build has none. The URL is public, not a secret.
+#[tauri::command]
+pub fn get_amazon_broker_url() -> String {
+    nisaba_core::config::default_amazon_broker_url().to_string()
+}
+
+/// Which Amazon sign-in attempt is current, so a newer attempt or a cancel silences an
+/// older one that is still waiting for the browser.
+static AMAZON_AUTH_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 /// Which eBay sign-in attempt owns the auth window. A window closed by a newer attempt
 /// must not report "closed before sign-in finished" against that newer attempt.
@@ -164,7 +175,7 @@ pub async fn start_ebay_auth(
 }
 
 /// Sign in to eBay in the user's default browser and receive the answer on a one-shot
-/// loopback listener (see `ebay_loopback`). Returns once the browser is open; the outcome
+/// loopback listener (see `browser_signin`). Returns once the browser is open; the outcome
 /// arrives later as `ebay-auth-complete` or `ebay-auth-error`, like the embedded flow.
 async fn start_ebay_browser_auth(
     app: tauri::AppHandle,
@@ -193,25 +204,26 @@ async fn start_ebay_browser_auth(
 
     tauri::async_runtime::spawn(async move {
         let ebay = adapter.as_any().downcast_ref::<EbayAdapter>();
-        let outcome = ebay_loopback::wait_for_answer(
+        let outcome = browser_signin::wait_for_answer(
             listener,
             port,
+            Marketplace::Ebay,
             || EBAY_AUTH_ATTEMPT.load(Ordering::SeqCst) == attempt,
             |state| ebay.is_some_and(|e| e.callback_state_matches(state)),
-            ebay_loopback::SIGN_IN_TIMEOUT,
+            browser_signin::SIGN_IN_TIMEOUT,
         )
         .await;
         let result = match outcome {
-            Ok((code, state)) => match ebay {
+            Ok(answer) => match ebay {
                 Some(e) => e
-                    .complete_auth(&code, state.as_deref())
+                    .complete_auth(&answer.code, answer.state.as_deref())
                     .await
                     .map_err(|e| e.to_string()),
                 None => Err("eBay adapter is not enabled".to_string()),
             },
             // Cancelled or replaced by a newer attempt: the user already knows.
-            Err(ebay_loopback::Failure::Superseded) => return,
-            Err(ebay_loopback::Failure::Message(m)) => Err(m),
+            Err(browser_signin::Failure::Superseded) => return,
+            Err(browser_signin::Failure::Message(m)) => Err(m),
         };
         match result {
             Ok(()) => {
@@ -285,8 +297,13 @@ pub async fn start_amazon_auth(
         .downcast_ref::<AmazonAdapter>()
         .ok_or("Failed to get Amazon adapter")?;
 
-    let auth_url = amazon.authorization_url();
     let adapter_clone = adapter.clone();
+    // Through the Nisaba broker the sign-in runs in the user's own browser.
+    if amazon.uses_broker() {
+        drop(adapters);
+        return start_amazon_browser_auth(app, adapter_clone).await;
+    }
+    let auth_url = amazon.authorization_url();
     drop(adapters);
 
     // Close existing auth window if still open
@@ -345,6 +362,82 @@ pub async fn start_amazon_auth(
             .map_err(|e| format!("Failed to create auth window: {e}"))?;
 
     Ok(())
+}
+
+/// Sign in to Amazon in the user's default browser and receive the answer on a one-shot
+/// loopback listener (see `browser_signin`). Returns once the browser is open; the outcome
+/// arrives later as `amazon-auth-complete` (carrying the seller's ID, empty when Amazon did
+/// not send one) or `amazon-auth-error`.
+async fn start_amazon_browser_auth(
+    app: tauri::AppHandle,
+    adapter: Arc<dyn nisaba_core::traits::PlatformAdapter>,
+) -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("Could not listen for the Amazon sign-in: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Could not listen for the Amazon sign-in: {e}"))?
+        .port();
+
+    let url = adapter
+        .as_any()
+        .downcast_ref::<AmazonAdapter>()
+        .and_then(|amazon| amazon.authorization_url_for_loopback(port))
+        .ok_or("Amazon sign-in through the Nisaba broker is not configured")?;
+
+    // Supersede any earlier attempt, and close a leftover embedded window.
+    let attempt = AMAZON_AUTH_ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Some(existing) = app.get_webview_window("amazon-auth") {
+        let _ = existing.close();
+    }
+    open_in_browser(&app, &url)?;
+
+    tauri::async_runtime::spawn(async move {
+        let amazon = adapter.as_any().downcast_ref::<AmazonAdapter>();
+        let outcome = browser_signin::wait_for_answer(
+            listener,
+            port,
+            Marketplace::Amazon,
+            || AMAZON_AUTH_ATTEMPT.load(Ordering::SeqCst) == attempt,
+            |state| amazon.is_some_and(|a| a.callback_state_matches(state)),
+            browser_signin::SIGN_IN_TIMEOUT,
+        )
+        .await;
+        let result = match outcome {
+            Ok(answer) => match amazon {
+                Some(a) => a
+                    .complete_auth(&answer.code)
+                    .await
+                    .map(|()| answer.seller_id.unwrap_or_default())
+                    .map_err(|e| e.to_string()),
+                None => Err("Amazon adapter is not enabled".to_string()),
+            },
+            // Cancelled or replaced by a newer attempt: the user already knows.
+            Err(browser_signin::Failure::Superseded) => return,
+            Err(browser_signin::Failure::Message(m)) => Err(m),
+        };
+        match result {
+            Ok(seller_id) => {
+                info!("Amazon OAuth completed in the user's browser");
+                let _ = app.emit("amazon-auth-complete", seller_id);
+            }
+            Err(message) => {
+                error!("Amazon OAuth failed: {message}");
+                let _ = app.emit("amazon-auth-error", message);
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Stop waiting for an Amazon sign-in (the Cancel button). Silent: the wizard resets itself.
+#[tauri::command]
+pub fn cancel_amazon_auth(app: tauri::AppHandle) {
+    AMAZON_AUTH_ATTEMPT.fetch_add(1, Ordering::SeqCst);
+    if let Some(existing) = app.get_webview_window("amazon-auth") {
+        let _ = existing.close();
+    }
 }
 
 #[tauri::command]

@@ -299,6 +299,43 @@ pub struct AmazonConfig {
     /// window. `None` for configs saved before this field existed.
     #[serde(default)]
     pub client_secret_updated_at: Option<String>,
+    /// Base URL of a hosted OAuth broker that holds the Amazon LWA client secret, so the
+    /// seller signs in with one click and needs no developer app. Empty means the build-time
+    /// default ([`default_amazon_broker_url`]). Ignored when `client_id` is set: a seller's
+    /// own app always signs in directly.
+    #[serde(default)]
+    pub broker_url: String,
+}
+
+/// The Amazon broker compiled into this build: `NISABA_AMAZON_BROKER_URL` at build time,
+/// else the eBay one (the same hosted service serves both), else an empty string.
+pub fn default_amazon_broker_url() -> &'static str {
+    option_env!("NISABA_AMAZON_BROKER_URL").unwrap_or(default_ebay_broker_url())
+}
+
+impl AmazonConfig {
+    /// The broker to sign in through, or `None` to sign in directly with this config's own
+    /// app. `Err` when a broker URL is set but unsafe to send credentials to.
+    pub fn broker(&self) -> Result<Option<String>, String> {
+        if !self.client_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let configured = self.broker_url.trim();
+        let url = if configured.is_empty() {
+            default_amazon_broker_url().trim()
+        } else {
+            configured
+        };
+        if url.is_empty() {
+            return Ok(None);
+        }
+        if !is_acceptable_broker_url(url) {
+            return Err(format!(
+                "Amazon broker URL must use https (http is allowed only for localhost): {url}"
+            ));
+        }
+        Ok(Some(url.trim_end_matches('/').to_string()))
+    }
 }
 
 fn default_amazon_region() -> String {
@@ -948,6 +985,52 @@ mod ebay_broker_tests {
             "http://localhost",
         ] {
             assert!(cfg("", local, "production").broker().is_ok(), "{local}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod amazon_broker_tests {
+    use super::*;
+
+    fn cfg(client_id: &str, broker_url: &str) -> AmazonConfig {
+        AmazonConfig {
+            client_id: client_id.to_string(),
+            broker_url: broker_url.to_string(),
+            ..AmazonConfig::default()
+        }
+    }
+
+    #[test]
+    fn own_app_always_signs_in_directly() {
+        assert_eq!(
+            cfg("amzn1.application-oa2-client.x", "https://b.example").broker(),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_configured_broker_is_used_when_there_is_no_own_app() {
+        assert_eq!(
+            cfg("", "https://broker.example/").broker(),
+            Ok(Some("https://broker.example".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_insecure_broker_is_refused() {
+        assert!(cfg("", "http://broker.example").broker().is_err());
+        assert_eq!(
+            cfg("", "http://localhost:8080").broker(),
+            Ok(Some("http://localhost:8080".to_string()))
+        );
+    }
+
+    #[test]
+    fn with_no_broker_anywhere_there_is_none() {
+        // Only meaningful for builds without a compiled-in default.
+        if default_amazon_broker_url().is_empty() {
+            assert_eq!(cfg("", "").broker(), Ok(None));
         }
     }
 }

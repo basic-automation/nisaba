@@ -9,10 +9,11 @@
 Settled by the owner on 2026-10-19. P2P is not in 1.0: it ships as a single-machine
 product, with company sync behind a "Preview" switch that is off by default. Data-loss
 fixes to today's P2P path still land. The stock ledger (Phase 4) must also land before
-1.0, because it changes the data model. Customers bring their own API keys for every
-platform, since Nisaba's own Amazon SP-API application was denied, so 1.0 runs no hosted
-OAuth broker and the setup wizard carries the onboarding cost. A shared eBay keyset is
-revisited after 1.0. An adapter ships as stable only after a recorded live-account
+1.0, because it changes the data model. Customers bring their own API keys for Amazon,
+Squarespace and XMR Bazaar, since Nisaba's own Amazon SP-API application was denied. eBay
+is the exception (owner decision, 2026-10-28): 1.0 ships one-click eBay sign-in through a
+small hosted OAuth broker holding Nisaba's own eBay keyset, with bring-your-own keys kept
+as an advanced option. An adapter ships as stable only after a recorded live-account
 verification, and otherwise as *Beta* or disabled. Amazon ships as Beta.
 
 ### [Gate: correctness](docs/roadmap/1.0-release.md#gate-correctness)
@@ -75,6 +76,7 @@ native error dialog naming the failing stage and writes a log (N-11.5).
 About, and replaces any telemetry or crash-reporting service.
 
 - [ ] An accessibility pass on the core flows (Phase 7)
+- [ ] One-click eBay sign-in through a hosted OAuth broker (shared eBay keyset)
 
 ### [Gate: documentation](docs/roadmap/1.0-release.md#gate-documentation)
 
@@ -96,8 +98,8 @@ were reviewed against what Nisaba does on 2026-10-23, in the
 are an Amazon 429/backoff audit, a Squarespace User-Agent check, an XMR Bazaar
 residual-risk note in the guide, and a re-review whenever order or buyer data is first
 read. The eBay Marketplace Account Deletion rule was confirmed: subscribe or opt out
-before the first production call. Each customer does this for their own keyset, following
-a walkthrough in the in-app guide (N-12.1). A privacy statement ships as `PRIVACY.md` and
+before the first production call. Each customer using their own keyset does this
+themselves, following a walkthrough in the in-app guide (N-12.1). A privacy statement ships as `PRIVACY.md` and
 as a page in the in-app guide (N-12.4).
 
 ### [Stability contract at 1.0](docs/roadmap/1.0-release.md#stability-contract-at-10)
@@ -477,12 +479,14 @@ dialog naming the failing stage and write a log (N-11.5).
 
 ### [Hosted infrastructure](docs/roadmap/services-and-integrations.md#hosted-infrastructure)
 
-Decided: no OAuth broker, because customers bring their own API keys (owner decision,
-2026-10-19, after Nisaba's own Amazon SP-API application was denied). Also no telemetry or
+Decided: no OAuth broker for Amazon, Squarespace or XMR Bazaar, because customers bring
+their own API keys (owner decision, 2026-10-19, after Nisaba's own Amazon SP-API
+application was denied). The exception is eBay, which gets a hosted broker for 1.0 (owner
+decision, 2026-10-28, see *Gate: product*). Also no telemetry or
 crash-reporting service. Instead, a local *Export diagnostics* bundle that the user
 chooses to attach to a bug report covers the need.
 
-- [ ] Post-1.0, revisit a **shared eBay keyset** only
+- [ ] **Shared eBay keyset and hosted OAuth broker** (1.0)
 - [ ] **iroh relay**
 - [ ] **Update manifest**
 - [ ] **Plugin registry**
