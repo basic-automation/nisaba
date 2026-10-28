@@ -59,6 +59,22 @@ The Inventory API by SKU, the Trading API by ItemID — so a mapping created fro
 
 …listing the minimum in any comparison. The sync engine floors canonical stock at zero, so nothing writes it back today. [N-5.6: floored at 0 in both `trading_to_listing` and `trading_to_full_listing` (`mapping.rs`), pinned by the updated mapping fixture test (2 listed, 5 sold -> 0).]
 
+## Support eBay's modernized REST and GraphQL APIs
+
+eBay's developer pages now announce that its modernized REST and GraphQL APIs are generally available, with migration guides, SDKs and API Explorers. This item is to decide how much of that Nisaba adopts and to build it. Nothing here has been implemented or tested against a live account.
+
+What is known (eBay's Trading API release notes and API deprecation status page, read 2026-10-27): the Trading API is being retired call by call, not all at once. `GetCategories` (release 1453) and `GetCategoryFeatures` (1475) are already decommissioned, and `UploadSiteHostedPictures` was decommissioned on 2026-09-30. The Trading API is the older of the two surfaces the eBay adapter reads through; the Sell Inventory API is the other (see "eBay's two read paths key listings differently").
+
+What is not known, and is the first step: which of the modernized APIs cover what the adapter does (fetch listings, set quantity, set price, descriptions, create listing), whether they replace the Inventory API or only the Trading API, and the dates by which the calls Nisaba uses stop working. The deprecation status page returned HTTP 403 to an automated fetch, so read it in a browser.
+
+Steps:
+
+1. List every Trading API call the adapter makes (`crates/platform-ebay`) and check each against the deprecation status page, with its decommission date and replacement.
+2. Read eBay's modernized-API migration guide and record which endpoints replace those calls, and whether the Inventory API paths are affected.
+3. Decide the target: keep Inventory API plus REST replacements for the Trading calls, or adopt the new APIs wholesale. Record the decision here.
+4. Implement behind the existing `PlatformAdapter` trait with no change to the sync engine, add fixtures per N-13.1, and verify on a live seller account.
+5. Check OAuth scopes: new APIs may need scopes the current consent flow does not request, which would force a re-consent for existing users.
+
 ## Rate-limit handling per platform
 
 eBay, Amazon and Squarespace all throttle, and the adapters have no backoff distinct from `max_retries`. Squarespace also rescans the whole catalog for every per-item read, which multiplies its request count.
