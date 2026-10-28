@@ -4,6 +4,7 @@ pub mod backup;
 pub mod company;
 pub mod config;
 pub mod diagnostics;
+pub mod ebay_loopback;
 pub mod export_import;
 pub mod images;
 pub mod licenses;
