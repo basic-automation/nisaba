@@ -168,7 +168,13 @@ impl EbayAuth {
 
         if let Some(broker) = &self.broker {
             return self
-                .broker_call(http, broker, "token", serde_json::json!({ "code": code }), "Token exchange")
+                .broker_call(
+                    http,
+                    broker,
+                    "token",
+                    serde_json::json!({ "code": code }),
+                    "Token exchange",
+                )
                 .await;
         }
 
@@ -365,9 +371,14 @@ mod tests {
 
     /// Serve one canned HTTP response on a local port; returns the base URL and a handle
     /// that resolves to the raw request text the server received.
-    async fn mock_broker(status_line: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+    async fn mock_broker(
+        status_line: &str,
+        body: &str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         let response = format!(
             "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -384,7 +395,11 @@ mod tests {
                 if let Some(split) = text.find("\r\n\r\n") {
                     let length = text[..split]
                         .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
                         .unwrap_or(0);
                     if received.len() >= split + 4 + length {
                         break;
@@ -411,11 +426,20 @@ mod tests {
     fn broker_authorize_url_points_at_the_broker_with_a_checkable_state() {
         let auth = broker_auth("https://broker.example");
         let url = auth.authorization_url();
-        assert!(url.starts_with("https://broker.example/ebay/authorize?state="), "got {url}");
-        assert!(!url.contains("client_id"), "the app holds no client id in broker mode");
+        assert!(
+            url.starts_with("https://broker.example/ebay/authorize?state="),
+            "got {url}"
+        );
+        assert!(
+            !url.contains("client_id"),
+            "the app holds no client id in broker mode"
+        );
         let issued = state_param(&url).expect("state param");
         assert!(auth.verify_callback_state(Some(&issued)).is_ok());
-        assert!(auth.verify_callback_state(Some(&issued)).is_err(), "single use");
+        assert!(
+            auth.verify_callback_state(Some(&issued)).is_err(),
+            "single use"
+        );
     }
 
     #[tokio::test]
@@ -458,6 +482,9 @@ mod tests {
             .await
             .expect_err("must fail");
         let text = err.to_string();
-        assert!(text.contains("502") && text.contains("invalid_grant"), "got {text}");
+        assert!(
+            text.contains("502") && text.contains("invalid_grant"),
+            "got {text}"
+        );
     }
 }
