@@ -13,7 +13,7 @@ code, state or token. It has no dependencies (Node 22+ standard library only).
 | | |
 |---|---|
 | `GET /ebay/authorize?state=…` | 302 to eBay's consent page. `state` is 16-256 URL-safe characters, chosen and checked by the app. |
-| `GET /ebay/callback` | The page eBay redirects to (the RuName's accepted URL). The app reads `code` and `state` from this URL. |
+| `GET /ebay/callback` | The page eBay redirects to (the RuName's accepted URL). If `state` starts with `<port>.` (a sign-in in the user's own browser) it forwards `code`, `state` and any decline error to the app's one-shot listener at `http://127.0.0.1:<port>/ebay/callback`, and only ever to loopback on ports 1024-65535. Otherwise it shows a static page and the app reads the URL. |
 | `POST /ebay/token` `{"code": "…"}` | Exchanges the code for tokens. |
 | `POST /ebay/refresh` `{"refresh_token": "…"}` | Refreshes an access token. |
 | `GET /healthz` | Liveness. |
