@@ -42,14 +42,19 @@ pub struct EbayAdapter {
 
 impl EbayAdapter {
     pub async fn new(config: &EbayConfig, db: Arc<Db>) -> Result<Self, SyncError> {
+        let broker = config.broker().map_err(|message| SyncError::AuthError {
+            platform: Platform::Ebay,
+            message,
+        })?;
         let auth = EbayAuth::new(
             config.client_id.clone(),
             config.client_secret.clone(),
             config.redirect_uri.clone(),
             &config.environment,
-        );
+        )
+        .with_broker(broker);
 
-        let client = EbayClient::new(config.environment != "production");
+        let client = EbayClient::new(config.is_sandbox());
 
         // Try to load existing tokens from DB
         let (access, refresh, expires_at) = if let Some(token) = db.get_auth_token("ebay").await? {
@@ -71,6 +76,24 @@ impl EbayAdapter {
             refresh_token: RwLock::new(refresh),
             expires_at: RwLock::new(expires_at),
         })
+    }
+
+    /// Whether sign-in goes through the Nisaba broker, which allows it to run in the
+    /// user's own browser.
+    pub fn uses_broker(&self) -> bool {
+        self.auth.uses_broker()
+    }
+
+    /// The URL to open in the user's own browser, with the app's loopback `port` encoded in
+    /// the state. `None` unless sign-in goes through the broker.
+    pub fn authorization_url_for_loopback(&self, port: u16) -> Option<String> {
+        self.auth.authorization_url_for_loopback(port)
+    }
+
+    /// Whether `returned` is the state issued for the sign-in in progress, without
+    /// consuming it. Lets the auth window ignore callbacks that are not eBay's.
+    pub fn callback_state_matches(&self, returned: Option<&str>) -> bool {
+        self.auth.state_matches_pending(returned)
     }
 
     /// Get the authorization URL for initial OAuth setup.
@@ -768,6 +791,7 @@ mod tests {
             client_secret: "test-client-secret".to_string(),
             redirect_uri: "https://localhost/callback".to_string(),
             environment: "sandbox".to_string(),
+            broker_url: String::new(),
         }
     }
 
