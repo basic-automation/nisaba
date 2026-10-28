@@ -39,7 +39,12 @@ pub struct AmazonAdapter {
 
 impl AmazonAdapter {
     pub async fn new(config: &AmazonConfig, db: Arc<Db>) -> Result<Self, SyncError> {
-        let auth = AmazonAuth::new(config.client_id.clone(), config.client_secret.clone());
+        let broker = config.broker().map_err(|message| SyncError::AuthError {
+            platform: Platform::Amazon,
+            message,
+        })?;
+        let auth = AmazonAuth::new(config.client_id.clone(), config.client_secret.clone())
+            .with_broker(broker);
         let client = AmazonClient::new(&config.region);
 
         // Try to load existing tokens from DB
@@ -73,6 +78,23 @@ impl AmazonAdapter {
     /// Get the authorization URL for initial OAuth setup.
     pub fn authorization_url(&self) -> String {
         self.auth.authorization_url()
+    }
+
+    /// Whether sign-in goes through the Nisaba broker, which lets it run in the user's own
+    /// browser and return to a loopback listener.
+    pub fn uses_broker(&self) -> bool {
+        self.auth.uses_broker()
+    }
+
+    /// The broker URL for a sign-in in the user's own browser that returns to
+    /// `127.0.0.1:<port>`. `None` unless sign-in goes through the broker.
+    pub fn authorization_url_for_loopback(&self, port: u16) -> Option<String> {
+        self.auth.authorization_url_for_loopback(port)
+    }
+
+    /// Whether `returned` is the state issued for the pending loopback sign-in.
+    pub fn callback_state_matches(&self, returned: Option<&str>) -> bool {
+        self.auth.state_matches_pending(returned)
     }
 
     /// Complete the OAuth flow by exchanging an authorization code.
@@ -429,6 +451,7 @@ mod tests {
             region: "NA".to_string(),
             marketplace_ids: vec!["ATVPDKIKX0DER".to_string()],
             client_secret_updated_at: None,
+            broker_url: String::new(),
         }
     }
 
