@@ -67,6 +67,7 @@ commands.allow = [
   "get_platform_capabilities",
   "get_platform_health",
   "get_credential_health",
+  "get_ebay_broker_url",
   "get_plugin_run_history",
   "get_pricing_history",
   "get_product",
