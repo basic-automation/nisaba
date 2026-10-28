@@ -183,6 +183,7 @@ gates it. The other platforms are therefore not silently reporting "no sales".
 - [ ] Amazon description read/write via the SP-API listings feed
 - [ ] Amazon is `enabled = false` by default in `config.example.toml` and has never been exercised end-to-end
 - [ ] eBay's two read paths key listings differently
+- [ ] Support eBay's modernized REST and GraphQL APIs
 - [ ] Rate-limit handling per platform
 - [ ] A fifth adapter would prove the trait is actually general
 - [ ] Four `SyncError` variants are never constructed
