@@ -77,10 +77,21 @@ pub async fn start_ebay_auth(
         }
 
         if let Some(code) = extract_code_from_url(url) {
+            // eBay's sign-in can bounce through Google, Apple or Facebook, whose own
+            // callbacks also carry `code` and `state`. Only a page echoing the state we
+            // issued is eBay's answer to us; let every other page load.
+            let returned_state = extract_state_from_url(url);
+            let is_ours = adapter_clone
+                .as_any()
+                .downcast_ref::<EbayAdapter>()
+                .is_some_and(|ebay| ebay.callback_state_matches(returned_state.as_deref()));
+            if !is_ours {
+                tracing::debug!("ignoring a page with a code but not our state");
+                return true;
+            }
             handled_nav.store(true, Ordering::SeqCst);
             // Bind this code to the authorization attempt we issued:
             // eBay must echo the `state` we put in the authorize URL.
-            let returned_state = extract_state_from_url(url);
             tracing::debug!(
                 state_returned = returned_state.is_some(),
                 state_len = returned_state.as_deref().map_or(0, str::len),
