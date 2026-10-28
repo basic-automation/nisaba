@@ -345,6 +345,35 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
         driver.wait(timeout=30)
 
 
+# The webview sometimes dies about ten seconds after launch ("session deleted because of page
+# crash or hang"), on a runner and a commit that pass on the next try. Retrying single calls
+# (run_js_idempotent) cannot revive a dead session, so the whole app is restarted instead.
+APP_ATTEMPTS = 3
+
+
+def is_lost_session(error):
+    """Whether `error` means the webview died, not that a check failed."""
+    return isinstance(error, RuntimeError) and "invalid session id" in str(error)
+
+
+def run_with_restarts(run_once, attempts=APP_ATTEMPTS, cleanup=lambda: None, pause=2):
+    """Run `run_once(attempt)`, restarting it when the webview session is lost.
+
+    Only a lost session restarts it. A failed check, a missing build or a crash that
+    repeats on every attempt still fails the run.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return run_once(attempt)
+        except RuntimeError as e:
+            if not is_lost_session(e) or attempt == attempts:
+                raise
+            print(f"webview session lost (attempt {attempt}/{attempts}); restarting the app",
+                  file=sys.stderr)
+            cleanup()
+            time.sleep(pause)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--target-dir", required=True, help="cargo target directory")
@@ -373,11 +402,21 @@ def main():
     for path in (app, fixture):
         if not os.path.exists(path):
             raise SystemExit(f"missing {path}; build it first (see the docstring)")
-    workdir = args.workdir or tempfile.mkdtemp(prefix="nisaba-ui-smoke-")
     if args.screenshot:
         os.makedirs(os.path.dirname(os.path.abspath(args.screenshot)), exist_ok=True)
-    smoke(app, fixture, workdir, args.screenshot and os.path.abspath(args.screenshot),
-          seed_catalog=args.seed_sample_catalog)
+
+    def run_once(attempt):
+        # A fresh install per attempt: the dead one may be half-written. An explicit
+        # --workdir is the caller's choice and is reused.
+        workdir = args.workdir or tempfile.mkdtemp(prefix="nisaba-ui-smoke-")
+        smoke(app, fixture, workdir, args.screenshot and os.path.abspath(args.screenshot),
+              seed_catalog=args.seed_sample_catalog)
+
+    def kill_leftover_app():
+        # tauri-driver is stopped, but the app it launched can outlive it and hold its ports.
+        subprocess.run(["pkill", "-f", app], check=False)
+
+    run_with_restarts(run_once, cleanup=kill_leftover_app)
 
 
 if __name__ == "__main__":
