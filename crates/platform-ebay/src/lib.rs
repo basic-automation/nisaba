@@ -78,6 +78,12 @@ impl EbayAdapter {
         })
     }
 
+    /// Whether `returned` is the state issued for the sign-in in progress, without
+    /// consuming it. Lets the auth window ignore callbacks that are not eBay's.
+    pub fn callback_state_matches(&self, returned: Option<&str>) -> bool {
+        self.auth.state_matches_pending(returned)
+    }
+
     /// Get the authorization URL for initial OAuth setup.
     pub fn authorization_url(&self) -> String {
         self.auth.authorization_url()
