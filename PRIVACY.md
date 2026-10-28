@@ -20,20 +20,45 @@ When you connect a platform and run a sync cycle, Nisaba sends requests to
 that platform's servers. The data sent is your own catalog and listing data
 (products, variants, prices, quantities, photos), and it goes **only to the
 platform it belongs to**. Marketplace requests never pass through any
-Nisaba-operated infrastructure — there isn't any.
+Nisaba-operated infrastructure. The one Nisaba-operated service is the
+optional sign-in service described below, and it sees only sign-in traffic.
 
 What each adapter sends:
 
 | Platform | Transport | What is sent |
 |---|---|---|
 | eBay | HTTPS to `api.ebay.com` (OAuth 2.0) | Your listings, offers, inventory quantities, category/business-policy lookups. OAuth scopes are `sell.inventory` and `sell.account.readonly` — Nisaba does not request order or buyer data. |
-| Amazon | HTTPS to SP-API endpoints (LWA OAuth 2.0) | Your listings (Listings Items API) and quantity/price updates (Feeds API). Nisaba does not call the Orders API and never requests restricted PII data. |
+| Amazon | HTTPS to SP-API endpoints (LWA OAuth 2.0) | Your listings, read and written through the Listings Items API (quantity and price updates are Listings Items patches), and which marketplaces you sell in (Sellers API). Nisaba does not call the Feeds or Orders APIs and never requests restricted PII data. |
 | Squarespace | HTTPS to `api.squarespace.com` (your own API key) | Your products and inventory adjustments. |
 | XMR Bazaar | HTTPS to your configured base URL (`https://xmrbazaar.com` by default) | Your own listings, inventory fields, and sales-page reads — exactly the pages your own logged-in account would open in a browser. |
 
 Your credentials are stored in the **OS keyring** (Windows Credential Manager,
 macOS Keychain, Linux Secret Service) and are sent only to that platform's own
-login/token endpoints. They are never sent to any third party.
+login/token endpoints. They are never sent to any third party. The one
+exception is one-click sign-in, below.
+
+#### One-click sign-in (eBay and Amazon) — a Nisaba-operated service
+
+eBay and Amazon each require a registered application whose secret key cannot
+be shipped inside an open-source app. So that you do not need a developer
+account, Basic Automation runs a small sign-in service at
+`https://nisaba-auth.basicautomation.io`, and the app uses it when you choose
+**Authorize** without entering your own developer keys.
+
+- Sign-in happens in your own browser, on the marketplace's own page. The
+  service never sees your marketplace password.
+- The marketplace's one-time authorization code and your resulting tokens pass
+  through the service in memory so it can add its secret key. It **stores
+  nothing**, keeps no database, and does not log codes, tokens or query strings
+  (only the request path, status and timing).
+- For Amazon, the service sets one short-lived cookie (10 minutes) in your
+  browser holding a random sign-in value, because Amazon's sign-in does not
+  return it otherwise. It contains no token and no personal data.
+- After sign-in, your tokens are held only on your computer. Marketplace
+  requests go directly from the app to the marketplace, never through the
+  service. Refreshing an access token passes your refresh token through the
+  service again.
+- If you enter your own developer keys, the service is not used at all.
 
 ### 2. Update checks — GitHub, opt-out available
 

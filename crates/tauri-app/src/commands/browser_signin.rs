@@ -1,11 +1,12 @@
-//! One-shot loopback listener for signing in to eBay through the user's own browser.
+//! One-shot loopback listener for signing in to a marketplace through the user's own browser.
 //!
-//! eBay's login works far more reliably in the user's normal browser (its cookies,
+//! A marketplace login works far more reliably in the user's normal browser (its cookies,
 //! fingerprint, password manager and passkeys) than in an embedded webview, which eBay's
 //! edge sometimes rejects. The app opens the broker's authorize URL in that browser; after
-//! sign-in the broker forwards `code` and `state` to `http://127.0.0.1:<port>/ebay/callback`,
-//! where this listener is waiting. The port rides in the `state` prefix, so the broker stays
-//! stateless and can only ever redirect to loopback.
+//! sign-in the broker forwards `code` and `state` (and Amazon's `selling_partner_id`) to
+//! `http://127.0.0.1:<port>/<marketplace>/callback`, where this listener is waiting. The
+//! port rides in the `state` prefix, so the broker stays stateless and can only ever
+//! redirect to loopback.
 
 use std::time::{Duration, Instant};
 
@@ -19,23 +20,54 @@ pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const CALLBACK_PATH: &str = "/ebay/callback";
+
+/// The marketplace a sign-in is for: it names the callback path and the user-facing text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Marketplace {
+    Ebay,
+    Amazon,
+}
+
+impl Marketplace {
+    fn callback_path(self) -> &'static str {
+        match self {
+            Marketplace::Ebay => "/ebay/callback",
+            Marketplace::Amazon => "/amazon/callback",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Marketplace::Ebay => "eBay",
+            Marketplace::Amazon => "Amazon",
+        }
+    }
+}
+
+/// The broker's forward of a completed sign-in.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub code: String,
+    pub state: Option<String>,
+    /// Amazon's `selling_partner_id` for the seller who just authorized, when sent.
+    pub seller_id: Option<String>,
+}
 
 /// What one HTTP request to the listener means.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     /// Not the callback (a favicon fetch, a probe, a wrong Host): answer 404, keep waiting.
     Ignore,
-    /// The broker's forward of eBay's answer.
-    Answer { code: String, state: Option<String> },
-    /// eBay or the user declined; carries the reason to show.
+    /// The broker's forward of the marketplace's answer.
+    Answer(Answer),
+    /// The marketplace or the user declined; carries the reason to show.
     Denied(String),
 }
 
 /// Classify the head of an HTTP request. Only a `GET` of the callback path whose `Host`
 /// is this loopback listener counts, so a web page cannot reach the listener through a
 /// name that rebinds to 127.0.0.1.
-pub fn parse_request(head: &str, port: u16) -> Request {
+pub fn parse_request(head: &str, port: u16, marketplace: Marketplace) -> Request {
     let mut lines = head.split("\r\n");
     let mut request_line = lines.next().unwrap_or("").split(' ');
     let (method, target) = (request_line.next(), request_line.next());
@@ -59,7 +91,7 @@ pub fn parse_request(head: &str, port: u16) -> Request {
     let Ok(url) = url::Url::parse(&format!("http://127.0.0.1:{port}{target}")) else {
         return Request::Ignore;
     };
-    if url.path() != CALLBACK_PATH {
+    if url.path() != marketplace.callback_path() {
         return Request::Ignore;
     }
     let param = |key: &str| {
@@ -71,10 +103,11 @@ pub fn parse_request(head: &str, port: u16) -> Request {
         return Request::Denied(param("error_description").unwrap_or(error));
     }
     match param("code") {
-        Some(code) if !code.is_empty() => Request::Answer {
+        Some(code) if !code.is_empty() => Request::Answer(Answer {
             code,
             state: param("state"),
-        },
+            seller_id: param("selling_partner_id"),
+        }),
         _ => Request::Ignore,
     }
 }
@@ -88,31 +121,33 @@ pub enum Failure {
     Message(String),
 }
 
-/// Wait for the broker's forward of eBay's answer. `is_current` says whether this attempt
+/// Wait for the broker's forward of the marketplace's answer. `is_current` says whether this attempt
 /// still owns the sign-in; `is_ours` says whether a returned `state` is the one issued, so
 /// a stray local request with another state is refused and the wait goes on.
 pub async fn wait_for_answer(
     listener: TcpListener,
     port: u16,
+    marketplace: Marketplace,
     is_current: impl Fn() -> bool,
     is_ours: impl Fn(Option<&str>) -> bool,
     limit: Duration,
-) -> Result<(String, Option<String>), Failure> {
+) -> Result<Answer, Failure> {
     let deadline = Instant::now() + limit;
     loop {
         if !is_current() {
             return Err(Failure::Superseded);
         }
         if Instant::now() >= deadline {
-            return Err(Failure::Message(
-                "Sign-in timed out. Try Authorize with eBay again.".to_string(),
-            ));
+            return Err(Failure::Message(format!(
+                "Sign-in timed out. Try Authorize with {} again.",
+                marketplace.name()
+            )));
         }
         let Ok(Ok((mut stream, _))) = timeout(POLL_INTERVAL, listener.accept()).await else {
             continue;
         };
         let head = read_head(&mut stream).await;
-        match parse_request(&head, port) {
+        match parse_request(&head, port, marketplace) {
             Request::Ignore => respond(&mut stream, "404 Not Found", "Not found.").await,
             Request::Denied(reason) => {
                 respond(
@@ -122,11 +157,12 @@ pub async fn wait_for_answer(
                 )
                 .await;
                 return Err(Failure::Message(format!(
-                    "eBay sign-in was declined: {reason}"
+                    "{} sign-in was declined: {reason}",
+                    marketplace.name()
                 )));
             }
-            Request::Answer { code, state } => {
-                if !is_ours(state.as_deref()) {
+            Request::Answer(answer) => {
+                if !is_ours(answer.state.as_deref()) {
                     respond(
                         &mut stream,
                         "400 Bad Request",
@@ -141,7 +177,7 @@ pub async fn wait_for_answer(
                     "Signed in. You can close this tab and return to Nisaba.",
                 )
                 .await;
-                return Ok((code, state));
+                return Ok(answer);
             }
         }
     }
@@ -187,17 +223,18 @@ mod tests {
             "127.0.0.1:54321",
         );
         assert_eq!(
-            parse_request(&head, 54321),
-            Request::Answer {
+            parse_request(&head, 54321, Marketplace::Ebay),
+            Request::Answer(Answer {
                 code: "abc 123".to_string(),
-                state: Some("54321.xyz".to_string())
-            }
+                state: Some("54321.xyz".to_string()),
+                seller_id: None,
+            })
         );
         // `localhost` is the same machine and is accepted too.
         let head = get("/ebay/callback?code=c&state=s", "localhost:54321");
         assert!(matches!(
-            parse_request(&head, 54321),
-            Request::Answer { .. }
+            parse_request(&head, 54321, Marketplace::Ebay),
+            Request::Answer(_)
         ));
     }
 
@@ -208,12 +245,12 @@ mod tests {
             "127.0.0.1:54321",
         );
         assert_eq!(
-            parse_request(&head, 54321),
+            parse_request(&head, 54321, Marketplace::Ebay),
             Request::Denied("The user denied".to_string())
         );
         let head = get("/ebay/callback?error=access_denied", "127.0.0.1:54321");
         assert_eq!(
-            parse_request(&head, 54321),
+            parse_request(&head, 54321, Marketplace::Ebay),
             Request::Denied("access_denied".to_string())
         );
     }
@@ -233,7 +270,11 @@ mod tests {
             "GET /ebay/callback?code=c HTTP/1.1\r\n\r\n".to_string(), // no Host
             String::new(),
         ] {
-            assert_eq!(parse_request(&head, 54321), Request::Ignore, "{head:?}");
+            assert_eq!(
+                parse_request(&head, 54321, Marketplace::Ebay),
+                Request::Ignore,
+                "{head:?}"
+            );
         }
     }
 
@@ -254,6 +295,7 @@ mod tests {
         let waiter = tokio::spawn(wait_for_answer(
             listener,
             port,
+            Marketplace::Ebay,
             || true,
             |state| state == Some("ours"),
             Duration::from_secs(20),
@@ -275,7 +317,11 @@ mod tests {
         );
         assert_eq!(
             waiter.await.expect("join"),
-            Ok(("REAL".to_string(), Some("ours".to_string())))
+            Ok(Answer {
+                code: "REAL".to_string(),
+                state: Some("ours".to_string()),
+                seller_id: None,
+            })
         );
     }
 
@@ -286,6 +332,7 @@ mod tests {
         let waiter = tokio::spawn(wait_for_answer(
             listener,
             port,
+            Marketplace::Ebay,
             || true,
             |_| true,
             Duration::from_secs(20),
@@ -312,14 +359,58 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         assert_eq!(
-            wait_for_answer(listener, port, || false, |_| true, Duration::from_secs(20)).await,
+            wait_for_answer(
+                listener,
+                port,
+                Marketplace::Ebay,
+                || false,
+                |_| true,
+                Duration::from_secs(20)
+            )
+            .await,
             Err(Failure::Superseded)
         );
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
         assert!(matches!(
-            wait_for_answer(listener, port, || true, |_| true, Duration::from_millis(1)).await,
+            wait_for_answer(listener, port, Marketplace::Ebay, || true, |_| true, Duration::from_millis(1)).await,
             Err(Failure::Message(m)) if m.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn amazons_forward_carries_the_seller_and_uses_its_own_path() {
+        let head = get(
+            "/amazon/callback?code=abc&state=54321.xyz&selling_partner_id=A1B2C3",
+            "127.0.0.1:54321",
+        );
+        assert_eq!(
+            parse_request(&head, 54321, Marketplace::Amazon),
+            Request::Answer(Answer {
+                code: "abc".to_string(),
+                state: Some("54321.xyz".to_string()),
+                seller_id: Some("A1B2C3".to_string()),
+            })
+        );
+        // Each marketplace's listener answers only its own path.
+        assert_eq!(
+            parse_request(&head, 54321, Marketplace::Ebay),
+            Request::Ignore
+        );
+        let ebay = get("/ebay/callback?code=c&state=s", "127.0.0.1:54321");
+        assert_eq!(
+            parse_request(&ebay, 54321, Marketplace::Amazon),
+            Request::Ignore
+        );
+    }
+
+    #[tokio::test]
+    async fn amazon_messages_name_amazon() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        assert!(matches!(
+            wait_for_answer(listener, port, Marketplace::Amazon, || true, |_| true, Duration::from_millis(1)).await,
+            Err(Failure::Message(m)) if m.contains("Amazon again")
         ));
     }
 }

@@ -1,7 +1,7 @@
-# Nisaba eBay OAuth broker
+# Nisaba OAuth broker (eBay and Amazon)
 
-A small stateless service that holds Nisaba's eBay client secret so a user can connect
-eBay with one click. eBay's authorize URL needs the client ID, and the code exchange and
+A small stateless service that holds Nisaba's eBay and Amazon client secrets so a user can
+connect either marketplace with one click. eBay's authorize URL needs the client ID, and the code exchange and
 every token refresh need the client secret. The desktop app is open source, so the secret
 cannot live in it. This service keeps it instead.
 
@@ -18,7 +18,20 @@ code, state or token. It has no dependencies (Node 22+ standard library only).
 | `POST /ebay/refresh` `{"refresh_token": "…"}` | Refreshes an access token. |
 | `GET /healthz` | Liveness. |
 
-Token responses contain only `access_token`, `expires_in`, `token_type`, `refresh_token`
+### Amazon (when the `AMAZON_*` variables are set)
+
+| | |
+|---|---|
+| `GET /amazon/authorize?state=…` | 302 to Seller Central's consent page (`application_id`, `state`, plus `version=beta` while the app is in Draft). Also sets a 10-minute `HttpOnly; Secure; SameSite=Lax` cookie holding the state, because Amazon's log-in step does not hand it back. |
+| `GET /amazon/login` | The app's registered **OAuth Login URI**. Sends the browser on to Amazon's `amazon_callback_uri` (an https Amazon host only) with `amazon_state`, the state from the cookie, the registered redirect URI, and `version=beta` for a Draft app. Without the cookie it shows a "start from Nisaba" page. |
+| `GET /amazon/callback` | The registered **OAuth Redirect URI**. Forwards `spapi_oauth_code` (as `code`), `state` and `selling_partner_id` to the app's listener at `http://127.0.0.1:<port>/amazon/callback` when the state starts with `<port>.`, and clears the cookie. |
+| `POST /amazon/token` `{"code": "…"}` | Exchanges the code (valid for 5 minutes) for tokens. |
+| `POST /amazon/refresh` `{"refresh_token": "…"}` | Refreshes an access token. |
+
+Amazon token responses contain only `access_token`, `expires_in`, `token_type` and
+`refresh_token`.
+
+Token responses (eBay) contain only `access_token`, `expires_in`, `token_type`, `refresh_token`
 and `refresh_token_expires_in`. Requests are limited to 4 KiB, JSON only, and rate
 limited per client (default 30 per minute).
 
@@ -30,6 +43,12 @@ limited per client (default 30 per minute).
 | `EBAY_CLIENT_SECRET` | Required. The Cert ID. Never commit it. |
 | `EBAY_RUNAME` | Required. The RuName, whose accepted URL is `https://<your-host>/ebay/callback`. |
 | `EBAY_ENV` | `production` (default) or `sandbox`. |
+| `AMAZON_APP_ID` | Amazon only. The SP-API application ID (`amzn1.sp.solution.…`), not the LWA client ID. |
+| `AMAZON_CLIENT_ID` | Amazon only. The LWA client identifier. |
+| `AMAZON_CLIENT_SECRET` | Amazon only. The LWA client secret. Never commit it. |
+| `AMAZON_REDIRECT_URI` | Amazon only. Exactly the OAuth Redirect URI registered with the app, e.g. `https://<your-host>/amazon/callback`. The OAuth Login URI is `https://<your-host>/amazon/login`. |
+| `AMAZON_DRAFT` | `1` while the app is in Draft (adds `version=beta`). Unset once it is published. |
+| `AMAZON_SELLER_CENTRAL` | Default `https://sellercentral.amazon.com`. Use the seller's region host (an Amazon https host only). |
 | `PORT` | Default `8080`. |
 | `TRUST_PROXY` | Set to `1` behind exactly one reverse proxy, so the rate limiter uses `X-Forwarded-For`. |
 | `CLIENT_IP_HEADER` | Header carrying the real client IP behind a CDN or tunnel, e.g. `Cf-Connecting-Ip` for a Cloudflare tunnel. Without it every user behind the tunnel shares one rate-limit bucket. Set it only when the broker is reachable solely through that path, because any caller could forge the header. |

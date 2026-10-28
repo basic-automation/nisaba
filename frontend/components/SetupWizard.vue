@@ -94,6 +94,23 @@ function switchToEbayBroker() {
   useOwnEbayKeys.value = false
 }
 
+// One-click Amazon sign-in, offered when this build ships a hosted broker. The seller's
+// own SP-API app stays available behind "Use my own app". The hosted broker serves North
+// America; other regions need their own app.
+const amazonBrokerUrl = ref('')
+const amazonBrokerAvailable = computed(() => amazonBrokerUrl.value !== '')
+const useOwnAmazonApp = ref(true)
+
+function switchToAmazonBroker() {
+  // Broker mode is the absence of an own app, so its fields are cleared, not just hidden.
+  const amazon = platformConfig.value.amazon
+  amazon.client_id = ''
+  amazon.client_secret = ''
+  amazon.refresh_token = ''
+  amazon.region = 'NA'
+  useOwnAmazonApp.value = false
+}
+
 // eBay auth state
 const ebayAuthLoading = ref(false)
 const ebayAuthMessage = ref('')
@@ -345,13 +362,28 @@ async function handleEbayManualComplete() {
 }
 
 // Amazon OAuth
+async function handleAmazonCancel() {
+  try {
+    await invoke('cancel_amazon_auth')
+  } finally {
+    amazonAuthLoading.value = false
+    amazonAuthMessage.value = ''
+  }
+}
+
 async function handleAmazonAuth() {
   amazonAuthLoading.value = true
   amazonAuthMessage.value = ''
   showAmazonManualCode.value = false
   try {
+    // The sign-in is driven by the adapter built from the *saved* config, so what is on
+    // screen (one-click mode, or the typed app) must be saved first.
+    await stagePlatformConfig('amazon')
     await invoke('start_amazon_auth')
-    amazonAuthMessage.value = 'Sign in on the Amazon window...'
+    // One-click sign-in opens your own browser; your own app uses an Amazon window here.
+    amazonAuthMessage.value = useOwnAmazonApp.value
+      ? 'Sign in on the Amazon window...'
+      : 'Finish signing in in your browser, then come back here.'
   } catch (e: any) {
     amazonAuthMessage.value = `Error: ${e}`
     amazonAuthLoading.value = false
@@ -405,6 +437,14 @@ onMounted(async () => {
   useOwnEbayKeys.value = !brokerAvailable.value || !!platformConfig.value.ebay.client_id
   if (!useOwnEbayKeys.value) switchToEbayBroker()
 
+  try {
+    amazonBrokerUrl.value = await invoke<string>('get_amazon_broker_url')
+  } catch {
+    amazonBrokerUrl.value = ''
+  }
+  useOwnAmazonApp.value = !amazonBrokerAvailable.value || !!platformConfig.value.amazon.client_id
+  if (!useOwnAmazonApp.value) switchToAmazonBroker()
+
   unlisteners.push(await listen<boolean>('ebay-auth-complete', () => {
     ebayAuthLoading.value = false
     ebayAuthenticated.value = true
@@ -419,7 +459,11 @@ onMounted(async () => {
     ebayAuthMessage.value = `Error: ${event.payload}`
   }))
 
-  unlisteners.push(await listen<boolean>('amazon-auth-complete', () => {
+  // One-click sign-in reports the seller's ID; sign-in with the seller's own app sends `true`.
+  unlisteners.push(await listen<string | boolean>('amazon-auth-complete', (event) => {
+    if (typeof event.payload === 'string' && event.payload && !platformConfig.value.amazon.seller_id) {
+      platformConfig.value.amazon.seller_id = event.payload
+    }
     amazonAuthLoading.value = false
     amazonAuthenticated.value = true
     amazonAuthMessage.value = 'Connected'
@@ -802,7 +846,7 @@ onUnmounted(() => {
       <!-- Amazon Configuration -->
       <template v-else-if="currentPlatform === 'amazon'">
         <!-- Instructions toggle -->
-        <div>
+        <div v-if="useOwnAmazonApp">
           <button
             class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors"
             @click="showInstructions.amazon = !showInstructions.amazon"
@@ -819,13 +863,26 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div v-else class="space-y-1.5">
+          <p class="text-xs text-muted/50 leading-relaxed">
+            Sign in with your Amazon seller account. No developer account or app needed. Your
+            seller ID is filled in for you, and one-click sign-in covers North America.
+          </p>
+          <button
+            class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors"
+            @click="useOwnAmazonApp = true"
+          >
+            Use my own Amazon app instead
+          </button>
+        </div>
+
         <!-- Credential fields -->
         <div class="grid grid-cols-2 gap-x-8 gap-y-5">
-          <div>
+          <div v-if="useOwnAmazonApp">
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Client ID (LWA)</label>
             <input v-model="platformConfig.amazon.client_id" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
           </div>
-          <div>
+          <div v-if="useOwnAmazonApp">
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Client Secret</label>
             <input v-model="platformConfig.amazon.client_secret" type="password" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
           </div>
@@ -833,7 +890,7 @@ onUnmounted(() => {
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Seller ID</label>
             <input v-model="platformConfig.amazon.seller_id" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors">
           </div>
-          <div>
+          <div v-if="useOwnAmazonApp">
             <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Region</label>
             <select v-model="platformConfig.amazon.region" class="w-full bg-transparent border-b border-border/30 px-0 py-1.5 text-sm text-foreground focus:outline-none focus:border-accent/50 transition-colors appearance-none">
               <option value="NA" class="bg-background">North America (NA)</option>
@@ -870,9 +927,16 @@ onUnmounted(() => {
             >
               {{ amazonAuthLoading ? 'Waiting for authorization...' : 'Authorize with Amazon' }}
             </button>
+            <button
+              v-if="amazonAuthLoading"
+              class="ml-4 text-[11px] text-muted/40 hover:text-muted/60 transition-colors"
+              @click="handleAmazonCancel"
+            >
+              Cancel
+            </button>
 
-            <!-- Manual code fallback -->
-            <div v-if="!amazonAuthLoading">
+            <!-- Manual code fallback (own app only: one-click sign-in returns through the app) -->
+            <div v-if="!amazonAuthLoading && useOwnAmazonApp">
               <button
                 class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors"
                 @click="showAmazonManualCode = !showAmazonManualCode"
