@@ -50,6 +50,10 @@ export function loadConfig(env = process.env) {
     tokenUrl: urls.tokenUrl,
     port: Number(env.PORT || 8080),
     trustProxy: env.TRUST_PROXY === '1',
+    // Header that carries the real client IP when a CDN or tunnel sits in front of the
+    // proxy (for example `Cf-Connecting-Ip` behind a Cloudflare tunnel). Only set it when
+    // the broker is reachable solely through that path: any caller could forge the header.
+    clientIpHeader: (env.CLIENT_IP_HEADER || '').trim().toLowerCase(),
     rateLimitPerMinute: Number(env.RATE_LIMIT_PER_MIN || 30),
   }
 }
@@ -137,6 +141,10 @@ export function createServer(config, { fetchImpl = fetch, log = (line) => consol
   const basic = 'Basic ' + Buffer.from(`${config.clientId}:${config.clientSecret}`).toString('base64')
 
   function clientKey(req) {
+    if (config.clientIpHeader) {
+      const fromHeader = String(req.headers[config.clientIpHeader] || '').split(',')[0].trim()
+      if (fromHeader) return fromHeader
+    }
     if (config.trustProxy) {
       // Behind one reverse proxy, the rightmost entry is the one the proxy itself added.
       const forwarded = String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()
