@@ -20,6 +20,9 @@ pub struct EbayAuth {
     client_secret: String,
     redirect_uri: String,
     is_sandbox: bool,
+    /// Base URL of the Nisaba OAuth broker. When set, the authorize redirect, the code
+    /// exchange and every refresh go through it and this struct's own keys go unused.
+    broker: Option<String>,
     /// `state` issued with the most recent authorize URL, awaiting the
     /// redirect callback. Consumed single-use by [`EbayAuth::verify_callback_state`].
     pending_state: Mutex<Option<String>>,
@@ -37,8 +40,50 @@ impl EbayAuth {
             client_secret,
             redirect_uri,
             is_sandbox: environment != "production",
+            broker: None,
             pending_state: Mutex::new(None),
         }
+    }
+
+    /// Sign in through a broker instead of directly with this struct's keys.
+    pub fn with_broker(mut self, broker: Option<String>) -> Self {
+        self.broker = broker;
+        self
+    }
+
+    /// POST a JSON body to one of the broker's token endpoints. `what` names the step
+    /// for error messages. The broker never returns the eBay client secret.
+    async fn broker_call(
+        &self,
+        http: &Client,
+        broker: &str,
+        path: &str,
+        body: serde_json::Value,
+        what: &str,
+    ) -> Result<EbayTokenResponse, SyncError> {
+        let resp = http
+            .post(format!("{broker}/ebay/{path}"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: format!("Could not reach the Nisaba eBay broker: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::AuthError {
+                platform: Platform::Ebay,
+                message: format!("{what} through the Nisaba eBay broker failed ({status}): {body}"),
+            });
+        }
+
+        resp.json().await.map_err(|e| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: format!("Failed to parse token response from the broker: {e}"),
+        })
     }
 
     fn auth_url(&self) -> &str {
@@ -70,6 +115,9 @@ impl EbayAuth {
             .pending_state
             .lock()
             .expect("eBay OAuth state lock poisoned") = Some(state_str.clone());
+        if let Some(broker) = &self.broker {
+            return format!("{broker}/ebay/authorize?state={}", urlencoding(&state_str));
+        }
         format!(
             "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
             self.auth_url(),
@@ -118,6 +166,12 @@ impl EbayAuth {
     ) -> Result<EbayTokenResponse, SyncError> {
         info!("Exchanging eBay authorization code for tokens");
 
+        if let Some(broker) = &self.broker {
+            return self
+                .broker_call(http, broker, "token", serde_json::json!({ "code": code }), "Token exchange")
+                .await;
+        }
+
         let resp = http
             .post(self.token_url())
             .basic_auth(&self.client_id, Some(&self.client_secret))
@@ -162,6 +216,18 @@ impl EbayAuth {
         refresh_token: &str,
     ) -> Result<EbayTokenResponse, SyncError> {
         debug!("Refreshing eBay access token");
+
+        if let Some(broker) = &self.broker {
+            return self
+                .broker_call(
+                    http,
+                    broker,
+                    "refresh",
+                    serde_json::json!({ "refresh_token": refresh_token }),
+                    "Token refresh",
+                )
+                .await;
+        }
 
         let resp = http
             .post(self.token_url())
@@ -295,5 +361,103 @@ mod tests {
         assert!(auth.verify_callback_state(Some(&issued)).is_ok());
         // Replaying the same callback URL must fail.
         assert!(auth.verify_callback_state(Some(&issued)).is_err());
+    }
+
+    /// Serve one canned HTTP response on a local port; returns the base URL and a handle
+    /// that resolves to the raw request text the server received.
+    async fn mock_broker(status_line: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.expect("read");
+                received.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&received).to_string();
+                if let Some(split) = text.find("\r\n\r\n") {
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if received.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            socket.write_all(response.as_bytes()).await.expect("write");
+            String::from_utf8_lossy(&received).to_string()
+        });
+        (base, handle)
+    }
+
+    fn broker_auth(base: &str) -> EbayAuth {
+        EbayAuth::new(String::new(), String::new(), String::new(), "production")
+            .with_broker(Some(base.to_string()))
+    }
+
+    const TOKEN_JSON: &str = r#"{"access_token":"AT","expires_in":7200,"token_type":"User Access Token","refresh_token":"RT","refresh_token_expires_in":47304000}"#;
+
+    #[test]
+    fn broker_authorize_url_points_at_the_broker_with_a_checkable_state() {
+        let auth = broker_auth("https://broker.example");
+        let url = auth.authorization_url();
+        assert!(url.starts_with("https://broker.example/ebay/authorize?state="), "got {url}");
+        assert!(!url.contains("client_id"), "the app holds no client id in broker mode");
+        let issued = state_param(&url).expect("state param");
+        assert!(auth.verify_callback_state(Some(&issued)).is_ok());
+        assert!(auth.verify_callback_state(Some(&issued)).is_err(), "single use");
+    }
+
+    #[tokio::test]
+    async fn broker_code_exchange_posts_the_code_and_parses_the_tokens() {
+        let (base, request) = mock_broker("200 OK", TOKEN_JSON).await;
+        let token = broker_auth(&base)
+            .exchange_code(&Client::new(), "the-code")
+            .await
+            .expect("exchange");
+        assert_eq!(token.access_token, "AT");
+        assert_eq!(token.refresh_token.as_deref(), Some("RT"));
+        assert_eq!(token.refresh_token_expires_in, Some(47304000));
+        let raw = request.await.expect("request");
+        assert!(raw.starts_with("POST /ebay/token "), "got {raw}");
+        assert!(raw.contains(r#""code":"the-code""#));
+    }
+
+    #[tokio::test]
+    async fn broker_refresh_posts_the_refresh_token() {
+        let (base, request) = mock_broker("200 OK", TOKEN_JSON).await;
+        let token = broker_auth(&base)
+            .refresh_token(&Client::new(), "my-refresh-token")
+            .await
+            .expect("refresh");
+        assert_eq!(token.access_token, "AT");
+        let raw = request.await.expect("request");
+        assert!(raw.starts_with("POST /ebay/refresh "), "got {raw}");
+        assert!(raw.contains(r#""refresh_token":"my-refresh-token""#));
+    }
+
+    #[tokio::test]
+    async fn a_broker_rejection_surfaces_as_an_auth_error_with_the_reason() {
+        let (base, _request) = mock_broker(
+            "502 Bad Gateway",
+            r#"{"error":"upstream_rejected","upstream_error":"invalid_grant"}"#,
+        )
+        .await;
+        let err = broker_auth(&base)
+            .exchange_code(&Client::new(), "expired")
+            .await
+            .expect_err("must fail");
+        let text = err.to_string();
+        assert!(text.contains("502") && text.contains("invalid_grant"), "got {text}");
     }
 }
