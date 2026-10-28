@@ -128,6 +128,24 @@ impl EbayAuth {
         )
     }
 
+    /// Whether `returned` is the `state` issued for the attempt in progress. Unlike
+    /// [`EbayAuth::verify_callback_state`] this does not consume the stored value, so
+    /// the auth window can ask it of every page that carries a `code`: eBay's sign-in
+    /// can bounce through Google, Apple or Facebook, whose own callbacks carry a `code`
+    /// and a `state` of their own and must be ignored, not rejected.
+    pub fn state_matches_pending(&self, returned: Option<&str>) -> bool {
+        let pending = self
+            .pending_state
+            .lock()
+            .expect("eBay OAuth state lock poisoned");
+        match (pending.as_deref(), returned) {
+            (Some(expected), Some(returned)) => {
+                constant_time_eq(expected.as_bytes(), returned.as_bytes())
+            }
+            _ => false,
+        }
+    }
+
     /// Check the `state` value eBay returned on the redirect callback against
     /// the value stored when the authorize URL was issued for this attempt.
     ///
@@ -358,6 +376,28 @@ mod tests {
         // And a callback with no issued attempt at all is rejected too.
         let fresh = test_auth();
         assert!(fresh.verify_callback_state(Some("anything")).is_err());
+    }
+
+    #[test]
+    fn a_foreign_state_is_not_ours_and_asking_does_not_consume_ours() {
+        let auth = test_auth();
+        let issued = state_param(&auth.authorization_url()).expect("state param");
+        // A third-party sign-in (Google) callback carries its own state: not ours.
+        assert!(!auth.state_matches_pending(Some("a-state-issued-by-google-not-by-us")));
+        assert!(!auth.state_matches_pending(None));
+        // Looking is not consuming: ours still matches, and still verifies once.
+        assert!(auth.state_matches_pending(Some(&issued)));
+        assert!(auth.state_matches_pending(Some(&issued)));
+        assert!(auth.verify_callback_state(Some(&issued)).is_ok());
+        assert!(
+            !auth.state_matches_pending(Some(&issued)),
+            "consumed by verify"
+        );
+    }
+
+    #[test]
+    fn state_matching_needs_an_attempt_in_progress() {
+        assert!(!test_auth().state_matches_pending(Some("anything")));
     }
 
     #[test]
