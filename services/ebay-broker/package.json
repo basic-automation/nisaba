@@ -1,0 +1,8 @@
+{
+  "name": "nisaba-ebay-broker",
+  "private": true,
+  "description": "Stateless eBay OAuth broker for Nisaba. No dependencies.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node server.mjs", "test": "node --test" }
+}
