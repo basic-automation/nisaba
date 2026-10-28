@@ -189,10 +189,7 @@ pub struct EbayConfig {
 /// The eBay broker compiled into this build (`NISABA_EBAY_BROKER_URL` at build time),
 /// or an empty string when the build has none.
 pub fn default_ebay_broker_url() -> &'static str {
-    match option_env!("NISABA_EBAY_BROKER_URL") {
-        Some(url) => url,
-        None => "",
-    }
+    option_env!("NISABA_EBAY_BROKER_URL").unwrap_or_default()
 }
 
 /// A broker receives the user's authorization code and refresh token, so it must be
