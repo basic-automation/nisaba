@@ -102,6 +102,39 @@ impl EbayAuth {
         }
     }
 
+    /// Whether sign-in goes through the Nisaba broker (and so can run in the user's own
+    /// browser) instead of directly with this struct's own keys.
+    pub fn uses_broker(&self) -> bool {
+        self.broker.is_some()
+    }
+
+    /// Issue and store a fresh state for this attempt. A loopback sign-in prefixes it with
+    /// the port of the listener waiting in the app (`<port>.<random>`), which is how the
+    /// broker knows where to send the browser back to without storing anything.
+    fn issue_state(&self, loopback_port: Option<u16>) -> String {
+        let token = CsrfToken::new_random().secret().to_owned();
+        let state = match loopback_port {
+            Some(port) => format!("{port}.{token}"),
+            None => token,
+        };
+        *self
+            .pending_state
+            .lock()
+            .expect("eBay OAuth state lock poisoned") = Some(state.clone());
+        state
+    }
+
+    /// The broker URL to open in the user's own browser, whose callback the broker forwards
+    /// to `127.0.0.1:<port>`. `None` unless sign-in goes through a broker.
+    pub fn authorization_url_for_loopback(&self, port: u16) -> Option<String> {
+        let broker = self.broker.as_ref()?;
+        let state = self.issue_state(Some(port));
+        Some(format!(
+            "{broker}/ebay/authorize?state={}",
+            urlencoding(&state)
+        ))
+    }
+
     /// Generate the URL the user must visit for initial OAuth authorization.
     ///
     /// Each call issues a fresh, unguessable `state` token (128 bits of
@@ -109,12 +142,7 @@ impl EbayAuth {
     /// includes it in the URL. The redirect callback must echo the same
     /// `state`; see [`EbayAuth::verify_callback_state`].
     pub fn authorization_url(&self) -> String {
-        let state = CsrfToken::new_random();
-        let state_str = state.secret().to_owned();
-        *self
-            .pending_state
-            .lock()
-            .expect("eBay OAuth state lock poisoned") = Some(state_str.clone());
+        let state_str = self.issue_state(None);
         if let Some(broker) = &self.broker {
             return format!("{broker}/ebay/authorize?state={}", urlencoding(&state_str));
         }
@@ -376,6 +404,32 @@ mod tests {
         // And a callback with no issued attempt at all is rejected too.
         let fresh = test_auth();
         assert!(fresh.verify_callback_state(Some("anything")).is_err());
+    }
+
+    #[test]
+    fn a_loopback_sign_in_encodes_its_port_in_the_state_and_still_verifies_once() {
+        let auth = broker_auth("https://broker.example");
+        assert!(auth.uses_broker());
+        let url = auth
+            .authorization_url_for_loopback(54321)
+            .expect("broker mode");
+        assert!(
+            url.starts_with("https://broker.example/ebay/authorize?state=54321."),
+            "got {url}"
+        );
+        let issued = state_param(&url).expect("state param");
+        assert!(auth.verify_callback_state(Some(&issued)).is_ok());
+        assert!(
+            auth.verify_callback_state(Some(&issued)).is_err(),
+            "single use"
+        );
+    }
+
+    #[test]
+    fn direct_mode_has_no_loopback_sign_in() {
+        let auth = test_auth();
+        assert!(!auth.uses_broker());
+        assert!(auth.authorization_url_for_loopback(54321).is_none());
     }
 
     #[test]
