@@ -28,6 +28,7 @@ pub async fn create_product(
     sku: String,
     quantity: i64,
     low_stock_threshold: Option<i64>,
+    with_default_variant: Option<bool>,
 ) -> Result<Product, String> {
     let db = state.active_db().await?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -46,25 +47,29 @@ pub async fn create_product(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Auto-create a default variant
-    let variant = ProductVariant {
-        id: uuid::Uuid::new_v4().to_string(),
-        product_id: id.clone(),
-        sku,
-        name: "Default".to_string(),
-        attributes: HashMap::new(),
-        quantity,
-        on_hand_quantity: quantity,
-        image_url: None,
-        sort_order: 0,
-        source_plugin_id: None,
-        source_vendor_item_id: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    db.insert_variant(&variant)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Auto-create a default variant, unless the caller is about to create the real
+    // ones (a listing import): a second variant with the same SKU would violate the
+    // unique (product_id, sku) index.
+    if with_default_variant.unwrap_or(true) {
+        let variant = ProductVariant {
+            id: uuid::Uuid::new_v4().to_string(),
+            product_id: id.clone(),
+            sku,
+            name: "Default".to_string(),
+            attributes: HashMap::new(),
+            quantity,
+            on_hand_quantity: quantity,
+            image_url: None,
+            sort_order: 0,
+            source_plugin_id: None,
+            source_vendor_item_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        db.insert_variant(&variant)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     db.get_product(&id)
         .await
