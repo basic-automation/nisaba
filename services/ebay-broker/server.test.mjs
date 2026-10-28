@@ -87,6 +87,41 @@ test('callback page is static, uncacheable and leaks no referrer', () =>
     assert.ok(!(await r.text()).includes('SECRETCODE'))
   }))
 
+test('callback forwards a loopback sign-in to the app on 127.0.0.1, passing only code and state', () =>
+  withBroker({}, async (base) => {
+    const r = await fetch(`${base}/ebay/callback?code=CODE123&state=54321.abcdefghijklmnopqrst&expires_in=299&evil=1`, { redirect: 'manual' })
+    assert.equal(r.status, 302)
+    assert.equal(r.headers.get('location'), 'http://127.0.0.1:54321/ebay/callback?code=CODE123&state=54321.abcdefghijklmnopqrst')
+    assert.equal(r.headers.get('referrer-policy'), 'no-referrer')
+  }))
+
+test('callback forwards a decline to the app too', () =>
+  withBroker({}, async (base) => {
+    const r = await fetch(`${base}/ebay/callback?error=access_denied&error_description=The+user+denied&state=40000.abcdefghijklmnopqrst`, { redirect: 'manual' })
+    assert.equal(r.status, 302)
+    const loc = new URL(r.headers.get('location'))
+    assert.equal(loc.origin, 'http://127.0.0.1:40000')
+    assert.equal(loc.searchParams.get('error'), 'access_denied')
+  }))
+
+test('callback never redirects anywhere but loopback, and only for a valid port prefix', () =>
+  withBroker({}, async (base) => {
+    for (const state of [
+      'abcdefghijklmnop0123',                         // no port: the page, as for the embedded flow
+      '80.abcdefghijklmnopqrst',                      // port too short
+      '1023.abcdefghijklmnopqrst',                    // privileged range
+      '65536.abcdefghijklmnopqrst',                   // out of range
+      '12345.short',                                  // random part too short
+      'evil.com:80.abcdefghijklmnopqrst',             // not digits
+      '//evil.example/.abcdefghijklmnopqrst',
+      '54321@evil.example.abcdefghijklmnopqrst',
+    ]) {
+      const r = await fetch(`${base}/ebay/callback?code=C&state=${encodeURIComponent(state)}`, { redirect: 'manual' })
+      assert.equal(r.status, 200, state)
+      assert.equal(r.headers.get('location'), null, state)
+    }
+  }))
+
 test('token exchange uses Basic auth, the RuName, and returns only the whitelisted fields', () =>
   withBroker({}, async (base) => {
     const r = await post(`${base}/ebay/token`, { code: 'good-code' })
