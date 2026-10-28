@@ -61,7 +61,9 @@ The Inventory API by SKU, the Trading API by ItemID — so a mapping created fro
 
 ## Support eBay's modernized REST and GraphQL APIs
 
-eBay's developer pages now announce that its modernized REST and GraphQL APIs are generally available, with migration guides, SDKs and API Explorers. This item is to decide how much of that Nisaba adopts and to build it. Nothing here has been implemented or tested against a live account.
+eBay's announcement "The Next Generation of eBay APIs Is Now Generally Available" (seen 2026-10-27) says the Modernized APIs, a new generation of REST and GraphQL APIs, are generally available and are the path toward retiring its Traditional APIs, "including SOAP/XML and non-standard REST APIs". The catalogs are at https://developer.ebay.com/develop/api/sell and https://developer.ebay.com/develop/api/buy, and the launch ships migration guides, SDKs and API Explorers. This item is to decide how much of that Nisaba adopts and to build it. Nothing here has been implemented or tested against a live account.
+
+Open question that sets the urgency: the announcement does not say whether the Sell Inventory API counts as "non-standard REST" and so is also on the retirement path, or only the Trading API's SOAP/XML is. The adapter depends on both.
 
 What is known (eBay's Trading API release notes and API deprecation status page, read 2026-10-27): the Trading API is being retired call by call, not all at once. `GetCategories` (release 1453) and `GetCategoryFeatures` (1475) are already decommissioned, and `UploadSiteHostedPictures` was decommissioned on 2026-09-30. The Trading API is the older of the two surfaces the eBay adapter reads through; the Sell Inventory API is the other (see "eBay's two read paths key listings differently").
 
