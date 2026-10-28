@@ -284,6 +284,15 @@ async function handleFinish() {
 }
 
 // eBay OAuth
+async function handleEbayCancel() {
+  try {
+    await invoke('cancel_ebay_auth')
+  } finally {
+    ebayAuthLoading.value = false
+    ebayAuthMessage.value = ''
+  }
+}
+
 async function handleEbayAuth() {
   ebayAuthLoading.value = true
   ebayAuthMessage.value = ''
@@ -293,7 +302,10 @@ async function handleEbayAuth() {
     // is on screen (broker mode, or the typed keys) must be saved first.
     await stagePlatformConfig('ebay')
     await invoke('start_ebay_auth')
-    ebayAuthMessage.value = 'Sign in on the eBay window...'
+    // One-click sign-in opens your own browser; your own keys use an eBay window here.
+    ebayAuthMessage.value = useOwnEbayKeys.value
+      ? 'Sign in on the eBay window...'
+      : 'Finish signing in in your browser, then come back here.'
   } catch (e: any) {
     ebayAuthMessage.value = `Error: ${e}`
     ebayAuthLoading.value = false
@@ -661,6 +673,13 @@ onUnmounted(() => {
               @click="handleEbayAuth"
             >
               {{ ebayAuthLoading ? 'Waiting for authorization...' : 'Authorize with eBay' }}
+            </button>
+            <button
+              v-if="ebayAuthLoading"
+              class="ml-4 text-[11px] text-muted/40 hover:text-muted/60 transition-colors"
+              @click="handleEbayCancel"
+            >
+              Cancel
             </button>
 
             <!-- Manual code fallback -->
