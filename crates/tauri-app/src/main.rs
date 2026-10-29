@@ -113,6 +113,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .register_uri_scheme_protocol("cachedimg", commands::images::handle_protocol_request)
@@ -369,7 +370,8 @@ fn main() {
             commands::company::leave_company,
             commands::company::get_company,
             commands::company::get_onion_address,
-            commands::company::get_company_secret,
+            commands::company::reveal_company_secret,
+            commands::company::copy_company_secret,
             commands::company::add_company_peer,
             commands::company::remove_company_peer,
             commands::company::approve_company_peer,

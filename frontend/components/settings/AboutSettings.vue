@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
 
-// N-11.4: About view in the settings window. Shows the app version and hosts
+// N-11.4: About tab of Settings. Shows the app version and hosts
 // the one-button diagnostics export (the 1.0 replacement for telemetry /
 // crash-reporting services).
 const { notify } = useNotifications()

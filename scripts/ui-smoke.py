@@ -127,10 +127,8 @@ def x11_screenshot(path):
     WebKitWebDriver's screenshot endpoint hangs in this environment, and its
     window-switch call drops the connection outright, so capture pixels
     directly: find the main window in the X tree by its exact native title
-    ("Nisaba - Inventory Sync"; the settings window is "Nisaba — Platform
-    Setup"), raise it above the wizard window (which opens centered on top
-    at startup), and grab it with ImageMagick. Fails loudly (never hangs)
-    when the window or the tools are missing.
+    ("Nisaba - Inventory Sync"), raise it, and grab it with ImageMagick.
+    Fails loudly (never hangs) when the window or the tools are missing.
     """
     tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
     m = re.search(r'(0x[0-9a-f]+)\s+"Nisaba - Inventory Sync"', tree.stdout)
@@ -140,25 +138,6 @@ def x11_screenshot(path):
     subprocess.run(["xdotool", "windowraise", win_id], check=True)
     time.sleep(0.5)  # let the restack take effect before grabbing pixels
     subprocess.run(["import", "-window", win_id, path], check=True)
-
-
-def close_wizard_window():
-    """Close the setup-wizard window via X11, never via WebDriver.
-
-    The only run that ever got through the tab loop (run #165) did so with
-    the wizard window closed; both runs that kept it open during the loop
-    died on driver connection drops. WebDriver window calls are out (they
-    drop the connection themselves), so close it with xdotool instead.
-    If no wizard window is found, or it does not close, warn and proceed —
-    the raise in x11_screenshot still gives clean captures.
-    """
-    tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
-    for m in re.finditer(r'(0x[0-9a-f]+)\s+"[^"]*Platform Setup[^"]*"', tree.stdout):
-        subprocess.run(["xdotool", "windowclose", m.group(1)], check=False)
-    time.sleep(1)
-    tree = subprocess.run(["xwininfo", "-root", "-tree"], capture_output=True, text=True)
-    if re.search(r'"[^"]*Platform Setup[^"]*"', tree.stdout):
-        print("wizard window still open after windowclose; proceeding anyway", file=sys.stderr)
 
 
 def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
@@ -188,10 +167,7 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
             timeout=120,
         )["sessionId"]
 
-        # The main window no longer navigates to /setup on launch (the setup wizard
-        # moved to the dedicated settings window). The WebDriver session stays on
-        # the main window, so wait for the Nuxt app to mount there, then drive
-        # its router directly.
+        # Wait for the Nuxt app to mount, then drive its router directly.
         wait_for(
             "the app to mount",
             lambda: run_js(
@@ -200,14 +176,20 @@ def smoke(app, fixture, workdir, screenshot, seed_catalog=False):
                 "document.querySelector('#__nuxt').__vue_app__)",
             ),
         )
+        # A company with no platforms sends the app to the setup wizard on
+        # launch. Let that redirect land first so it cannot overtake the push.
+        deadline = time.time() + 8
+        while time.time() < deadline and run_js(
+            session,
+            "return document.querySelector('#__nuxt').__vue_app__"
+            ".config.globalProperties.$router.currentRoute.value.path",
+        ) != "/setup":
+            time.sleep(0.5)
         run_js_idempotent(
             session,
             "document.querySelector('#__nuxt').__vue_app__"
             ".config.globalProperties.$router.push('/marketplace')",
         )
-        # Close the wizard window (via X11, not WebDriver) before driving
-        # the tabs, restoring the single-window condition of run #165.
-        close_wizard_window()
         failures = []
         checks = 0
         for tab, cards in EXPECTED.items():

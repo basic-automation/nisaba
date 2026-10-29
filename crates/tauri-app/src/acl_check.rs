@@ -1,21 +1,18 @@
-//! N-2.7 targeted check: the Tauri ACL allow-lists must stay in sync with the
+//! N-2.7 targeted check: the Tauri ACL allow list must stay in sync with the
 //! commands registered in `tauri::generate_handler!`.
 //!
 //! Tauri ACL command names do not support wildcards, and once ANY app
 //! permission exists, every app command not explicitly allowed for a window is
 //! denied there. These tests fail the build if a command is added to the
-//! handler without updating `permissions/main-window.toml` and
-//! `permissions/settings-window.toml`.
+//! handler without updating `permissions/main-window.toml`.
+//!
+//! The main window renders untrusted HTML with full IPC access and also hosts
+//! Settings, so no command may return a secret (see `nisaba_core::masked`).
 
-/// Commands that return secrets. They must be invocable ONLY from the
-/// dedicated settings window, never from the main window (which renders
-/// untrusted HTML with full IPC access).
+/// Commands that used to return a secret to the webview. They must never be
+/// registered again.
 #[cfg(test)]
-const SECRET_COMMANDS: &[&str] = &[
-    "get_company_secret",
-    "get_config",
-    "get_company_platform_config",
-];
+const RETIRED_SECRET_COMMANDS: &[&str] = &["get_company_secret"];
 
 /// Extract the command idents registered in `tauri::generate_handler![...]`
 /// in src/main.rs.
@@ -94,42 +91,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_window_allows_every_handler_command() {
+    fn main_window_allows_every_handler_command() {
         let handler = handler_commands();
-        let allowed = permission_allow_list("settings-window.toml");
+        let allowed = permission_allow_list("main-window.toml");
         // Exact match: a typo'd or stale entry is a bug, not a warning.
         assert_eq!(
             allowed, handler,
-            "settings-window.toml allow list must exactly match generate_handler! commands"
+            "main-window.toml allow list must exactly match generate_handler! commands"
         );
     }
 
     #[test]
-    fn main_window_denies_secret_commands_only() {
-        let mut handler = handler_commands();
-        for secret in SECRET_COMMANDS {
+    fn secret_returning_commands_stay_retired() {
+        let handler = handler_commands();
+        for retired in RETIRED_SECRET_COMMANDS {
             assert!(
-                handler.contains(&secret.to_string()),
-                "{secret} must be a registered handler command"
+                !handler.contains(&retired.to_string()),
+                "{retired} returns a secret to the webview and must not be registered"
             );
         }
-        handler.retain(|c| !SECRET_COMMANDS.contains(&c.as_str()));
-
-        let allowed = permission_allow_list("main-window.toml");
-        assert_eq!(
-            allowed, handler,
-            "main-window.toml must allow every handler command except the secret-returning ones"
-        );
     }
 
     #[test]
-    fn secret_commands_are_not_allowed_on_main_window() {
-        let allowed = permission_allow_list("main-window.toml");
-        for secret in SECRET_COMMANDS {
-            assert!(
-                !allowed.contains(&secret.to_string()),
-                "{secret} must NOT be invocable from the main window"
-            );
-        }
+    fn there_is_no_second_window_capability() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let mut caps: Vec<String> = std::fs::read_dir(format!("{manifest_dir}/capabilities"))
+            .expect("capabilities dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        caps.sort();
+        assert_eq!(caps, ["default.json"], "one window, one capability");
     }
 }
