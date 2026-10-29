@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import type { Platform, PlatformListing, PlatformMapping, ProductVariant } from '~/types'
+import type { Platform, PlatformListing, PlatformMapping, Product, ProductVariant } from '~/types'
 import { invoke } from '@tauri-apps/api/core'
 
-const { products, fetchProducts, createProduct, createVariant, listVariants, createMapping, getMappingsBatch } = useProducts()
+const { products, fetchProducts, createProduct, deleteProduct, createVariant, listVariants, createMapping, getMappingsBatch } = useProducts()
 const { resolveThumb, ensureCached } = useImageCache()
 
 const platforms: { key: Platform; label: string }[] = [
@@ -277,15 +277,21 @@ watch(activePlatform, async (platform) => {
 async function importGroup(group: ListingGroup) {
   const first = group.variants[0]
   const canonicalSku = first.sku || first.platform_item_id
+  let product: Product | null = null
+  let failedVariant = ''
   try {
-    // Create product + N variants + N platform_mappings
-    const product = await createProduct(
+    // Create product + N variants + N platform_mappings. No auto "Default" variant:
+    // the first real variant shares the canonical SKU and would collide with it.
+    product = await createProduct(
       group.title,
       canonicalSku,
       group.totalQty,
+      undefined,
+      false,
     )
     const itemIds: string[] = []
     for (const variant of group.variants) {
+      failedVariant = variant.sku || variant.platform_item_id
       const newVariant = await createVariant(
         product.id,
         variant.sku || variant.platform_item_id,
@@ -306,25 +312,43 @@ async function importGroup(group: ListingGroup) {
   } catch (e: any) {
     const msg = String(e)
     const isSkuDupe = msg.includes('UNIQUE constraint failed') && msg.includes('canonical_sku')
+    // All or nothing: a product missing some of its variants would sync wrong stock,
+    // so drop the half-built product instead of leaving it behind.
+    const rollback = await rollbackImport(product)
     notify({
       type: 'error',
       title: 'Import failed',
       message: isSkuDupe
         ? `A product with SKU "${canonicalSku}" already exists. Try linking instead.`
-        : msg,
+        : `${group.title}: variant "${failedVariant}" could not be imported, so nothing was imported. ${msg}${rollback}`,
       detail: msg,
       source: 'listings',
     })
   }
 }
 
+/** Delete a product left behind by a failed import. Returns text to append to the error. */
+async function rollbackImport(product: Product | null): Promise<string> {
+  if (!product) return ''
+  try {
+    await deleteProduct(product.id)
+    await loadMappings()
+    return ''
+  } catch (e: any) {
+    return ` The partial product "${product.name}" could not be removed: ${String(e)}`
+  }
+}
+
 async function importSingleListing(listing: PlatformListing) {
   const canonicalSku = listing.sku || listing.platform_item_id
+  let product: Product | null = null
   try {
-    const product = await createProduct(
+    product = await createProduct(
       listing.title,
       canonicalSku,
       listing.quantity,
+      undefined,
+      false,
     )
     // Every mapping needs a variant — create one from the listing
     const variant = await createVariant(
@@ -343,12 +367,13 @@ async function importSingleListing(listing: PlatformListing) {
   } catch (e: any) {
     const msg = String(e)
     const isSkuDupe = msg.includes('UNIQUE constraint failed') && msg.includes('canonical_sku')
+    const rollback = await rollbackImport(product)
     notify({
       type: 'error',
       title: 'Import failed',
       message: isSkuDupe
         ? `A product with SKU "${canonicalSku}" already exists. Try linking instead.`
-        : msg,
+        : `${msg}${rollback}`,
       detail: msg,
       source: 'listings',
     })
