@@ -189,6 +189,9 @@ pub struct EbayConfig {
 /// The eBay broker compiled into this build (`NISABA_EBAY_BROKER_URL` at build time),
 /// or an empty string when the build has none.
 pub fn default_ebay_broker_url() -> &'static str {
+    if crate::sandbox::enabled() {
+        return crate::sandbox::default_broker_url();
+    }
     option_env!("NISABA_EBAY_BROKER_URL").unwrap_or_default()
 }
 
@@ -231,10 +234,23 @@ impl EbayConfig {
         Ok(Some(url.trim_end_matches('/').to_string()))
     }
 
-    /// Whether to talk to eBay's sandbox. The Nisaba broker holds a production keyset,
-    /// so broker mode is always production whatever `environment` says.
+    /// Whether to talk to eBay's sandbox. In broker mode the broker's keyset decides, and
+    /// that follows the app's sandbox mode (see [`crate::sandbox`]) whatever `environment`
+    /// says; with the user's own keys, `environment` decides.
     pub fn is_sandbox(&self) -> bool {
-        !matches!(self.broker(), Ok(Some(_))) && self.environment != "production"
+        Self::sandbox_for(
+            matches!(self.broker(), Ok(Some(_))),
+            &self.environment,
+            crate::sandbox::enabled(),
+        )
+    }
+
+    fn sandbox_for(uses_broker: bool, environment: &str, sandbox_mode: bool) -> bool {
+        if uses_broker {
+            sandbox_mode
+        } else {
+            environment != "production"
+        }
     }
 }
 
@@ -310,6 +326,9 @@ pub struct AmazonConfig {
 /// The Amazon broker compiled into this build: `NISABA_AMAZON_BROKER_URL` at build time,
 /// else the eBay one (the same hosted service serves both), else an empty string.
 pub fn default_amazon_broker_url() -> &'static str {
+    if crate::sandbox::enabled() {
+        return crate::sandbox::default_broker_url();
+    }
     option_env!("NISABA_AMAZON_BROKER_URL").unwrap_or(default_ebay_broker_url())
 }
 
@@ -422,7 +441,12 @@ impl AppConfig {
             dirs_fallback()
                 .ok_or_else(|| SyncError::ConfigError("Cannot determine config directory".into()))?
         };
-        Ok(base.join("nisaba"))
+        // Sandbox mode keeps its own config, catalog and tokens (see `crate::sandbox`).
+        Ok(base.join(if crate::sandbox::enabled() {
+            "nisaba-sandbox"
+        } else {
+            "nisaba"
+        }))
     }
 
     /// Return the default config file path inside the data directory.
@@ -922,8 +946,17 @@ mod ebay_broker_tests {
     fn a_configured_broker_is_used_when_there_are_no_own_keys() {
         let c = cfg("", "https://broker.example/", "sandbox");
         assert_eq!(c.broker(), Ok(Some("https://broker.example".to_string())));
-        // Broker mode is production whatever the stored environment says.
+        // Broker mode follows the app's sandbox mode (off under `cargo test`), whatever the
+        // stored environment says.
         assert!(!c.is_sandbox());
+    }
+
+    #[test]
+    fn broker_mode_follows_sandbox_mode_and_own_keys_follow_the_environment() {
+        assert!(EbayConfig::sandbox_for(true, "production", true));
+        assert!(!EbayConfig::sandbox_for(true, "sandbox", false));
+        assert!(EbayConfig::sandbox_for(false, "sandbox", false));
+        assert!(!EbayConfig::sandbox_for(false, "production", true));
     }
 
     #[test]
