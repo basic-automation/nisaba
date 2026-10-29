@@ -1,25 +1,25 @@
 "$schema" = "../gen/schemas/acl-manifests.json"
 
-# N-2.7: Tauri capability split for secret-returning commands.
+# N-2.7: no command returns a secret to any webview.
 #
 # The main window renders untrusted HTML (marketplace listing descriptions,
-# vendor plugin descriptions) with full IPC access, so it must not be able to
-# invoke commands that return secrets. This permission allows every app command
-# EXCEPT the secret-returning ones:
-#   - get_company_secret          (plaintext company secret from the OS keyring)
-#   - get_config                  (AppConfig incl. platform secrets)
-#   - get_company_platform_config (per-company platform secrets)
-# Those are only allowed in the dedicated settings window
-# (see settings-window.toml + capabilities/settings.json).
+# vendor plugin descriptions) with full IPC access, so anything a command
+# returns is readable by injected script. Settings live in this window, so the
+# commands it uses never hand a secret back:
+#   - get_config, get_company_platform_config and get_vendor_plugin_config mask
+#     every stored secret (nisaba_core::masked); saves keep a masked value as is.
+#   - the company secret is only shown in a native dialog
+#     (reveal_company_secret) or put on the OS clipboard from Rust
+#     (copy_company_secret).
 #
 # IMPORTANT: Tauri ACL command names do NOT support wildcards, and once ANY app
 # permission exists, every app command not explicitly allowed is DENIED. When
 # adding a command to `tauri::generate_handler!` in src/main.rs, add it to the
-# allow list below AND to settings-window.toml — `cargo test -p nisaba-tauri`
-# (src/acl_check.rs) enforces this.
+# allow list below — `cargo test -p nisaba-tauri` (src/acl_check.rs) enforces
+# this.
 [[permission]]
 identifier = "main-window"
-description = "All Nisaba app commands except the secret-returning commands (main window)."
+description = "All Nisaba app commands (main window)."
 commands.allow = [
   "add_company_peer",
   "apply_import_data",
@@ -28,11 +28,12 @@ commands.allow = [
   "backup_now",
   "cache_images",
   "cache_listing_detail",
-  "cancel_ebay_auth",
   "cancel_amazon_auth",
+  "cancel_ebay_auth",
   "check_platform_auth",
   "complete_amazon_auth",
   "complete_ebay_auth",
+  "copy_company_secret",
   "create_company",
   "create_listing_on_platform",
   "create_mapping",
@@ -57,20 +58,22 @@ commands.allow = [
   "get_all_product_first_photos",
   "get_all_product_prices",
   "get_all_variant_skus",
+  "get_amazon_broker_url",
   "get_app_version",
   "get_cached_listings",
   "get_cached_platform_listings",
   "get_cached_vendor_listings",
   "get_company",
+  "get_company_platform_config",
+  "get_config",
+  "get_credential_health",
+  "get_ebay_broker_url",
   "get_logs",
   "get_mappings",
   "get_mappings_batch",
   "get_onion_address",
   "get_platform_capabilities",
   "get_platform_health",
-  "get_credential_health",
-  "get_ebay_broker_url",
-  "get_amazon_broker_url",
   "get_plugin_run_history",
   "get_pricing_history",
   "get_product",
@@ -87,8 +90,6 @@ commands.allow = [
   "get_vendor_plugin_config",
   "get_vendor_sync_status",
   "get_xmrbazaar_monero_address",
-  "preview_import_data",
-  "preview_sync",
   "import_vendor_listings",
   "import_vendor_plugin",
   "install_vendor_plugin",
@@ -103,6 +104,8 @@ commands.allow = [
   "load_image_cache_manifest",
   "migrate_listing",
   "pause_sync",
+  "preview_import_data",
+  "preview_sync",
   "reject_company_peer",
   "reject_vendor_plugin",
   "remove_company_logo",
@@ -110,6 +113,7 @@ commands.allow = [
   "remove_registry_plugin",
   "restore_backup",
   "resume_sync",
+  "reveal_company_secret",
   "set_peer_role",
   "set_vendor_include_stock",
   "set_vendor_plugin_config",

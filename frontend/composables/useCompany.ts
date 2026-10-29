@@ -56,8 +56,14 @@ export function useCompany() {
     return addr
   }
 
-  async function getCompanySecret(): Promise<string | null> {
-    return invoke<string | null>('get_company_secret')
+  /** Shows the company secret in a native dialog; it never reaches the webview. */
+  async function revealCompanySecret(): Promise<void> {
+    await invoke('reveal_company_secret')
+  }
+
+  /** Copies the company secret to the clipboard from the backend. */
+  async function copyCompanySecret(): Promise<void> {
+    await invoke('copy_company_secret')
   }
 
   async function addPeer(onionAddr: string, name: string) {
@@ -135,7 +141,8 @@ export function useCompany() {
     joinCompany,
     leaveCompany,
     getOnionAddress,
-    getCompanySecret,
+    revealCompanySecret,
+    copyCompanySecret,
     addPeer,
     removePeer,
     approvePeer,

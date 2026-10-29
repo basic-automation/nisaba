@@ -5,15 +5,6 @@ import type { PlatformCapabilities } from '~/types'
 const { activeCompanyId, activeCompany, companiesInitialized } = useCompanyContext()
 const route = useRoute()
 
-// N-2.7: the dedicated settings window (label `nisaba-settings`) is the only
-// context allowed to invoke secret-returning Tauri commands. It hosts just the
-// settings views; the target view arrives via the URL hash (#settings:config).
-const inSettingsWindow = isSettingsWindow()
-if (inSettingsWindow) {
-  const { view, query } = parseSettingsHash()
-  navigateTo({ path: view === 'setup' ? '/setup' : `/${view}`, query })
-}
-
 // Pre-load image cache manifest immediately so cached images resolve instantly
 // on all pages without waiting for per-page IPC calls.
 const { loadManifest } = useImageCache()
@@ -34,8 +25,6 @@ async function remountPages() {
 
 /** Redirect to setup wizard if active company has no platforms configured. */
 async function checkPlatformConfig() {
-  // The settings window never nudges anywhere — the user opened it deliberately.
-  if (inSettingsWindow) return
   const id = activeCompanyId.value
   const company = activeCompany.value
   if (!id || !company) return
@@ -45,8 +34,7 @@ async function checkPlatformConfig() {
   // Claim this company synchronously, BEFORE the async capability check
   // below: the two startup watchers (activeCompanyId, companiesInitialized)
   // can both fire in one tick, and without this the await lets both calls
-  // through to open a duplicate settings window (which also breaks
-  // WebDriver screenshots in CI). If capabilities turn out non-empty no
+  // through to navigate to the wizard twice. If capabilities turn out non-empty no
   // wizard is needed anyway, so claiming early changes nothing.
   dismissedSetupIds.add(id)
   try {
@@ -59,9 +47,7 @@ async function checkPlatformConfig() {
       } catch {
         // ignore; fall through to opening the wizard
       }
-      // Platform credentials are secrets: configuring them happens in the
-      // dedicated settings window, the only context allowed to read them.
-      await openSettingsWindow('setup', { companyId: id, companyName: company.name })
+      await navigateTo({ path: '/setup', query: { companyId: id, companyName: company.name } })
     }
   } catch {
     // ignore
@@ -90,7 +76,7 @@ watch(companiesInitialized, async (ready) => {
 </script>
 
 <template>
-  <NuxtLayout :name="inSettingsWindow ? 'settings' : 'default'">
+  <NuxtLayout>
     <NuxtPage v-if="showPage" />
   </NuxtLayout>
 </template>

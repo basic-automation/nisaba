@@ -70,20 +70,16 @@ async function fetchHealth() {
   }
 }
 
-// N-11.2: deep-link to the wizard step that renews this platform's
-// credential. From the main window the wizard lives in the dedicated
-// settings window; inside the settings window, navigate in place.
+// N-11.2: deep-link to the wizard step that renews this platform's credential.
 function openWizardFor(platform: Platform) {
-  const query = {
-    companyId: activeCompanyId.value ?? '',
-    companyName: activeCompany.value?.name ?? '',
-    platform,
-  }
-  if (isSettingsWindow()) {
-    navigateTo({ path: '/setup', query })
-  } else {
-    void openSettingsWindow('setup', query)
-  }
+  navigateTo({
+    path: '/setup',
+    query: {
+      companyId: activeCompanyId.value ?? '',
+      companyName: activeCompany.value?.name ?? '',
+      platform,
+    },
+  })
 }
 
 defineExpose({ refresh: fetchHealth })

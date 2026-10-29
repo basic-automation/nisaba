@@ -4,6 +4,7 @@ use std::sync::Arc;
 use nisaba_amazon::AmazonAdapter;
 use nisaba_core::config::AppConfig;
 use nisaba_core::crypto;
+use nisaba_core::masked;
 use nisaba_core::sync_engine::SyncCommand;
 use nisaba_core::traits::PlatformAdapter;
 use nisaba_core::types::{Platform, PlatformCapabilities};
@@ -15,9 +16,11 @@ use tracing::info;
 
 use crate::state::AppState;
 
+/// The app config for the settings UI, with every stored secret masked: no
+/// webview can read a secret back (see `nisaba_core::masked`).
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
-    Ok(state.config.read().await.clone())
+    Ok(masked::mask_app_config(&*state.config.read().await))
 }
 
 /// Non-secret accessor for the XMR Bazaar payout address.
@@ -51,7 +54,13 @@ pub async fn get_auto_install_updates(state: State<'_, AppState>) -> Result<bool
 }
 
 #[tauri::command]
-pub async fn update_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
+pub async fn update_config(
+    state: State<'_, AppState>,
+    mut config: AppConfig,
+) -> Result<(), String> {
+    // Secrets the UI left masked keep their stored value.
+    masked::restore_app_config(&mut config, &*state.config.read().await);
+
     // Reject a sync schedule the engine does not support (including a zero
     // interval) before anything is written or rebuilt; the error surfaces
     // in the UI as a failed save. `config.save` validates again as a
@@ -103,6 +112,8 @@ pub async fn get_setup_wizard_completed(state: State<'_, AppState>) -> Result<bo
         .unwrap_or(false))
 }
 
+/// The active company's platform config for the settings UI, with every stored
+/// secret masked (see `nisaba_core::masked`).
 #[tauri::command]
 pub async fn get_company_platform_config(
     state: State<'_, AppState>,
@@ -157,7 +168,9 @@ pub async fn get_company_platform_config(
                     stored.entry(key).or_insert(default_val);
                 }
             }
-            Ok(serde_json::Value::Object(stored))
+            let mut config = serde_json::Value::Object(stored);
+            masked::mask_company_config(&mut config);
+            Ok(config)
         }
         _ => Ok(defaults),
     }
@@ -175,6 +188,11 @@ pub async fn update_company_platform_config(
             .ok_or_else(|| "No active company".to_string())?
     };
 
+    // Secrets the UI left masked keep their stored value. This runs first so the
+    // rotation stamp below compares real values.
+    let stored = load_company_config_value(&state).await;
+    masked::restore_company_config(&mut config, stored.as_ref());
+
     // N-11.2: stamp when the Amazon LWA client secret was last changed, so
     // the credential-health UI can warn once it is due for rotation. The
     // comparison happens server-side against the stored config — the secret
@@ -184,12 +202,11 @@ pub async fn update_company_platform_config(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if !new_secret.is_empty() {
-        let old_secret = load_company_config_value(&state).await.and_then(|v| {
-            v.pointer("/amazon/client_secret")
-                .and_then(|s| s.as_str())
-                .map(|s| s.to_string())
-        });
-        if old_secret.as_deref() != Some(new_secret) {
+        let old_secret = stored
+            .as_ref()
+            .and_then(|v| v.pointer("/amazon/client_secret"))
+            .and_then(|s| s.as_str());
+        if old_secret != Some(new_secret) {
             if let Some(obj) = config.get_mut("amazon").and_then(|v| v.as_object_mut()) {
                 obj.insert(
                     "client_secret_updated_at".to_string(),

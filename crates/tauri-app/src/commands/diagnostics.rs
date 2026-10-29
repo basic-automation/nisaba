@@ -175,9 +175,8 @@ pub fn build_diagnostics_bundle(
 
 /// Non-secret accessor for the About page (N-11.4).
 ///
-/// The settings window's About view shows the app version next to the
-/// *Export diagnostics* button. A bare version string cannot leak anything,
-/// so this is allowed on every window (it is not a secret-returning command).
+/// Settings > About shows the app version next to the *Export diagnostics*
+/// button. A bare version string cannot leak anything.
 #[tauri::command]
 pub async fn get_app_version(app: AppHandle) -> Result<String, String> {
     Ok(app.package_info().version.to_string())

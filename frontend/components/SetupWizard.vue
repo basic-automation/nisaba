@@ -411,7 +411,7 @@ const unlisteners: (() => void)[] = []
 onMounted(async () => {
   // N-11.1: when reconfiguring an existing company (settings re-entry), start
   // from the saved values so Test connection works against real credentials.
-  // Runs in the settings window, the only context allowed to read secrets.
+  // Stored secrets arrive masked; saving a masked value keeps the stored one.
   if (isExisting) {
     try {
       const saved = await fetchCompanyConfig()
@@ -423,8 +423,7 @@ onMounted(async () => {
         }
       }
     } catch {
-      // Secret commands are denied outside the settings window; the wizard
-      // still works with blank fields there.
+      // No saved config yet: the wizard starts from blank fields.
     }
   }
 

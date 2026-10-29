@@ -39,6 +39,7 @@ base64 = "0.22"
 sha2 = "0.10"
 urlencoding = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+tauri-plugin-clipboard-manager = "2"
 
 [dev-dependencies]
 tempfile = "3"

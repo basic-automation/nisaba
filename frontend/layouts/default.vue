@@ -2,7 +2,7 @@
 const { fetchCompanies } = useCompanyContext()
 const { unreadCount } = useNotifications()
 
-const navItems: { label: string; path: string; icon: string; settingsView?: SettingsView; guideWindow?: boolean }[] = [
+const navItems: { label: string; path: string; icon: string; guideWindow?: boolean }[] = [
   { label: 'Dashboard', path: '/', icon: 'dashboard' },
   { label: 'Products', path: '/products', icon: 'package' },
   { label: 'Listings', path: '/listings', icon: 'listings' },
@@ -10,16 +10,12 @@ const navItems: { label: string; path: string; icon: string; settingsView?: Sett
   { label: 'Marketplace', path: '/marketplace', icon: 'marketplace' },
   { label: 'Inventory', path: '/inventory', icon: 'chart' },
   { label: 'Companies', path: '/companies', icon: 'company' },
-  // N-2.7: Config lives in the dedicated settings window (the only context
-  // allowed to invoke secret-returning commands) — opens on click instead of
-  // in-app routing.
-  { label: 'Config', path: '/config', icon: 'gear', settingsView: 'config' as const },
-  { label: 'About', path: '/about', icon: 'info', settingsView: 'about' as const },
   // N-12.1: the in-app user guide (frontend/public/guide/) opens in a
   // dedicated help window instead of in-app routing.
   { label: 'User guide', path: '/guide', icon: 'guide', guideWindow: true },
   { label: 'Notifications', path: '/notifications', icon: 'bell' },
   { label: 'Logs', path: '/logs', icon: 'document' },
+  { label: 'Settings', path: '/settings', icon: 'gear' },
 ]
 
 const route = useRoute()
@@ -28,16 +24,11 @@ function isActive(item: { path: string }) {
   return route.path === item.path || (item.path !== '/' && route.path.startsWith(item.path))
 }
 
-/** Settings views open in the dedicated settings window, not in-app. */
-function onNavClick(e: Event, item: { settingsView?: SettingsView; guideWindow?: boolean }) {
+/** The user guide opens in its own help window, not in-app. */
+function onNavClick(e: Event, item: { guideWindow?: boolean }) {
   if (item.guideWindow) {
     e.preventDefault()
     void openGuideWindow()
-    return
-  }
-  if (item.settingsView) {
-    e.preventDefault()
-    void openSettingsWindow(item.settingsView)
   }
 }
 
@@ -126,17 +117,10 @@ onMounted(() => {
             <path d="M10 7.5v3M7 13l2-2.5M13 13l-2-2.5" />
           </svg>
 
-          <!-- Config: Gear/cog -->
+          <!-- Settings: Gear/cog -->
           <svg v-else-if="item.icon === 'gear'" class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="10" cy="10" r="3" />
             <path d="M10 1.5v2M10 16.5v2M18.5 10h-2M3.5 10h-2M16 4l-1.4 1.4M5.4 14.6L4 16M16 16l-1.4-1.4M5.4 5.4L4 4" />
-          </svg>
-
-          <!-- About: Info circle -->
-          <svg v-else-if="item.icon === 'info'" class="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
-            <circle cx="10" cy="10" r="8" />
-            <path d="M10 9v5" />
-            <circle cx="10" cy="6" r="0.75" fill="currentColor" stroke="none" />
           </svg>
 
           <!-- User guide: Open book -->
