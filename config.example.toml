@@ -51,3 +51,4 @@ sync_interval_secs = 120           # P2P sync interval (seconds)
 
 [updates]
 check_for_updates = true           # Background update checks at launch and every 6 hours (the check leaves the machine; manual checks always work)
+auto_install = true                # Install an available update by itself at launch, then restart (needs check_for_updates)

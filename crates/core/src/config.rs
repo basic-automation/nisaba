@@ -376,17 +376,27 @@ fn default_low_stock_threshold() -> i64 {
 pub struct UpdatesConfig {
     #[serde(default = "default_check_for_updates")]
     pub check_for_updates: bool,
+    /// Install an available update by itself when the app starts, then restart into it.
+    /// Only at launch, when there is no unsaved work; later checks still just show the
+    /// update banner. Has no effect when `check_for_updates` is off.
+    #[serde(default = "default_auto_install_updates")]
+    pub auto_install: bool,
 }
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
             check_for_updates: default_check_for_updates(),
+            auto_install: default_auto_install_updates(),
         }
     }
 }
 
 fn default_check_for_updates() -> bool {
+    true
+}
+
+fn default_auto_install_updates() -> bool {
     true
 }
 
@@ -715,6 +725,26 @@ mod tests {
         opted_out.save(&path).unwrap();
         let reloaded = AppConfig::load(&path).unwrap();
         assert!(!reloaded.updates.check_for_updates);
+    }
+
+    #[test]
+    fn test_auto_install_defaults_to_on_and_roundtrips() {
+        assert!(AppConfig::default_config().updates.auto_install);
+
+        // A config from before the setting existed still loads, with it on, and an
+        // `[updates]` section that only opts out of checks keeps the default.
+        let legacy =
+            "[general]\nsync_schedule = \"0 */5 * * * *\"\n[updates]\ncheck_for_updates = false\n";
+        let parsed: AppConfig = toml::from_str(legacy).unwrap();
+        assert!(!parsed.updates.check_for_updates);
+        assert!(parsed.updates.auto_install);
+
+        let mut manual = AppConfig::default_config();
+        manual.updates.auto_install = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        manual.save(&path).unwrap();
+        assert!(!AppConfig::load(&path).unwrap().updates.auto_install);
     }
 
     #[test]

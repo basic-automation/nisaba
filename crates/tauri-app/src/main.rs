@@ -318,6 +318,7 @@ fn main() {
             // Config
             commands::config::get_config,
             commands::config::get_update_check_enabled,
+            commands::config::get_auto_install_updates,
             commands::config::get_xmrbazaar_monero_address,
             commands::config::update_config,
             commands::config::get_company_platform_config,
