@@ -57,6 +57,13 @@ CSP is disabled (`tauri.conf.json:31`, `"csp": null`). Marketplace listing descr
   publish page's payout-address prefill working). REMAINDER: strict CSP (still
   `"csp": null`) and DOMPurify sanitization of the `v-html` sinks — injected script in
   the main window can still invoke every non-secret command.
+- 2026-10-28: secrets became write-only instead. No command returns one to any webview:
+  `get_config`, `get_company_platform_config` and `get_vendor_plugin_config` return them
+  masked (`crates/core/src/masked.rs`), saves keep a masked value as it is, and the company
+  secret is shown in a native dialog or copied from Rust (`reveal_company_secret`,
+  `copy_company_secret`; `get_company_secret` is retired and `acl_check.rs` keeps it so).
+  The `nisaba-settings` window and its capability are gone; Settings is a tabbed page in
+  the main window.
 
 ## Money is `f64` from end to end (`core/src/types.rs` ~258, ~313)
 

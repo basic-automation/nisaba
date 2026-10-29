@@ -1235,6 +1235,13 @@ pub async fn set_vendor_plugin_config(
     }
 
     let db = state.active_db().await?;
+    // Secrets the UI left masked keep their stored value.
+    let mut config = config;
+    let stored = db
+        .get_plugin_config_merged(&plugin_id, &OsKeyringPluginSecrets)
+        .await
+        .map_err(|e| e.to_string())?;
+    nisaba_core::masked::restore_plugin_config(&mut config, &stored);
     // `secret: true` values go to the OS keyring, never to config_json.
     db.set_plugin_config_split(&plugin_id, &config, &OsKeyringPluginSecrets)
         .await
@@ -1294,11 +1301,22 @@ pub async fn get_vendor_plugin_config(
     plugin_id: String,
 ) -> Result<HashMap<String, String>, String> {
     let db = state.active_db().await?;
-    // Returns the effective config: `secret: true` values are injected from
-    // the OS keyring so the config form can pre-fill them.
-    db.get_plugin_config_merged(&plugin_id, &OsKeyringPluginSecrets)
+    // The effective config with `secret: true` values masked: the form shows
+    // that a secret is set, and no webview can read it back.
+    let mut config = db
+        .get_plugin_config_merged(&plugin_id, &OsKeyringPluginSecrets)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let secret_keys = match db
+        .get_registry_plugin(&plugin_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Some(plugin) => nisaba_core::db::secret_config_keys(plugin.config_fields.as_deref()),
+        None => Default::default(),
+    };
+    nisaba_core::masked::mask_plugin_config(&mut config, &secret_keys);
+    Ok(config)
 }
 
 // ── User install commands (local only) ────────────────────────

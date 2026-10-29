@@ -40,10 +40,13 @@ function hasCredIssue(p: PlatformHealth): boolean {
 // N-11.2: a credential warning in the status bar links straight to the
 // wizard step that renews the credential.
 function openWizardFor(platform: Platform) {
-  void openSettingsWindow('setup', {
-    companyId: activeCompanyId.value ?? '',
-    companyName: activeCompany.value?.name ?? '',
-    platform,
+  navigateTo({
+    path: '/setup',
+    query: {
+      companyId: activeCompanyId.value ?? '',
+      companyName: activeCompany.value?.name ?? '',
+      platform,
+    },
   })
 }
 

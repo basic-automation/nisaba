@@ -388,9 +388,10 @@ pub async fn get_onion_address(state: State<'_, AppState>) -> Result<Option<Stri
     }
 }
 
-#[tauri::command]
-pub async fn get_company_secret(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    // Admin only
+/// The active company's secret, for the admin-only reveal and copy commands.
+/// It never goes back to the webview: the main window renders untrusted
+/// marketplace and plugin HTML, so anything returned over IPC is readable there.
+async fn load_company_secret_for_admin(state: &AppState) -> Result<String, String> {
     let role = state.active_role().await?;
     if role != "admin" {
         return Err("Admin access required to view company secret".to_string());
@@ -403,13 +404,43 @@ pub async fn get_company_secret(state: State<'_, AppState>) -> Result<Option<Str
         .clone()
         .ok_or("No active company")?;
 
-    match crypto::load_secret_from_keyring(&id) {
-        Ok(secret) => Ok(Some(secret)),
-        Err(e) => {
-            tracing::warn!(company_id = %id, error = %e, "Failed to load secret from keyring");
-            Err(format!("Failed to load secret: {e}"))
-        }
-    }
+    crypto::load_secret_from_keyring(&id).map_err(|e| {
+        tracing::warn!(company_id = %id, error = %e, "Failed to load secret from keyring");
+        format!("Failed to load secret: {e}")
+    })
+}
+
+/// Show the company secret in a native dialog, outside the webview.
+#[tauri::command]
+pub async fn reveal_company_secret(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let secret = load_company_secret_for_admin(&state).await?;
+    app.dialog()
+        .message(format!(
+            "{secret}\n\nAnyone with this secret can join this company. Share it only with your own computers."
+        ))
+        .title("Company secret")
+        .show(|_| {});
+    Ok(())
+}
+
+/// Put the company secret on the system clipboard without passing it through
+/// the webview.
+#[tauri::command]
+pub async fn copy_company_secret(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    let secret = load_company_secret_for_admin(&state).await?;
+    app.clipboard()
+        .write_text(secret)
+        .map_err(|e| format!("Failed to copy secret: {e}"))
 }
 
 #[tauri::command]
@@ -431,7 +462,7 @@ pub async fn add_company_peer(
 
 // ── Peer administration ─────────────────────────────────────
 
-/// Same admin check as `get_company_secret`: only the active company's
+/// Same admin check as the company-secret commands: only the active company's
 /// `admin` role may administer peers.
 fn require_peer_admin(role: &str) -> Result<(), String> {
     if role != "admin" {
