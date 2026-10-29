@@ -545,8 +545,9 @@ export never contained secrets (verified 2026-10-19), and import no longer drops
 fields or revives soft-deleted mappings. The config sections that did nothing are removed.
 Saving config no longer persists environment-sourced secrets, and writes the file
 atomically with `0600` permissions. Untrusted marketplace and plugin HTML no longer runs
-with full IPC access. Secret-returning commands are reachable only from the dedicated
-settings window (N-2.7), and *Gate: security* ticks strict CSP and sanitised `v-html`.
+with full IPC access. No command returns a secret to any webview: stored secrets come back
+masked and the company secret is only shown natively (N-2.7), so Settings lives in the main
+window. *Gate: security* ticks strict CSP and sanitised `v-html`.
 
 Money is now exact: prices are `rust_decimal::Decimal` end to end, stored as decimal text
 by migration 024, so a computed `0.1 + 0.2` goes out as `0.3` (N-6.1). Plugin prices are

@@ -103,11 +103,11 @@ onMounted(() => {
         </button>
       </div>
 
-      <!-- Link to active company peer management (dedicated settings window) -->
+      <!-- Link to active company peer management (Settings > Company) -->
       <button
         v-if="activeCompany"
         class="inline-block mt-4 text-xs text-muted/40 hover:text-muted/60 transition-colors"
-        @click="openSettingsWindow('company')"
+        @click="navigateTo('/settings?tab=company')"
       >
         Manage peers &amp; settings for {{ activeCompany.name }}
       </button>

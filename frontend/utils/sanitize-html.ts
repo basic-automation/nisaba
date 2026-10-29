@@ -5,8 +5,8 @@ import DOMPurify, { type Config as DOMPurifyConfig } from 'dompurify'
  * before it reaches a `v-html` sink.
  *
  * The webview runs with full Tauri IPC access, so a `<script>` tag or an
- * `on*` event handler inside a supplier's description could invoke
- * secret-returning commands (`get_company_secret`, `get_config`). Every
+ * `on*` event handler inside a supplier's description could invoke any app
+ * command (no command returns a secret, but many change data). Every
  * `v-html` binding in the app must go through this function.
  *
  * DOMPurify only runs in the browser; on the server it returns an empty

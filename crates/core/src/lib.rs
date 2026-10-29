@@ -4,6 +4,7 @@ pub mod conflict;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod masked;
 pub mod net_guard;
 pub mod plugins;
 pub mod sync_engine;
