@@ -157,13 +157,31 @@ jobs:
       - name: Commit README screenshots to the PR branch
         # N-12.5: the README embeds these PNGs; they are captured from the real app
         # running the fixture install above, then committed back so they land with
-        # the PR. Regenerating identical PNGs produces no commit, so this step is
-        # self-terminating on the re-triggered run.
+        # the PR. Two captures of an unchanged UI are never pixel-identical (font
+        # rasterising, relative times), so a screenshot is replaced only when more
+        # than 0.5% of its pixels differ beyond a 5% colour fuzz. Without that, every
+        # PR got a bot commit, which needed approval and conflicted with master.
         if: github.event_name == 'pull_request'
         run: |
           mkdir -p docs/images
           for v in dashboard products listings vendors inventory; do
-            cp "ui-smoke/marketplace-$v.png" "docs/images/readme-$v.png"
+            new="ui-smoke/marketplace-$v.png"
+            old="docs/images/readme-$v.png"
+            [ -f "$new" ] || continue
+            if [ -f "$old" ]; then
+              # `compare` exits 1 when images differ, and reports nothing useful when
+              # their sizes differ, so a size change always counts as a change.
+              pixels=$({ compare -metric AE -fuzz 5% "$new" "$old" null: 2>&1 || true; } | awk '{print $1}')
+              total=$(identify -format '%[fx:w*h]' "$new")
+              if [ "$(identify -format '%wx%h' "$new")" = "$(identify -format '%wx%h' "$old")" ] \
+                && [[ "$pixels" =~ ^[0-9.]+(e[-+]?[0-9]+)?$ ]] \
+                && awk -v p="$pixels" -v t="$total" 'BEGIN { exit !(p / t < 0.005) }'; then
+                echo "$v: $pixels of $total pixels differ; under 0.5%, keeping the committed screenshot"
+                continue
+              fi
+            fi
+            echo "$v: changed; updating"
+            cp "$new" "$old"
           done
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
