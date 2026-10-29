@@ -162,6 +162,7 @@ onMounted(() => {
     <!-- Main content column -->
     <div class="flex-1 flex flex-col min-h-0">
       <TitleBar />
+      <SandboxBanner />
       <UpdateBanner />
       <main class="flex-1 overflow-hidden p-6">
         <slot />

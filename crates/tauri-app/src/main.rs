@@ -335,6 +335,7 @@ fn main() {
             commands::auth::complete_ebay_auth,
             commands::auth::get_ebay_broker_url,
             commands::auth::get_amazon_broker_url,
+            commands::auth::get_sandbox_mode,
             commands::auth::start_amazon_auth,
             commands::auth::complete_amazon_auth,
             commands::auth::check_platform_auth,

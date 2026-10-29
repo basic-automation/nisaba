@@ -11,6 +11,21 @@ const NA_BASE_URL: &str = "https://sellingpartnerapi-na.amazon.com";
 const EU_BASE_URL: &str = "https://sellingpartnerapi-eu.amazon.com";
 const FE_BASE_URL: &str = "https://sellingpartnerapi-fe.amazon.com";
 
+/// The SP-API host for a region. Sandbox mode uses Amazon's sandbox host for the same
+/// region, which answers with Amazon's canned test responses (see `nisaba_core::sandbox`).
+fn api_base_for(region: &str, sandbox: bool) -> String {
+    let base = match region.to_uppercase().as_str() {
+        "EU" => EU_BASE_URL,
+        "FE" => FE_BASE_URL,
+        _ => NA_BASE_URL, // Default to NA
+    };
+    if sandbox {
+        base.replacen("https://", "https://sandbox.", 1)
+    } else {
+        base.to_string()
+    }
+}
+
 const LISTINGS_API_VERSION: &str = "2021-08-01";
 
 /// Percent-encode a string for use in URL path segments.
@@ -174,14 +189,10 @@ impl AmazonClient {
             .build()
             .expect("Failed to build HTTP client");
 
-        let api_base = match region.to_uppercase().as_str() {
-            "EU" => EU_BASE_URL,
-            "FE" => FE_BASE_URL,
-            _ => NA_BASE_URL, // Default to NA
+        Self {
+            http,
+            api_base: api_base_for(region, nisaba_core::sandbox::enabled()),
         }
-        .to_string();
-
-        Self { http, api_base }
     }
 
     /// Construct a client pointed at an explicit API base URL. Used by
@@ -594,6 +605,22 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn sandbox_mode_uses_the_regions_sandbox_host() {
+        assert_eq!(
+            api_base_for("na", false),
+            "https://sellingpartnerapi-na.amazon.com"
+        );
+        assert_eq!(
+            api_base_for("EU", true),
+            "https://sandbox.sellingpartnerapi-eu.amazon.com"
+        );
+        assert_eq!(
+            api_base_for("FE", true),
+            "https://sandbox.sellingpartnerapi-fe.amazon.com"
+        );
+    }
     use tokio::net::TcpListener;
 
     /// Read one HTTP/1.1 request (headers + content-length body).

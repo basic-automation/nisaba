@@ -24,6 +24,13 @@ pub fn get_amazon_broker_url() -> String {
     nisaba_core::config::default_amazon_broker_url().to_string()
 }
 
+/// Whether this run talks to the marketplaces' sandboxes (see `nisaba_core::sandbox`), so
+/// the window can say so on every page.
+#[tauri::command]
+pub fn get_sandbox_mode() -> bool {
+    nisaba_core::sandbox::enabled()
+}
+
 /// Which Amazon sign-in attempt is current, so a newer attempt or a cancel silences an
 /// older one that is still waiting for the browser.
 static AMAZON_AUTH_ATTEMPT: AtomicU64 = AtomicU64::new(0);

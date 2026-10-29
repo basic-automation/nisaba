@@ -112,6 +112,18 @@ cargo tauri dev
 `cargo tauri dev` starts the Nuxt dev server itself (port **3456**, chosen to avoid
 conflicts) and then launches the desktop shell against it.
 
+Debug builds run in **sandbox mode**:
+- One-click sign-in goes through the sandbox broker (`nisaba-auth-sandbox.basicautomation.io`, which
+  holds eBay's sandbox keyset and Amazon's sandbox app).
+- eBay and Amazon calls go to their sandbox hosts.
+- Config, catalog and tokens live in a separate `nisaba-sandbox` data folder.
+- A banner says so on every page.
+
+Release builds never do. `NISABA_SANDBOX=0` runs a debug build against the real marketplaces
+and data folder, and `NISABA_SANDBOX=1` turns sandbox mode on in any build. Amazon's SP-API sandbox only
+returns Amazon's canned test responses, so it checks sign-in and request shapes, not real
+listings.
+
 If your global `~/.cargo/config.toml` sets nightly-only flags in `build.rustflags`
 (`-Z threads=8` is a common one), every cargo command here fails with *"the option `Z`
 is only accepted on the nightly compiler"* — the stable pin and those flags cannot
