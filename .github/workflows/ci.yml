@@ -163,6 +163,13 @@ jobs:
         # PR got a bot commit, which needed approval and conflicted with master.
         if: github.event_name == 'pull_request'
         run: |
+          # Switch to the PR branch first, so the comparison is against the branch's own
+          # screenshots and the copies below are not overwritten by the checkout (the run
+          # starts on the merge ref, whose screenshots can differ from the branch's).
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin "${{ github.head_ref }}"
+          git checkout "${{ github.head_ref }}"
           mkdir -p docs/images
           for v in dashboard products listings vendors inventory; do
             new="ui-smoke/marketplace-$v.png"
@@ -183,10 +190,6 @@ jobs:
             echo "$v: changed; updating"
             cp "$new" "$old"
           done
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin "${{ github.head_ref }}"
-          git checkout "${{ github.head_ref }}"
           git add docs/images/readme-*.png
           git diff --cached --quiet || git commit -m "docs: README screenshots captured from the real app on a fixture install (N-12.5)"
           git push origin "HEAD:${{ github.head_ref }}"
