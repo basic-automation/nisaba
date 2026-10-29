@@ -151,8 +151,12 @@ jobs:
               echo "No release exists for $tag" >&2
               exit 1
             fi
+            # Only a semver pre-release tag (v0.3.0-beta.1) is a GitHub pre-release. A
+            # plain version must be a normal release: the updater reads
+            # releases/latest/download/latest.json, and GitHub's "latest" skips
+            # pre-releases, so a pre-release never reaches installed copies.
             prerelease=""
-            [[ "$tag" == v0.* ]] && prerelease="--prerelease"
+            [[ "$tag" == v*-* ]] && prerelease="--prerelease"
             # All three legs race to create it; a loser finds the winner's draft.
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
               $prerelease --title "Nisaba $tag" --generate-notes \
@@ -211,4 +215,8 @@ jobs:
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$work"
           python3 scripts/build-latest-json.py "$work" "$tag" "$GITHUB_REPOSITORY"
           gh release upload "$tag" "$work/latest.json" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          if [[ "$tag" == v*-* ]]; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          else
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi

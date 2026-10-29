@@ -296,8 +296,10 @@ fixes are on the roadmap (Phase 5).
 
 ## Status
 
-Pre-1.0 and under active development — releases are marked pre-release until the sync
-engine has been exercised against all four platforms in production.
+Pre-1.0 and under active development: the sync engine has not yet been exercised against
+all four platforms in production. 0.x releases are published as normal GitHub releases
+(not pre-releases) because the in-app updater only sees GitHub's "latest" release. A
+version with a suffix, such as `v0.3.0-beta.1`, is a pre-release.
 
 [`ROADMAP.md`](ROADMAP.md) is the single source of truth for planned work: a phase-ordered
 checkbox queue covering test coverage, the platform capability gaps, the plugin platform,
