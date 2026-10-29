@@ -5,7 +5,7 @@ import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewW
  *
  * The guide is first-party static HTML shipped in `frontend/public/guide/`
  * (served at `/guide/` from the app's own origin). It is opened in its own
- * webview window so reading docs never navigates the main or settings window
+ * webview window so reading docs never navigates the main window
  * away from the app.
  */
 export const GUIDE_WINDOW_LABEL = 'nisaba-guide'

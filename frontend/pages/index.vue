@@ -171,7 +171,7 @@ function formatEvent(event: any): string {
     >
       <p class="text-xs text-yellow-400/80">
         No platforms configured. Set up your platforms to start syncing inventory.
-        <button class="text-accent hover:text-accent/80 ml-1" @click="openSettingsWindow('config')">Configure Platforms</button>
+        <button class="text-accent hover:text-accent/80 ml-1" @click="navigateTo('/settings?tab=platforms')">Configure Platforms</button>
       </p>
     </div>
 

@@ -63,7 +63,7 @@ function npmTextsFor(name: string, version: string): NpmLicenseText[] {
     <section class="rounded-xl border border-white/10 bg-white/[0.03] p-6">
       <button
         class="text-xs text-accent hover:underline"
-        @click="navigateTo('/about')"
+        @click="navigateTo('/settings?tab=about')"
       >
         ← Back to About
       </button>

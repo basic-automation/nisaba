@@ -7,7 +7,10 @@ const { config, loading, fetchConfig, saveConfig, fetchCompanyConfig, saveCompan
 const { activeCompanyId, activeCompany } = useCompanyContext()
 const { installedPlugins, fetchPlugins, setPluginConfig, getPluginConfig } = useVendors()
 
-const activeTab = ref<'local' | 'company' | 'plugins'>('local')
+// The Settings page owns the tab strip; this panel keeps its edit state (and
+// unsaved changes) across all three of its tabs.
+const props = defineProps<{ tab: 'local' | 'company' | 'plugins' }>()
+const activeTab = computed(() => props.tab)
 const saving = ref(false)
 
 const { notify } = useNotifications()
@@ -222,10 +225,6 @@ watch(activeTab, async (tab) => {
 
 // Re-fetch company config when active company changes
 watch(activeCompanyId, async () => {
-  // If we were on the company tab but lost access, switch back to local
-  if (activeTab.value === 'company' && !showCompanyTab.value) {
-    activeTab.value = 'local'
-  }
   // Re-fetch plugins for the new company
   await fetchPlugins()
   activePluginId.value = ''
@@ -415,8 +414,7 @@ async function handleSaveLocal() {
   }
 }
 
-// N-11.1: re-enter the first-run setup wizard from settings. Runs in the
-// settings window, so the wizard can pre-fill and test saved credentials.
+// N-11.1: re-enter the first-run setup wizard from settings.
 // The onBeforeRouteLeave guard above still prompts on unsaved changes.
 function openSetupWizard() {
   navigateTo({
@@ -424,6 +422,7 @@ function openSetupWizard() {
     query: {
       companyId: activeCompanyId.value ?? '',
       companyName: activeCompany.value?.name ?? '',
+      from: 'settings',
     },
   })
 }
@@ -471,8 +470,7 @@ async function handleToggleDropship(include: boolean) {
 <template>
   <div class="flex flex-col h-full">
     <!-- Header -->
-    <div class="flex items-end justify-between mb-10 shrink-0 max-w-2xl">
-      <h2 class="text-sm font-medium tracking-widest uppercase text-muted/60">Config</h2>
+    <div class="flex items-end justify-end mb-6 shrink-0 max-w-2xl min-h-4">
       <div class="flex items-center gap-4">
         <span v-if="isDirty" class="text-xs text-yellow-400/60">Unsaved changes</span>
         <button
@@ -503,32 +501,6 @@ async function handleToggleDropship(include: boolean) {
           {{ pluginSaving ? 'Saving...' : 'Save' }}
         </button>
       </div>
-    </div>
-
-    <!-- Tabs -->
-    <div class="flex gap-6 mb-10 border-b border-border/20 shrink-0 max-w-2xl">
-      <button
-        class="pb-2 text-xs uppercase tracking-widest transition-colors"
-        :class="activeTab === 'local' ? 'text-accent border-b border-accent' : 'text-muted/40 hover:text-muted/60'"
-        @click="activeTab = 'local'"
-      >
-        Local
-      </button>
-      <button
-        v-if="showCompanyTab"
-        class="pb-2 text-xs uppercase tracking-widest transition-colors"
-        :class="activeTab === 'company' ? 'text-accent border-b border-accent' : 'text-muted/40 hover:text-muted/60'"
-        @click="activeTab = 'company'"
-      >
-        Company
-      </button>
-      <button
-        class="pb-2 text-xs uppercase tracking-widest transition-colors"
-        :class="activeTab === 'plugins' ? 'text-accent border-b border-accent' : 'text-muted/40 hover:text-muted/60'"
-        @click="activeTab = 'plugins'"
-      >
-        Plugins
-      </button>
     </div>
 
     <div class="flex-1 overflow-auto min-h-0 -mr-6 pr-6">

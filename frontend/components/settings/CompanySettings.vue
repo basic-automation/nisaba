@@ -9,7 +9,8 @@ const {
   fetchCompany,
   leaveCompany,
   getOnionAddress,
-  getCompanySecret,
+  revealCompanySecret,
+  copyCompanySecret,
   addPeer,
   removePeer,
   approvePeer,
@@ -27,10 +28,6 @@ const { fetchCompanies } = useCompanyContext()
 const showAddPeer = ref(false)
 const newPeerAddress = ref('')
 const newPeerName = ref('')
-
-// Secret visibility
-const secretVisible = ref(false)
-const companySecret = ref<string | null>(null)
 
 const { notify } = useNotifications()
 
@@ -165,36 +162,20 @@ async function copyToClipboard(text: string) {
   showStatus('Copied to clipboard')
 }
 
-// Copy secret (fetches from backend if not already loaded)
+// The company secret never reaches this webview: Reveal shows it in a native
+// dialog and Copy puts it on the clipboard from the backend.
 async function copySecret() {
   try {
-    const secret = companySecret.value || await getCompanySecret()
-    if (secret) {
-      await navigator.clipboard.writeText(secret)
-      showStatus('Secret copied to clipboard')
-    } else {
-      showStatus('Secret not available', 'error')
-    }
+    await copyCompanySecret()
+    showStatus('Secret copied to clipboard')
   } catch (e: any) {
     showStatus(e?.toString() || 'Failed to copy secret', 'error')
   }
 }
 
-// Reveal secret
 async function revealSecret() {
-  if (secretVisible.value) {
-    secretVisible.value = false
-    companySecret.value = null
-    return
-  }
   try {
-    const secret = await getCompanySecret()
-    if (secret) {
-      companySecret.value = secret
-      secretVisible.value = true
-    } else {
-      showStatus('Secret not available', 'error')
-    }
+    await revealCompanySecret()
   } catch (e: any) {
     showStatus(e?.toString() || 'Failed to retrieve secret', 'error')
   }
@@ -313,10 +294,6 @@ onUnmounted(() => {
 
 <template>
   <div class="flex flex-col h-full">
-    <div class="flex items-end justify-between mb-10 shrink-0 max-w-2xl">
-      <h2 class="text-sm font-medium tracking-widest uppercase text-muted/60">Company</h2>
-    </div>
-
     <div class="flex-1 overflow-auto min-h-0 -mr-6 pr-6">
     <!-- Loading -->
     <div v-if="loading" class="text-xs text-muted/40">Loading...</div>
@@ -408,15 +385,12 @@ onUnmounted(() => {
             <div v-if="isAdmin">
               <label class="block text-[11px] text-muted/40 uppercase tracking-wider mb-1.5">Secret</label>
               <div class="flex items-center gap-3">
-                <span v-if="secretVisible && companySecret" class="text-sm font-mono text-foreground truncate">
-                  {{ companySecret }}
-                </span>
-                <span v-else class="text-sm text-muted/30 font-mono">••••••••••••••••</span>
+                <span class="text-sm text-muted/30 font-mono">••••••••••••••••</span>
                 <button
                   class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors shrink-0"
                   @click="revealSecret"
                 >
-                  {{ secretVisible ? 'Hide' : 'Reveal' }}
+                  Reveal
                 </button>
                 <button
                   class="text-[11px] text-muted/30 hover:text-muted/50 transition-colors shrink-0"
