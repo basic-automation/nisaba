@@ -10,6 +10,7 @@ mod startup;
 mod state;
 #[cfg(test)]
 mod ts_bindings;
+mod wayland;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +81,9 @@ async fn backup_scheduler(handle: tauri::AppHandle, db: Arc<Db>) {
 }
 
 fn main() {
+    // Before anything else: it writes the environment, so no threads yet.
+    wayland::apply_webkit_workaround();
+
     // Install rustls crypto provider before any TLS usage.
     // Both `ring` and `aws-lc-rs` features are enabled (from different deps),
     // so rustls cannot auto-detect — we pick ring explicitly.
