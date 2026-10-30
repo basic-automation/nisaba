@@ -20,10 +20,25 @@ use rust_decimal::Decimal;
 use tracing::{debug, info, warn};
 
 use crate::types::{
-    EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion, EbayCreateAmount,
-    EbayCreateItemAvailability, EbayCreateItemProduct, EbayCreateItemRequest,
+    pick_merchant_location, EbayAspectMetadata, EbayBusinessPolicy, EbayCategorySuggestion,
+    EbayCreateAmount, EbayCreateItemAvailability, EbayCreateItemProduct, EbayCreateItemRequest,
     EbayCreateOfferPricing, EbayCreateOfferRequest, EbayListingPolicies, ShipToLocationUpdate,
 };
+
+/// eBay's limit on SKU length.
+const MAX_SKU_LEN: usize = 50;
+
+/// A SKU for a listing created without one: the title's safe characters, cut short
+/// enough that `-<millis>` still fits within eBay's 50-character limit.
+fn generated_sku(title: &str, millis: i64) -> String {
+    let suffix = format!("-{millis}");
+    let stem: String = title
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(MAX_SKU_LEN - suffix.len())
+        .collect();
+    format!("{stem}{suffix}")
+}
 
 use crate::auth::EbayAuth;
 use crate::client::EbayClient;
@@ -305,8 +320,13 @@ impl PlatformAdapter for EbayAdapter {
         let mut listings: Vec<PlatformListing> =
             inv_items.iter().map(mapping::to_listing).collect();
 
-        // Fetch all offers to get prices for inventory items
-        match self.client.fetch_all_offers(&token).await {
+        // Prices live on offers, which eBay only returns per SKU.
+        let unpriced: Vec<String> = listings
+            .iter()
+            .filter(|l| l.price.is_none())
+            .map(|l| l.platform_item_id.clone())
+            .collect();
+        match self.client.fetch_offers_for_skus(&token, &unpriced).await {
             Ok(offers) => {
                 // Build SKU → price map from offers
                 let mut sku_prices: std::collections::HashMap<String, Decimal> =
@@ -657,14 +677,29 @@ impl PlatformAdapter for EbayAdapter {
 
         // Use the provided SKU, or generate one from the title
         let sku = request.sku.clone().unwrap_or_else(|| {
-            let sanitized: String = request
-                .title
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                .take(50)
-                .collect();
-            format!("{}-{}", sanitized, chrono::Utc::now().timestamp_millis())
+            generated_sku(&request.title, chrono::Utc::now().timestamp_millis())
         });
+
+        // Resolve the ship-from location before creating anything on eBay, so a seller
+        // without one gets a clear error instead of a half-created item.
+        let locations = match request.extras.get("ebay_merchant_location_key") {
+            Some(_) => Vec::new(),
+            None => self.client.fetch_inventory_locations(&token).await?,
+        };
+        let merchant_location_key = pick_merchant_location(
+            request
+                .extras
+                .get("ebay_merchant_location_key")
+                .map(String::as_str),
+            &locations,
+        )
+        .ok_or_else(|| SyncError::ApiError {
+            platform: Platform::Ebay,
+            message: "This eBay account has no inventory location, and eBay will not publish \
+                      a listing without one. Add a ship-from location in eBay Seller Hub, then \
+                      try again."
+                .into(),
+        })?;
 
         // Parse extras for eBay-specific fields
         let condition = request
@@ -748,6 +783,7 @@ impl PlatformAdapter for EbayAdapter {
                 return_policy_id,
             },
             category_id,
+            merchant_location_key,
         };
 
         let offer_id = self.client.create_offer(&token, &offer_request).await?;
@@ -783,6 +819,41 @@ impl PlatformAdapter for EbayAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EbayInventoryLocation;
+
+    fn location(key: &str, status: &str) -> EbayInventoryLocation {
+        EbayInventoryLocation {
+            merchant_location_key: key.to_string(),
+            merchant_location_status: Some(status.to_string()),
+        }
+    }
+
+    #[test]
+    fn merchant_location_prefers_the_requested_then_the_first_enabled() {
+        let locs = [location("old", "DISABLED"), location("wh", "ENABLED")];
+        assert_eq!(
+            pick_merchant_location(Some("chosen"), &locs).as_deref(),
+            Some("chosen")
+        );
+        assert_eq!(pick_merchant_location(None, &locs).as_deref(), Some("wh"));
+        assert_eq!(
+            pick_merchant_location(Some(""), &locs).as_deref(),
+            Some("wh")
+        );
+        assert_eq!(
+            pick_merchant_location(None, &[location("only", "DISABLED")]).as_deref(),
+            Some("only")
+        );
+        assert_eq!(pick_merchant_location(None, &[]), None);
+    }
+
+    #[test]
+    fn generated_sku_stays_within_ebays_limit() {
+        let sku = generated_sku(&"Very Long Title ".repeat(10), 1_793_000_000_000);
+        assert!(sku.len() <= MAX_SKU_LEN, "{} chars: {sku}", sku.len());
+        assert!(sku.ends_with("-1793000000000"), "{sku}");
+        assert_eq!(generated_sku("Canteen, 1 qt!", 7), "Canteen1qt-7");
+    }
 
     fn test_config() -> EbayConfig {
         EbayConfig {
@@ -1026,6 +1097,138 @@ mod tests {
         assert!(
             err.to_string().to_lowercase().contains("token") || err.to_string().contains("expired"),
             "error should name the token problem, got: {err}"
+        );
+    }
+
+    /// Prices come from one getOffers call per SKU; eBay rejects the call without `sku`.
+    #[tokio::test]
+    async fn listings_get_prices_from_per_sku_offer_lookups() {
+        let (base, captured) = spawn_routing_server(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/sell/inventory/v1/inventory_item") {
+                (
+                    200,
+                    r#"{"inventoryItems":[{"sku":"BAG-1","product":{"title":"Bag"}},{"sku":"CAN-2","product":{"title":"Canteen"}}],"total":2}"#
+                        .to_string(),
+                )
+            } else if line.contains("/sell/inventory/v1/offer?sku=BAG-1") {
+                (
+                    200,
+                    r#"{"offers":[{"offerId":"o1","sku":"BAG-1","pricingSummary":{"price":{"value":"29.99","currency":"USD"}}}],"total":1}"#
+                        .to_string(),
+                )
+            } else if line.contains("/sell/inventory/v1/offer?sku=") {
+                (200, r#"{"offers":[],"total":0}"#.to_string())
+            } else if line.contains("/sell/inventory/v1/offer") {
+                (400, r#"{"errors":[{"errorId":25707}]}"#.to_string())
+            } else {
+                (404, "{}".to_string())
+            }
+        })
+        .await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let listings = adapter.fetch_all_listings().await.expect("listings");
+
+        let bag = listings
+            .iter()
+            .find(|l| l.platform_item_id == "BAG-1")
+            .unwrap();
+        assert_eq!(bag.price, Some(Decimal::new(2999, 2)));
+        let canteen = listings
+            .iter()
+            .find(|l| l.platform_item_id == "CAN-2")
+            .unwrap();
+        assert_eq!(canteen.price, None);
+
+        let requests = captured.lock().unwrap();
+        let offer_lines: Vec<&str> = requests
+            .iter()
+            .filter_map(|r| r.lines().next())
+            .filter(|l| l.contains("/sell/inventory/v1/offer"))
+            .collect();
+        assert_eq!(offer_lines.len(), 2, "{offer_lines:?}");
+        assert!(
+            offer_lines.iter().all(|l| l.contains("sku=")),
+            "{offer_lines:?}"
+        );
+    }
+
+    fn create_request() -> CreateListingRequest {
+        CreateListingRequest {
+            title: "Canteen".to_string(),
+            description_html: None,
+            sku: Some("CAN-2".to_string()),
+            quantity: 4,
+            price: Some(ListingPrice {
+                amount: Decimal::new(1950, 2),
+                currency: "USD".to_string(),
+            }),
+            photo_urls: Vec::new(),
+            extras: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The offer carries the seller's enabled inventory location, so it can be published.
+    #[tokio::test]
+    async fn create_listing_puts_an_inventory_location_on_the_offer() {
+        let (base, captured) = spawn_routing_server(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET") && line.contains("/sell/inventory/v1/location") {
+                (
+                    200,
+                    r#"{"locations":[{"merchantLocationKey":"old","merchantLocationStatus":"DISABLED"},{"merchantLocationKey":"wh","merchantLocationStatus":"ENABLED"}]}"#
+                        .to_string(),
+                )
+            } else if line.contains("/publish") {
+                (200, r#"{"listingId":"110000"}"#.to_string())
+            } else if line.starts_with("POST") && line.contains("/sell/inventory/v1/offer") {
+                (201, r#"{"offerId":"o9"}"#.to_string())
+            } else {
+                (204, String::new())
+            }
+        })
+        .await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        adapter
+            .create_listing(create_request())
+            .await
+            .expect("create");
+
+        let requests = captured.lock().unwrap();
+        let offer = requests
+            .iter()
+            .find(|r| {
+                r.starts_with("POST") && r.lines().next().unwrap().ends_with("/offer HTTP/1.1")
+            })
+            .expect("offer POST");
+        let body = offer.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(
+            body.contains(r#""merchantLocationKey":"wh""#),
+            "body: {body}"
+        );
+    }
+
+    /// With no location at all, nothing is created on eBay and the error says what to do.
+    #[tokio::test]
+    async fn create_listing_without_a_location_fails_before_writing() {
+        let (base, captured) = spawn_routing_server(|req| {
+            if req.starts_with("GET") {
+                (200, r#"{"locations":[]}"#.to_string())
+            } else {
+                (204, String::new())
+            }
+        })
+        .await;
+        let (adapter, _dir) = adapter_for_server(base).await;
+        let err = adapter
+            .create_listing(create_request())
+            .await
+            .expect_err("no location must be Err");
+        assert!(err.to_string().contains("inventory location"), "got: {err}");
+        let requests = captured.lock().unwrap();
+        assert!(
+            requests.iter().all(|r| r.starts_with("GET")),
+            "nothing may be written: {requests:?}"
         );
     }
 }

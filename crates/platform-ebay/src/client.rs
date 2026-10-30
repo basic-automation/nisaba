@@ -293,6 +293,7 @@ pub fn build_offer_put_body(
     Ok(body)
 }
 
+#[derive(Clone)]
 pub struct EbayClient {
     http: Client,
     api_base: String,
@@ -743,73 +744,84 @@ impl EbayClient {
         Ok(all_offers)
     }
 
-    /// Fetch all offers across all SKUs (for bulk price lookup).
-    pub async fn fetch_all_offers(&self, access_token: &str) -> Result<Vec<EbayOffer>, SyncError> {
+    /// Fetch the offers for each of `skus`, a few SKUs at a time.
+    ///
+    /// eBay's getOffers requires a `sku` (without one it answers 400, error 25707), so
+    /// there is no single call that lists every offer. A SKU whose lookup fails is left
+    /// out of the result and logged; an expired token aborts the whole lookup.
+    pub async fn fetch_offers_for_skus(
+        &self,
+        access_token: &str,
+        skus: &[String],
+    ) -> Result<Vec<EbayOffer>, SyncError> {
+        const CONCURRENT: usize = 8;
         let mut all_offers = Vec::new();
-        let mut offset = 0;
-        let limit = 100;
-        let mut next_url: Option<String> = None;
-
-        loop {
-            let url = next_url.take().unwrap_or_else(|| {
-                format!(
-                    "{}/sell/inventory/v1/offer?limit={}&offset={}",
-                    self.api_base, limit, offset
-                )
-            });
-
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(access_token)
-                .header("Content-Language", "en-US")
-                .send()
-                .await
-                .map_err(|e| SyncError::NetworkError {
-                    platform: Platform::Ebay,
-                    message: e.to_string(),
-                })?;
-
-            let status = resp.status();
-            if status.as_u16() == 401 {
-                return Err(SyncError::AuthError {
-                    platform: Platform::Ebay,
-                    message: "Access token expired".into(),
+        for chunk in skus.chunks(CONCURRENT) {
+            let mut set = tokio::task::JoinSet::new();
+            for sku in chunk {
+                let client = self.clone();
+                let token = access_token.to_string();
+                let sku = sku.clone();
+                set.spawn(async move {
+                    let offers = client.fetch_offers(&token, &sku).await;
+                    (sku, offers)
                 });
             }
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(SyncError::ApiError {
-                    platform: Platform::Ebay,
-                    message: format!("Fetch all offers failed ({status}): {body}"),
-                });
-            }
-
-            let response: EbayOffersResponse =
-                resp.json().await.map_err(|e| SyncError::ApiError {
-                    platform: Platform::Ebay,
-                    message: format!("Failed to parse offers response: {e}"),
-                })?;
-
-            let next = response.next.clone();
-            let offers = response.offers.unwrap_or_default();
-            let count = offers.len();
-            all_offers.extend(offers);
-
-            let total = response.total.unwrap_or(0) as usize;
-            offset += count;
-
-            if let Some(next) = next_page_url(next.as_deref(), &url) {
-                next_url = Some(next);
-                continue;
-            }
-            if offset >= total || count == 0 {
-                break;
+            while let Some(joined) = set.join_next().await {
+                let Ok((sku, offers)) = joined else { continue };
+                match offers {
+                    Ok(offers) => all_offers.extend(offers),
+                    Err(e @ SyncError::AuthError { .. }) => return Err(e),
+                    Err(e) => debug!(sku = %sku, "No offers for SKU: {e}"),
+                }
             }
         }
-
-        debug!(count = all_offers.len(), "Fetched all eBay offers");
+        debug!(
+            skus = skus.len(),
+            count = all_offers.len(),
+            "Fetched eBay offers by SKU"
+        );
         Ok(all_offers)
+    }
+
+    /// List the seller's inventory locations (first page of up to 100).
+    pub async fn fetch_inventory_locations(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<EbayInventoryLocation>, SyncError> {
+        let url = format!("{}/sell/inventory/v1/location?limit=100", self.api_base);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| SyncError::NetworkError {
+                platform: Platform::Ebay,
+                message: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if status.as_u16() == 401 {
+            return Err(SyncError::AuthError {
+                platform: Platform::Ebay,
+                message: "Access token expired".into(),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Fetch inventory locations failed ({status}): {body}"),
+            });
+        }
+
+        let response: EbayInventoryLocationsResponse =
+            resp.json().await.map_err(|e| SyncError::ApiError {
+                platform: Platform::Ebay,
+                message: format!("Failed to parse inventory locations response: {e}"),
+            })?;
+        Ok(response.locations.unwrap_or_default())
     }
 
     /// Update an inventory item's description via PUT (full replace).
