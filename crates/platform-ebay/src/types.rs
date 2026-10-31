@@ -353,6 +353,41 @@ pub struct EbayCreateOfferRequest {
     pub listing_policies: EbayListingPolicies,
     #[serde(rename = "categoryId", skip_serializing_if = "Option::is_none")]
     pub category_id: Option<String>,
+    /// eBay refuses to publish an offer that has no inventory location.
+    #[serde(rename = "merchantLocationKey")]
+    pub merchant_location_key: String,
+}
+
+/// One entry from `GET /sell/inventory/v1/location`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EbayInventoryLocation {
+    #[serde(rename = "merchantLocationKey")]
+    pub merchant_location_key: String,
+    #[serde(rename = "merchantLocationStatus", default)]
+    pub merchant_location_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EbayInventoryLocationsResponse {
+    #[serde(default)]
+    pub locations: Option<Vec<EbayInventoryLocation>>,
+}
+
+/// The location a new offer ships from: the one the caller named, else the first
+/// enabled location, else the first location of any status. `None` when the seller
+/// has none at all.
+pub fn pick_merchant_location(
+    requested: Option<&str>,
+    locations: &[EbayInventoryLocation],
+) -> Option<String> {
+    if let Some(key) = requested.filter(|k| !k.is_empty()) {
+        return Some(key.to_string());
+    }
+    locations
+        .iter()
+        .find(|l| l.merchant_location_status.as_deref() == Some("ENABLED"))
+        .or_else(|| locations.first())
+        .map(|l| l.merchant_location_key.clone())
 }
 
 #[derive(Debug, Serialize)]
